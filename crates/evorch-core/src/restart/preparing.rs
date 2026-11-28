@@ -17,12 +17,12 @@ const OBSERVATION_PAUSE: std::time::Duration = std::time::Duration::from_millis(
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Observed {
     Begun(RestartAttempt),
-    Cancel,
+    Cancel(PreparationFailure, Option<RunId>),
     Again,
 }
 
 impl RestartCoordinator {
-    async fn prepare_drains(&self, id: RestartId) -> Result<Option<RestartAttempt>, RuntimeError> {
+    async fn prepare_drains(&self, id: RestartId) -> Result<Observed, RuntimeError> {
         self.0.preparing.evaluations.producers.drained().await;
         self.0
             .preparing
@@ -37,7 +37,7 @@ impl RestartCoordinator {
             }
             let deadline = state.preparation_deadline.unwrap();
             if tokio::time::Instant::now() >= deadline {
-                return Ok(None);
+                return Ok(Observed::Cancel(PreparationFailure::Deadline, None));
             }
             // Runtime registers each entry before acquiring its learning permit.
             // Pausing therefore fixes all admitted pipelines in this cohort;
@@ -52,6 +52,7 @@ impl RestartCoordinator {
                     .map_err(|reason| RuntimeError::Model { reason })?,
             );
             state.suspension = Some(suspension.clone());
+            state.preparation_stage = PreparationStage::LearningDrain;
             self.publish(&mut state, RestartPhase::PreparingDrains);
             (suspension, deadline, cohort_deadline)
         };
@@ -61,21 +62,26 @@ impl RestartCoordinator {
             .await
             .map_err(|reason| RuntimeError::Model { reason })?
         {
-            LearningSuspendWait::DeadlineExceeded => return Ok(None),
+            LearningSuspendWait::DeadlineExceeded => {
+                return Ok(Observed::Cancel(PreparationFailure::Deadline, None));
+            }
             LearningSuspendWait::Complete => {}
         }
         // A run changing state while the recipes are observed is ordinary: the
         // whole observation starts again from the same checks (no gate, park,
         // capture or transaction exists yet). It is bounded in count and by the
         // request's own deadline; past either the request is cancelled.
+        self.preparation_stage(id, PreparationStage::RecipeObservation);
         for _ in 0..OBSERVATION_ATTEMPTS {
             match self.observe_and_begin(id, deadline).await? {
-                Observed::Begun(attempt) => return Ok(Some(attempt)),
-                Observed::Cancel => return Ok(None),
                 Observed::Again => tokio::time::sleep(OBSERVATION_PAUSE).await,
+                result => return Ok(result),
             }
         }
-        Ok(None)
+        Ok(Observed::Cancel(
+            PreparationFailure::ObservationExhausted,
+            None,
+        ))
     }
 
     /// One pass of recipe observation, DB preflight and the begin of the
@@ -91,7 +97,7 @@ impl RestartCoordinator {
                 return Err(RuntimeError::RestartBusy);
             }
             if tokio::time::Instant::now() >= deadline {
-                return Ok(Observed::Cancel);
+                return Ok(Observed::Cancel(PreparationFailure::Deadline, None));
             }
             state.recipes.clone()
         };
@@ -102,28 +108,53 @@ impl RestartCoordinator {
         #[cfg(target_os = "linux")]
         let mut recipe_observation = None;
         #[cfg(target_os = "linux")]
-        if let Some(source) = &source {
+        if let Some(expected) = &source {
+            if !expected.bindings.is_current() {
+                return Ok(Observed::Cancel(PreparationFailure::BindingChanged, None));
+            }
             let observation = self.0.runtime.observe_restart_recipes();
             // This is still reversible: no host Preparing gate, park or tx.
             // Reject the whole request, not only the newly unsupported member.
-            let observed = match source.collect().await {
+            if let Err(error) = self
+                .0
+                .runtime
+                .check_restart_preflight_authority(&expected.preflight)
+            {
+                return Ok(observation_failure(&error));
+            }
+            let observed = match expected.source.collect().await {
                 Ok(observed) => observed,
-                Err(e) if e.code == workbench_protocol::errors::ErrorCode::Conflict => {
+                Err(e) if super::public::ordinary_recipe_progress(&e) => {
                     return Ok(Observed::Again);
                 }
-                Err(_) => return Ok(Observed::Cancel),
+                Err(error) => {
+                    use workbench_protocol::errors::ErrorCode;
+                    let reason = match error.code {
+                        ErrorCode::Conflict => PreparationFailure::BindingChanged,
+                        ErrorCode::StorageUnavailable | ErrorCode::Busy => {
+                            PreparationFailure::Storage
+                        }
+                        _ => PreparationFailure::RecipeUnavailable,
+                    };
+                    return Ok(Observed::Cancel(reason, None));
+                }
             };
-            if !observed.bindings.is_current() {
-                return Ok(Observed::Again);
+            if !expected.bindings.same_revision(&observed.bindings)
+                || expected.ledgers != observed.ledgers
+            {
+                return Ok(Observed::Cancel(PreparationFailure::BindingChanged, None));
             }
             // The members and what is done with each are fixed by the request. A
             // member's restore descriptor is not: it moves on whenever the run
             // finishes a turn, and the capture must restore the run as it is now.
             let Some(requested) = recipes.as_mut() else {
-                return Ok(Observed::Cancel);
+                return Ok(Observed::Cancel(
+                    PreparationFailure::RecipeUnavailable,
+                    None,
+                ));
             };
             if !same_members(requested, &observed.recipes) {
-                return Ok(Observed::Cancel);
+                return Ok(Observed::Cancel(PreparationFailure::MemberChanged, None));
             }
             if *requested != observed.recipes {
                 let mut state = self.0.state.lock().unwrap();
@@ -159,7 +190,7 @@ impl RestartCoordinator {
             if source.is_some() {
                 match &result {
                     Err(RuntimeError::RestartObservationChanged) => return Ok(Observed::Again),
-                    Err(_) => return Ok(Observed::Cancel),
+                    Err(error) => return Ok(observation_failure(error)),
                     Ok(_) => {}
                 }
             }
@@ -167,15 +198,31 @@ impl RestartCoordinator {
         } else {
             None
         };
+        #[cfg(target_os = "linux")]
+        let ledger_fence = if let Some(source) = &source {
+            match source.source.verify_ledgers(source.ledgers.clone()).await {
+                Ok(fence) => fence,
+                Err(error) => {
+                    let reason = if error.code == workbench_protocol::errors::ErrorCode::Conflict {
+                        PreparationFailure::BindingChanged
+                    } else {
+                        PreparationFailure::Storage
+                    };
+                    return Ok(Observed::Cancel(reason, None));
+                }
+            }
+        } else {
+            None
+        };
         let begin = || {
-            // Binding -> coordinator -> runtime registration locks use the same
+            // Ledger -> binding -> coordinator -> runtime registration locks use the same
             // order as commit. No I/O/await lies inside this final transition.
             let mut state = self.0.state.lock().unwrap();
             if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
                 return Err(RuntimeError::RestartBusy);
             }
             if tokio::time::Instant::now() >= deadline {
-                return Ok(Observed::Cancel);
+                return Ok(Observed::Cancel(PreparationFailure::Deadline, None));
             }
             let attempt = if let Some(preflight) = preflight {
                 self.0.runtime.begin_preflighted_restart_quiesce(preflight)
@@ -186,7 +233,7 @@ impl RestartCoordinator {
             if source.is_some() {
                 match &attempt {
                     Err(RuntimeError::RestartObservationChanged) => return Ok(Observed::Again),
-                    Err(_) => return Ok(Observed::Cancel),
+                    Err(error) => return Ok(observation_failure(error)),
                     Ok(_) => {}
                 }
             }
@@ -203,7 +250,13 @@ impl RestartCoordinator {
         if let Some(bindings) = binding_observation {
             // Runtime's existing registration exclusion covers new live members;
             // this guard independently excludes host binding publication.
-            return bindings.with_current(begin).unwrap_or(Ok(Observed::Again));
+            let changed = || Ok(Observed::Cancel(PreparationFailure::BindingChanged, None));
+            let commit = || bindings.with_current(begin).unwrap_or_else(changed);
+            return match ledger_fence {
+                Some(fence) => fence.with_current(commit).unwrap_or_else(changed),
+                None if source.as_ref().is_none_or(|p| p.ledgers.is_empty()) => commit(),
+                None => changed(),
+            };
         }
         begin()
     }
@@ -228,15 +281,25 @@ impl RestartCoordinator {
             }
         };
         match drained {
-            Ok(Ok(Some(attempt))) => self.drive(id, attempt).await,
-            Ok(Ok(None)) | Err(_) => {
-                let _ = self.cancel(id);
-            }
-            Ok(Err(_)) => {
+            Ok(Ok(Observed::Begun(attempt))) => self.drive(id, attempt).await,
+            Ok(Ok(Observed::Cancel(reason, run))) => self.cancel_for_failure(id, reason, run),
+            Err(_) => self.cancel_for_failure(id, PreparationFailure::Deadline, None),
+            Ok(Ok(Observed::Again)) => unreachable!("observation loop returns a terminal result"),
+            Ok(Err(error)) => {
                 let mut state = self.0.state.lock().unwrap();
                 if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
                     return;
                 }
+                let reason = if self.0.runtime.check_restart_preparation().is_err() {
+                    PreparationFailure::Storage
+                } else {
+                    PreparationFailure::DrainFailed
+                };
+                let run = match error {
+                    RuntimeError::RestartRunUnavailable { run_id, .. } => Some(run_id),
+                    _ => None,
+                };
+                self.record_preparation_failure(&mut state, reason, run);
                 state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
                 self.0
                     .gate
@@ -249,7 +312,7 @@ impl RestartCoordinator {
 
 /// Same runs with the same policy, goal, team and lane; descriptors may differ.
 #[cfg(target_os = "linux")]
-fn same_members(left: &public::Recipes, right: &public::Recipes) -> bool {
+pub(super) fn same_members(left: &public::Recipes, right: &public::Recipes) -> bool {
     let stripped = |recipes: &public::Recipes| {
         let mut recipes = recipes.clone();
         recipes
@@ -259,4 +322,17 @@ fn same_members(left: &public::Recipes, right: &public::Recipes) -> bool {
     };
     let left = stripped(left);
     left.is_some() && left == stripped(right)
+}
+
+#[cfg(target_os = "linux")]
+fn observation_failure(error: &RuntimeError) -> Observed {
+    match error {
+        RuntimeError::RestartAuthorityChanged { run_id } => {
+            Observed::Cancel(PreparationFailure::MemberChanged, Some(*run_id))
+        }
+        RuntimeError::RestartRunUnavailable { run_id, .. } => {
+            Observed::Cancel(PreparationFailure::RecipeUnavailable, Some(*run_id))
+        }
+        _ => Observed::Cancel(PreparationFailure::Storage, None),
+    }
 }

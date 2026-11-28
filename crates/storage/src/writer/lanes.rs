@@ -39,6 +39,16 @@ impl StorageHandle {
         Self::retain_failed_admission(&mut admission, &outcome);
         outcome
     }
+    /// Writer jobs changing archive, lineage or lane authority. The stamp is not
+    /// held during I/O; the write is marked in flight until the transaction returns.
+    pub(crate) fn thread_ledger_job<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Connection) -> Result<T, StorageError> + Send + 'static,
+    ) -> Result<T, StorageError> {
+        let clock = self.thread_ledger_clock().clone();
+        self.lane_job(true, move |conn| clock.write(|| work(conn)))
+    }
+
     /// A lane job without a foreground admission: the caller registers one, or the work is
     /// not a foreground intent (the gate stamps are not moved by it).
     pub(crate) fn activity_job<T: Send + 'static>(
@@ -73,7 +83,7 @@ impl StorageHandle {
     /// different brief, an ID owned by another lane, a tombstoned thread or run,
     /// suspended writes or a closed writer.
     pub fn create_lane(&self, new: NewLane) -> Result<LaneCreation, StorageError> {
-        self.lane_write(move |conn| crate::repo::lanes::create(conn, &new))
+        self.thread_ledger_job(move |conn| crate::repo::lanes::create(conn, &new))
     }
 
     /// Records a root start or restart: the generation moves from
@@ -92,7 +102,7 @@ impl StorageHandle {
         at_ns: i64,
     ) -> Result<LaneRecord, StorageError> {
         let (lane_id, root_run_id) = (lane_id.to_owned(), root_run_id.to_owned());
-        self.lane_write(move |conn| {
+        self.thread_ledger_job(move |conn| {
             crate::repo::lanes::start_run(conn, &lane_id, expected_generation, &root_run_id, at_ns)
         })
     }

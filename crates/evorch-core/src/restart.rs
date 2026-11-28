@@ -14,6 +14,10 @@ use workbench_host::bootstrap::{
     restart::{HostRestartGate, HostRestartPhase, RestartStopHandler, SealedRestart},
 };
 
+mod diagnostic;
+pub use diagnostic::{
+    PreparationCause, PreparationDiagnostic, PreparationFailure, PreparationStage,
+};
 mod finalization;
 #[cfg(target_os = "linux")]
 pub use finalization::FinalizationEnvironment;
@@ -87,7 +91,7 @@ struct State {
     finalization:
         Option<Arc<tokio::sync::Mutex<workbench_host::bootstrap::planned_exit::PlannedExit>>>,
     #[cfg(target_os = "linux")]
-    recipe_source: Option<Arc<dyn public::RecipeSource>>,
+    recipe_source: Option<Arc<public::RecipeSourceProof>>,
     capture_started: bool,
     finalization_id: Option<RestartId>,
     finalization_done: bool,
@@ -98,6 +102,9 @@ struct State {
     evaluation_pause: Option<ProducerPause>,
     preparation_deadline: Option<tokio::time::Instant>,
     cancel_reason: Option<RestartCancelReason>,
+    preparation_stage: PreparationStage,
+    operation: Option<workbench_protocol::namespaces::lifecycle::AdminId>,
+    diagnostics: std::collections::VecDeque<PreparationDiagnostic>,
 }
 #[cfg(test)]
 type PreflightHook = Arc<dyn Fn(RestartId) + Send + Sync>;
@@ -195,6 +202,9 @@ impl RestartCoordinator {
                 evaluation_pause: None,
                 preparation_deadline: None,
                 cancel_reason: None,
+                preparation_stage: PreparationStage::EvaluationDrain,
+                operation: None,
+                diagnostics: Default::default(),
             }),
             changed: watch::channel(0).0,
             #[cfg(test)]
@@ -268,14 +278,15 @@ impl RestartCoordinator {
         recipes: Option<std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>>,
         preparation_limit: std::time::Duration,
     ) -> Result<RestartId, RuntimeError> {
-        self.request_with_source(recipes, preparation_limit, None)
+        self.request_with_source(recipes, preparation_limit, None, None)
     }
     fn request_with_source(
         &self,
         recipes: Option<std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>>,
         preparation_limit: std::time::Duration,
-        #[cfg(target_os = "linux")] recipe_source: Option<Arc<dyn public::RecipeSource>>,
+        #[cfg(target_os = "linux")] recipe_source: Option<Arc<public::RecipeSourceProof>>,
         #[cfg(not(target_os = "linux"))] _: Option<()>,
+        operation: Option<workbench_protocol::namespaces::lifecycle::AdminId>,
     ) -> Result<RestartId, RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if matches!(
@@ -323,6 +334,8 @@ impl RestartCoordinator {
             generation: state.generation,
         };
         state.id = Some(id);
+        state.operation = operation;
+        state.preparation_stage = PreparationStage::EvaluationDrain;
         state.recipes = recipes;
         #[cfg(target_os = "linux")]
         {
@@ -346,9 +359,11 @@ impl RestartCoordinator {
         id: RestartId,
         attempt: &RestartAttempt,
     ) -> Result<SealedRestart, RuntimeError> {
+        self.preparation_stage(id, PreparationStage::ProducerDrain);
         for producer in &self.0.producers {
             producer.drained().await;
         }
+        self.preparation_stage(id, PreparationStage::SafePoints);
         let _ = self
             .0
             .runtime
@@ -365,12 +380,14 @@ impl RestartCoordinator {
                 .transition(id.generation, HostRestartPhase::Sealing);
             self.publish(&mut state, RestartPhase::Sealing);
         }
+        self.preparation_stage(id, PreparationStage::HostDrain);
         self.0.gate.drained().await;
         #[cfg(test)]
         if let Some(hook) = self.0.after_host_drain.lock().unwrap().take() {
             hook();
         }
         // Accepted inputs may invalidate an ACK: re-evaluate after ingress drained.
+        self.preparation_stage(id, PreparationStage::SafePoints);
         let fence = self
             .0
             .runtime
@@ -382,7 +399,9 @@ impl RestartCoordinator {
                 return Err(RuntimeError::RestartBusy);
             }
         }
+        self.preparation_stage(id, PreparationStage::DispatchTailDrain);
         self.0.runtime.drain_dispatch_tails(&fence).await?;
+        self.preparation_stage(id, PreparationStage::LearningDrain);
         self.0
             .runtime
             .drain_learning_for_restart()
@@ -392,6 +411,7 @@ impl RestartCoordinator {
         if pending > 0 {
             return Err(RuntimeError::RestartRefusedByApprovals { pending });
         }
+        self.preparation_stage(id, PreparationStage::StorageSeal);
         self.0
             .gate
             .sealed(&self.0.runtime, id.generation, fence)
@@ -423,6 +443,12 @@ impl RestartCoordinator {
                 self.reopened(state);
             }
             Status::Failed | Status::Superseded => {
+                let reason = if self.0.runtime.check_restart_preparation().is_err() {
+                    PreparationFailure::Storage
+                } else {
+                    PreparationFailure::DrainFailed
+                };
+                self.record_preparation_failure(state, reason, None);
                 state.worker = None;
                 state.sealed = None;
                 self.0
@@ -485,7 +511,7 @@ impl RestartCoordinator {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline), if !expired => {
                     expired = true;
-                    let _ = self.cancel(id);
+                    self.cancel_for_failure(id, PreparationFailure::Deadline, None);
                 }
                 pending = approval_raised(&self.0.runtime), if !refused => {
                     refused = true;
@@ -509,7 +535,18 @@ impl RestartCoordinator {
                                 Err(error) => {
                                     // A concurrent direct Stop may have invalidated prepare.
                                     // Atomically fail only an active attempt, then observe again.
-                                    let _ = self.0.runtime.fail_restart_attempt(&attempt, error);
+                                    let reason = if state.preparation_stage == PreparationStage::StorageSeal
+                                        || self.0.runtime.check_restart_preparation().is_err()
+                                    {
+                                        PreparationFailure::Storage
+                                    } else {
+                                        PreparationFailure::DrainFailed
+                                    };
+                                    // If Stop already won, synchronize without attributing
+                                    // the obsolete prepare result to a drain failure.
+                                    if self.0.runtime.fail_restart_attempt(&attempt, error).is_ok() {
+                                        self.record_preparation_failure(&mut state, reason, None);
+                                    }
                                     self.synchronize_attempt(&mut state, &attempt);
                                     None
                                 }
@@ -571,6 +608,7 @@ impl RestartCoordinator {
     }
     fn reopened(&self, state: &mut State) {
         if self.0.runtime.check_restart_preparation().is_err() {
+            self.record_preparation_failure(state, PreparationFailure::Storage, None);
             state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
             self.0
                 .gate
@@ -588,6 +626,8 @@ impl RestartCoordinator {
                 self.0.runtime.resume_learning(pause)
             };
             if !restored {
+                state.preparation_stage = PreparationStage::LearningDrain;
+                self.record_preparation_failure(state, PreparationFailure::DrainFailed, None);
                 state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
                 self.0
                     .gate
@@ -602,7 +642,14 @@ impl RestartCoordinator {
         for (producer, pause) in self.0.producers.iter().zip(state.pauses.drain(..)) {
             producer.resume(pause);
         }
+        self.record_preparation_failure(state, PreparationFailure::Cancelled, None);
+        if let Some(diagnostic) = state.diagnostics.back_mut()
+            && Some(diagnostic.attempt) == state.id
+        {
+            diagnostic.retryable = true;
+        }
         state.id = None;
+        state.operation = None;
         state.attempt = None;
         state.recipes = None;
         #[cfg(target_os = "linux")]
@@ -631,6 +678,22 @@ impl RestartCoordinator {
         revision: Option<u64>,
         reason: Option<RestartCancelReason>,
     ) -> Result<(), RuntimeError> {
+        let diagnostic = match reason {
+            Some(RestartCancelReason::ApprovalPending { .. }) => {
+                PreparationFailure::ApprovalPending
+            }
+            None => PreparationFailure::Cancelled,
+        };
+        self.cancel_with_diagnostic(id, revision, reason, diagnostic, None)
+    }
+    fn cancel_with_diagnostic(
+        &self,
+        id: RestartId,
+        revision: Option<u64>,
+        reason: Option<RestartCancelReason>,
+        diagnostic: PreparationFailure,
+        run: Option<RunId>,
+    ) -> Result<(), RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if state.id != Some(id)
             || revision.is_some_and(|revision| revision != state.revision)
@@ -642,6 +705,7 @@ impl RestartCoordinator {
         {
             return Err(RuntimeError::RestartBusy);
         }
+        self.record_preparation_failure(&mut state, diagnostic, run);
         if reason.is_some() {
             state.cancel_reason = reason;
         }

@@ -2,14 +2,19 @@
 //! Lock order: public state -> owned-graph admission guard -> core coordinator.
 #[path = "local.rs"]
 mod local;
+#[path = "observation.rs"]
+mod observation;
 #[path = "shell.rs"]
 mod shell;
 use super::{RestartCoordinator, RestartId};
+use crate::restart::{PreparationFailure, PreparationStage};
 use core_launcher::handoff::{
     CurrentElf,
     targets::{CaptureCheckedTarget, RestartTarget},
 };
 pub use local::{LocalTargets, Requirements};
+use observation::*;
+pub(crate) use observation::{RecipeSourceProof, ledger_changed, ordinary_recipe_progress};
 use runtime::{RunId, quiesce::RecoveryRecipe};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -34,11 +39,32 @@ pub type Recipes = BTreeMap<RunId, RecoveryRecipe>;
 pub struct ObservedRecipes {
     pub recipes: Recipes,
     pub bindings: workbench_host::lane::BindingObservation,
+    pub ledgers: RecipeLedgers,
 }
+/// Relational identities, not last-update timestamps or mutable display data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecipeThreadLedger {
+    pub lane: Option<(String, String, u64, u64)>,
+    pub thread: Option<RecipeThreadState>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecipeThreadState {
+    pub root: Option<String>,
+    pub project_id: Option<String>,
+    pub project_root: Option<String>,
+    pub archived: bool,
+    pub archive_revision: Option<u64>,
+    pub superseded: bool,
+}
+pub type RecipeLedgers = BTreeMap<String, RecipeThreadLedger>;
 /// The integration supplies CURRENT recipes without changing CLI ownership policy.
 /// Runtime preflight remains authoritative; this port cannot grant execution authority.
 pub trait RecipeSource: Send + Sync + 'static {
     fn collect(&self) -> AdminIo<'_, ObservedRecipes>;
+    fn verify_ledgers(
+        &self,
+        expected: RecipeLedgers,
+    ) -> AdminIo<'_, Option<storage::ThreadLedgerObservation>>;
 }
 /// Hold the live Q2 collector's revision/empty-set lock through the supplied memory-only
 /// transition. A read followed by an unlocked comparison is NOT an implementation.
@@ -97,9 +123,8 @@ pub trait FinalizationOwner: Send + Sync + 'static {
 struct Prepared {
     binding: RestartBinding,
     target: RestartTarget,
-    recipes: Recipes,
-    preflight: runtime::RestartPreflight,
-    bindings: workbench_host::lane::BindingObservation,
+    proof: RecipeProof,
+    ledger_fence: Option<storage::ThreadLedgerObservation>,
 }
 #[derive(Clone)]
 struct Active {
@@ -145,8 +170,11 @@ impl PublicRestartCoordinator {
         }
     }
     fn check_request(&self, binding: &RestartBinding) -> Result<(), AdminFailure> {
-        if binding.expected_core_epoch != self.epoch || !self.targets.matches(binding) {
-            return Err(conflict());
+        if binding.expected_core_epoch != self.epoch {
+            return Err(refused("core epoch changed"));
+        }
+        if !self.targets.matches(binding) {
+            return Err(refused("target ID or catalog revision changed"));
         }
         Ok(())
     }
@@ -155,7 +183,7 @@ impl PublicRestartCoordinator {
         state: &PublicState,
         binding: &RestartBinding,
     ) -> Result<Option<RestartId>, AdminFailure> {
-        let snapshot = self.core.snapshot();
+        let snapshot = self.core.0.state.lock().unwrap();
         let Some(active) = &state.active else {
             return Ok(None);
         };
@@ -165,7 +193,9 @@ impl PublicRestartCoordinator {
         if same_conditions(&active.binding, binding) {
             Ok(Some(active.id))
         } else {
-            Err(conflict())
+            Err(refused(
+                "an attempt with different target conditions already owns admission",
+            ))
         }
     }
     async fn inspect_request(
@@ -193,29 +223,7 @@ impl PublicRestartCoordinator {
             return Err(approval_refusal(pending));
         }
         let target = self.targets.prepare(binding).await?;
-        let runtime = self.core.0.runtime.clone();
-        let recipe_observation = runtime.observe_restart_recipes();
-        let observed = self.recipes.collect().await?;
-        if !observed.bindings.is_current() {
-            return Err(conflict());
-        }
-        let recipes = observed.recipes;
-        let (recipes, preflight) = tokio::task::spawn_blocking(move || {
-            let proof = runtime
-                .prepare_restart_quiesce_observed(&recipes, recipe_observation)
-                .map_err(|failure| match failure {
-                    runtime::RuntimeError::RestartRunUnavailable { .. } => {
-                        error(ErrorCode::UnsupportedCapability, &failure.to_string())
-                    }
-                    _ => conflict(),
-                })?;
-            Ok::<_, AdminFailure>((recipes, proof))
-        })
-        .await
-        .map_err(|_| conflict())??;
-        if !observed.bindings.is_current() {
-            return Err(conflict());
-        }
+        let proof = self.observe_preflight(None).await?;
         let mut state = self.state.lock().unwrap();
         if state.prepared.len() == 32 {
             state.prepared.pop_front();
@@ -226,9 +234,8 @@ impl PublicRestartCoordinator {
         state.prepared.push_back(Prepared {
             binding: binding.clone(),
             target,
-            recipes,
-            preflight,
-            bindings: observed.bindings,
+            proof,
+            ledger_fence: None,
         });
         Ok(AdminInspection::Restart(binding.clone()))
     }
@@ -250,7 +257,7 @@ impl PublicRestartCoordinator {
             .prepared
             .iter()
             .position(|p| p.binding == binding)
-            .ok_or_else(conflict)?;
+            .ok_or_else(|| refused("inspection proof missing or expired"))?;
         let prepared = state.prepared.remove(position).unwrap();
         let revision = admission.undisposed_revision().ok_or_else(conflict)?;
         // Keep the existing #710 host drain open until the durable restart-ID
@@ -262,31 +269,51 @@ impl PublicRestartCoordinator {
             .gate
             .enter_admin_audit()
             .map_err(|_| conflict())?;
-        let mut recipes = Some(prepared.recipes);
+        let mut recipes = Some(prepared.proof.recipes);
+        let preparation_source = Some(Arc::new(RecipeSourceProof {
+            source: self.recipes.clone(),
+            bindings: prepared.proof.bindings.clone(),
+            ledgers: prepared.proof.ledgers.clone(),
+            preflight: prepared.proof.preflight.clone(),
+        }));
+        let operation = binding.operation_id.clone();
         let timeout = prepared.target.timeout();
         let id = self.graphs.admit(revision, &mut || {
             let recipes = recipes.take().ok_or_else(conflict)?;
-            prepared
-                .bindings
-                .with_current(|| {
-                    self.core
-                        .0
-                        .runtime
-                        .validate_restart_preflight(&prepared.preflight, &recipes)
-                        .map_err(|_| conflict())?;
-                    self.core
-                        .request_with_source(Some(recipes), timeout, Some(self.recipes.clone()))
-                        .map_err(|error| match error {
-                            runtime::RuntimeError::RestartRefusedByInvocations { running } => {
-                                invocation_refusal(running)
-                            }
-                            runtime::RuntimeError::RestartRefusedByApprovals { pending } => {
-                                approval_refusal(pending)
-                            }
-                            _ => conflict(),
-                        })
-                })
-                .ok_or_else(conflict)?
+            let commit = || {
+                prepared
+                    .proof
+                    .bindings
+                    .with_current(|| {
+                        self.core
+                            .0
+                            .runtime
+                            .validate_restart_preflight(&prepared.proof.preflight, &recipes)
+                            .map_err(preflight_error)?;
+                        self.core
+                            .request_with_source(
+                                Some(recipes),
+                                timeout,
+                                preparation_source.clone(),
+                                Some(operation.clone()),
+                            )
+                            .map_err(|error| match error {
+                                runtime::RuntimeError::RestartRefusedByInvocations { running } => {
+                                    invocation_refusal(running)
+                                }
+                                runtime::RuntimeError::RestartRefusedByApprovals { pending } => {
+                                    approval_refusal(pending)
+                                }
+                                error => preflight_error(error),
+                            })
+                    })
+                    .ok_or_else(binding_changed)?
+            };
+            match &prepared.ledger_fence {
+                Some(fence) => fence.with_current(commit).ok_or_else(ledger_changed)?,
+                None if prepared.proof.ledgers.is_empty() => commit(),
+                None => Err(ledger_changed()),
+            }
         })?;
         state.active = Some(Active { binding, id });
         state.cancelled = None;
@@ -297,13 +324,23 @@ impl PublicRestartCoordinator {
         Ok(admission.register(Box::pin(async move {
             // Mapping failure must not leave an unauditable restart progressing.
             if let Err(error) = audit.bind(&public_id(id)?).await {
-                let _ = core.cancel(id);
+                core.preparation_stage(id, PreparationStage::AuditMapping);
+                core.cancel_for_failure(id, PreparationFailure::AuditUnavailable, None);
                 return Err(error);
             }
             drop(mapping_admission);
             if core.wait_sealed(id).await.is_err() {
-                return Ok(AdminExecutionOutcome::Complete(AdminOutcome::Cancelled));
+                let outcome = if core
+                    .preparation_diagnostic(id)
+                    .is_some_and(|d| !d.retryable)
+                {
+                    AdminOutcome::Failed
+                } else {
+                    AdminOutcome::Cancelled
+                };
+                return Ok(AdminExecutionOutcome::Complete(outcome));
             }
+            core.preparation_stage(id, PreparationStage::TargetValidation);
             let target = match prepared
                 .target
                 .before_capture(
@@ -315,7 +352,7 @@ impl PublicRestartCoordinator {
             {
                 Ok(target) => target,
                 Err(_) => {
-                    let _ = core.cancel(id);
+                    core.cancel_for_failure(id, PreparationFailure::TargetChanged, None);
                     return Ok(AdminExecutionOutcome::Complete(AdminOutcome::Failed));
                 }
             };
@@ -347,6 +384,14 @@ impl AdminFacade for PublicRestartCoordinator {
                 }
                 _ => Err(invalid()),
             }
+        })
+    }
+    fn recheck_before_commit<'a>(&'a self, intent: &'a AdminIntent) -> AdminIo<'a, ()> {
+        Box::pin(async move {
+            let LifecycleCommand::Restart(RestartCommand::Request(request)) = intent else {
+                return Ok(());
+            };
+            self.refresh_prepared(&request.binding).await
         })
     }
     fn commit(

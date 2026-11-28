@@ -327,6 +327,8 @@ impl Storage {
         let temp_warned = temp_exceeded(temp_bytes, config.temp_warn_bytes);
         log_temp_state(temp_bytes, config.temp_warn_bytes, temp_warned);
         let (tx, rx) = mpsc::sync_channel(config.channel_capacity);
+        let ledger_clock = Arc::new(crate::thread_ledger_fence::ThreadLedgerClock::default());
+        let writer_clock = ledger_clock.clone();
         let max_event_bytes = config.hard_limits.max_event_bytes;
         let reader_config = Arc::new(config.clone());
         // Settings are applied (and versions recorded) before any command runs.
@@ -340,6 +342,7 @@ impl Storage {
                     rx,
                     config,
                     index,
+                    writer_clock,
                     StartState {
                         writes_suspended: false,
                         soft_warned,
@@ -356,6 +359,7 @@ impl Storage {
                 reader_config,
                 Default::default(),
                 Default::default(),
+                ledger_clock,
             ),
             Some(writer),
         ))
@@ -391,7 +395,16 @@ pub struct StorageHandle(
     Arc<StorageConfig>,
     Arc<CommitObservers>,
     Arc<RequestAdmissions>,
+    Arc<crate::thread_ledger_fence::ThreadLedgerClock>,
 );
+
+impl StorageHandle {
+    pub(crate) fn thread_ledger_clock(
+        &self,
+    ) -> &Arc<crate::thread_ledger_fence::ThreadLedgerClock> {
+        &self.5
+    }
+}
 
 /// A memory-only registration kept until the synchronous writer ACK.
 pub trait MutationAdmission: Send {

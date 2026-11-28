@@ -394,17 +394,50 @@ mod observation_retry {
         table: BindingTable,
         recipes: std::collections::BTreeMap<runtime::RunId, runtime::quiesce::RecoveryRecipe>,
         collected: AtomicUsize,
+        disturbed_passes: usize,
     }
     impl RecipeSource for Source {
         fn collect(&self) -> AdminIo<'_, ObservedRecipes> {
             Box::pin(async move {
-                self.collected.fetch_add(1, Ordering::SeqCst);
+                if self.collected.fetch_add(1, Ordering::SeqCst) < self.disturbed_passes {
+                    return Err(workbench_protocol::errors::WorkbenchError::new(
+                        workbench_protocol::errors::ErrorCode::Conflict,
+                        "a turn is committing its snapshot",
+                        workbench_protocol::errors::RetryAdvice::AfterResync,
+                    ));
+                }
                 Ok(ObservedRecipes {
                     recipes: self.recipes.clone(),
                     bindings: self.table.observe(),
+                    ledgers: Default::default(),
                 })
             })
         }
+        fn verify_ledgers(
+            &self,
+            expected: crate::restart::public::RecipeLedgers,
+        ) -> AdminIo<'_, Option<storage::ThreadLedgerObservation>> {
+            Box::pin(async move {
+                assert!(expected.is_empty());
+                Ok(None)
+            })
+        }
+    }
+
+    fn source_proof(
+        host: &BootstrappedHost,
+        source: Arc<Source>,
+    ) -> Arc<crate::restart::public::RecipeSourceProof> {
+        let preflight = host
+            .runtime
+            .prepare_restart_quiesce(&source.recipes)
+            .unwrap();
+        Arc::new(crate::restart::public::RecipeSourceProof {
+            bindings: source.table.observe(),
+            ledgers: Default::default(),
+            preflight: Arc::new(preflight),
+            source,
+        })
     }
 
     async fn waiting_run(
@@ -442,31 +475,25 @@ mod observation_retry {
         (run, recipes)
     }
 
-    /// The recipe observation is taken again each time something changed under
-    /// it (here: the binding generation moves while the DB preflight runs), and
-    /// the restart then goes on from a clean pass.
+    /// Ordinary progress invalidates observations, not the accepted authority.
     #[tokio::test]
     async fn a_change_during_observation_is_observed_again_and_the_restart_goes_on() {
         let (_dir, mut host) = boot().await;
         let core = RestartCoordinator::new(&host);
         let (_run, recipes) = waiting_run(&host).await;
-        let table = BindingTable::default();
         let source = Arc::new(Source {
-            table: table.clone(),
+            table: BindingTable::default(),
             recipes: recipes.clone(),
             collected: AtomicUsize::new(0),
+            disturbed_passes: 2,
         });
-        let disturbed = Arc::new(AtomicUsize::new(0));
-        *core.0.preflight_hook.lock().unwrap() = Some(Arc::new({
-            let disturbed = disturbed.clone();
-            move |_| {
-                if disturbed.fetch_add(1, Ordering::SeqCst) < 2 {
-                    table.replace(Default::default());
-                }
-            }
-        }));
         let id = core
-            .request_with_source(Some(recipes), PREPARATION_LIMIT, Some(source.clone()))
+            .request_with_source(
+                Some(recipes),
+                PREPARATION_LIMIT,
+                Some(source_proof(&host, source.clone())),
+                None,
+            )
             .unwrap();
         core.wait_sealed(id).await.unwrap();
         assert_eq!(
@@ -486,17 +513,20 @@ mod observation_retry {
         let (_dir, mut host) = boot().await;
         let core = RestartCoordinator::new(&host);
         let (_run, recipes) = waiting_run(&host).await;
-        let table = BindingTable::default();
         let source = Arc::new(Source {
-            table: table.clone(),
+            table: BindingTable::default(),
             recipes: recipes.clone(),
             collected: AtomicUsize::new(0),
+            disturbed_passes: usize::MAX,
         });
-        *core.0.preflight_hook.lock().unwrap() = Some(Arc::new(move |_| {
-            table.replace(Default::default());
-        }));
+        tokio::time::pause();
         let id = core
-            .request_with_source(Some(recipes), PREPARATION_LIMIT, Some(source.clone()))
+            .request_with_source(
+                Some(recipes),
+                PREPARATION_LIMIT,
+                Some(source_proof(&host, source.clone())),
+                None,
+            )
             .unwrap();
         phase(&core, RestartPhase::Running).await;
         assert!(core.wait_sealed(id).await.is_err());
@@ -506,6 +536,11 @@ mod observation_retry {
         );
         assert!(core.0.state.lock().unwrap().attempt.is_none());
         assert_eq!(host.runtime.quiesce_state(), QuiesceState::Running);
+        let diagnostic = core.preparation_diagnostic(id).unwrap();
+        assert_eq!(diagnostic.stage, PreparationStage::RecipeObservation);
+        assert_eq!(diagnostic.reason, PreparationFailure::ObservationExhausted);
+        assert!(diagnostic.retryable);
+        tokio::time::resume();
         host.shutdown().await.unwrap();
     }
 }

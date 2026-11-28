@@ -28,6 +28,7 @@ pub struct RestartRecipeMember {
     pub thread: Option<String>,
     pub role: String,
     pub conversation: bool,
+    pub active: bool,
     pub lane: bool,
     pub team: bool,
     pub goal: bool,
@@ -48,6 +49,7 @@ pub struct RestartRecipeObservation {
 /// Consuming it performs memory checks only; it is not capture/exec authority.
 pub struct RestartPreflight {
     runtime: Weak<Shared>,
+    commits: SnapshotCommits,
     intents: BTreeMap<RunId, ResumeIntent>,
     metadata: BTreeMap<RunId, String>,
     recipes: String,
@@ -272,6 +274,7 @@ impl AgentRuntime {
         checked?;
         Ok(RestartPreflight {
             runtime: Arc::downgrade(&self.shared),
+            commits,
             intents,
             metadata,
             recipes: serde_json::to_string(recipes).map_err(error)?,
@@ -319,6 +322,7 @@ impl AgentRuntime {
                     thread: None,
                     role: intent.role.clone(),
                     conversation: config.conversation,
+                    active: intent.active,
                     lane: config.lane_scope.is_some(),
                     team: config.team.is_some()
                         || config.team_task.is_some()
@@ -361,6 +365,51 @@ impl AgentRuntime {
             metadata: self.restart_recipe_metadata(),
         }
     }
+    pub fn check_restart_recipe_authority(
+        &self,
+        observed: &RestartRecipeObservation,
+    ) -> Result<(), RuntimeError> {
+        if !Weak::ptr_eq(&observed.runtime, &Arc::downgrade(&self.shared)) {
+            return Err(error("foreign restart observation"));
+        }
+        self.check_recipe_members(&observed.intents, &observed.metadata)
+    }
+
+    fn check_recipe_members(
+        &self,
+        intents: &BTreeMap<RunId, ResumeIntent>,
+        metadata: &BTreeMap<RunId, String>,
+    ) -> Result<(), RuntimeError> {
+        let current = self.shared.quiesce.live_capture_intents();
+        let current_metadata = self.restart_recipe_metadata();
+        // A retained endpoint can also acquire a different root/goal binding
+        // without appearing in live_capture_intents. Metadata changes on
+        // such endpoints are not ordinary snapshot progress either.
+        if let Some(run_id) = metadata.iter().find_map(|(run, old)| {
+            current_metadata
+                .get(run)
+                .filter(|now| *now != old)
+                .map(|_| *run)
+        }) {
+            return Err(RuntimeError::RestartAuthorityChanged { run_id });
+        }
+        for (run_id, previous) in intents {
+            if !current.get(run_id).is_some_and(|now| {
+                previous.incarnation == now.incarnation
+                    && previous.parent_run_id == now.parent_run_id
+                    && previous.role == now.role
+                    && previous.stop_reason == now.stop_reason
+            }) || metadata.get(run_id) != current_metadata.get(run_id)
+            {
+                return Err(RuntimeError::RestartAuthorityChanged { run_id: *run_id });
+            }
+        }
+        if let Some(run_id) = current.keys().find(|run| !intents.contains_key(run)) {
+            return Err(RuntimeError::RestartAuthorityChanged { run_id: *run_id });
+        }
+        Ok(())
+    }
+
     fn validate_restart_recipe_observation(
         &self,
         observed: &RestartRecipeObservation,
@@ -406,6 +455,7 @@ impl AgentRuntime {
                         (
                             &entry.parent,
                             c.conversation,
+                            &c.project_root,
                             &c.lane_scope,
                             &c.team,
                             &c.team_task,
@@ -436,8 +486,6 @@ impl AgentRuntime {
         recipes: &BTreeMap<RunId, RecoveryRecipe>,
     ) -> Result<(), RuntimeError> {
         if !Weak::ptr_eq(&proof.runtime, &Arc::downgrade(&self.shared))
-            || proof.intents != self.shared.quiesce.live_capture_intents()
-            || proof.metadata != self.restart_recipe_metadata()
             || proof.recipes != serde_json::to_string(recipes).map_err(error)?
             || self
                 .shared
@@ -450,7 +498,27 @@ impl AgentRuntime {
         {
             return Err(error("stale or foreign restart preflight"));
         }
+        self.check_restart_preflight_authority(proof)?;
+        if proof.intents != self.shared.quiesce.live_capture_intents()
+            || proof.metadata != self.restart_recipe_metadata()
+            || !self
+                .shared
+                .quiesce
+                .snapshot_commits()
+                .settled_since(proof.commits)
+        {
+            return Err(RuntimeError::RestartObservationChanged);
+        }
         self.check_restart_preparation()
+    }
+    pub fn check_restart_preflight_authority(
+        &self,
+        preflight: &RestartPreflight,
+    ) -> Result<(), RuntimeError> {
+        if !Weak::ptr_eq(&preflight.runtime, &Arc::downgrade(&self.shared)) {
+            return Err(error("foreign restart preflight"));
+        }
+        self.check_recipe_members(&preflight.intents, &preflight.metadata)
     }
     /// Synchronous memory-only boundary. DB preflight is never run under the
     /// host coordinator mutex. Capture independently repeats durable validation.
@@ -460,17 +528,19 @@ impl AgentRuntime {
     ) -> Result<RestartAttempt, RuntimeError> {
         // Same external registration exclusion as ordinary planned admission.
         let _registration = self.external_admission_guard()?;
-        if !Weak::ptr_eq(&preflight.runtime, &Arc::downgrade(&self.shared))
-            || preflight.intents != self.shared.quiesce.live_capture_intents()
+        if !Weak::ptr_eq(&preflight.runtime, &Arc::downgrade(&self.shared)) {
+            return Err(error("foreign restart preflight"));
+        }
+        self.check_recipe_members(&preflight.intents, &preflight.metadata)?;
+        if preflight.intents != self.shared.quiesce.live_capture_intents()
             || preflight.metadata != self.restart_recipe_metadata()
+            || !self
+                .shared
+                .quiesce
+                .snapshot_commits()
+                .settled_since(preflight.commits)
         {
-            return Err(
-                if Weak::ptr_eq(&preflight.runtime, &Arc::downgrade(&self.shared)) {
-                    RuntimeError::RestartObservationChanged
-                } else {
-                    error("stale or foreign restart preflight")
-                },
-            );
+            return Err(RuntimeError::RestartObservationChanged);
         }
         self.check_restart_preparation()?;
         self.begin_restart_quiesce_guarded(true, &_registration)
@@ -970,6 +1040,7 @@ mod admission_observation_tests {
         let recipes = BTreeMap::new();
         let proof = RestartPreflight {
             runtime: Arc::downgrade(&rt.shared),
+            commits: rt.shared.quiesce.snapshot_commits(),
             intents: rt.shared.quiesce.live_capture_intents(),
             metadata: rt.restart_recipe_metadata(),
             recipes: serde_json::to_string(&recipes).unwrap(),
@@ -981,7 +1052,10 @@ mod admission_observation_tests {
             config.conversation = !config.conversation;
         }
         assert_eq!(proof.intents, rt.shared.quiesce.live_capture_intents());
-        assert!(rt.validate_restart_preflight(&proof, &recipes).is_err());
+        assert_eq!(
+            rt.validate_restart_preflight(&proof, &recipes),
+            Err(RuntimeError::RestartAuthorityChanged { run_id: run })
+        );
         rt.cancel(run).unwrap();
         rt.wait(run).await.unwrap();
     }

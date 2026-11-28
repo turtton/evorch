@@ -83,11 +83,11 @@ impl LocalTargets {
     ) -> Result<RestartTarget, AdminFailure> {
         let (settings, revision) = self.reload().await?;
         if revision != binding.target_revision {
-            return Err(conflict());
+            return Err(refused("restart target catalog revision changed"));
         }
         let path = settings
             .target_path(binding.target_id.as_str())
-            .map_err(|_| conflict())?;
+            .map_err(|_| refused("restart target ID is no longer configured"))?;
         // ELF/build/catalog/format comparisons belong exclusively to #710.
         RestartTarget::preflight(
             TargetSelection {
@@ -107,7 +107,12 @@ impl LocalTargets {
             std::future::pending(),
         )
         .await
-        .map_err(|_| invalid())
+        .map_err(|_| {
+            error(
+                ErrorCode::InvalidRequest,
+                "restart target executable or handoff format is incompatible",
+            )
+        })
     }
     pub(super) fn matches(&self, binding: &RestartBinding) -> bool {
         let catalog = self.catalog.lock().unwrap();

@@ -47,7 +47,20 @@ impl RecipeSource for RecipesSource {
                 entered.wait().await;
                 release.wait().await;
             }
-            Ok(ObservedRecipes { recipes, bindings })
+            Ok(ObservedRecipes {
+                recipes,
+                bindings,
+                ledgers: Default::default(),
+            })
+        })
+    }
+    fn verify_ledgers(
+        &self,
+        expected: RecipeLedgers,
+    ) -> AdminIo<'_, Option<storage::ThreadLedgerObservation>> {
+        Box::pin(async move {
+            assert!(expected.is_empty());
+            Ok(None)
         })
     }
 }

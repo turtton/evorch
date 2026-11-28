@@ -129,6 +129,7 @@ pub(super) fn run_writer(
         rx,
         config,
         super::index::IndexJob::inert(),
+        Default::default(),
         StartState {
             writes_suspended,
             soft_warned,
@@ -143,6 +144,7 @@ pub(super) fn run_writer_with_index(
     rx: Receiver<Command>,
     config: StorageConfig,
     index: super::index::IndexJob,
+    ledger_clock: std::sync::Arc<crate::thread_ledger_fence::ThreadLedgerClock>,
     start: StartState,
 ) {
     let StartState {
@@ -232,7 +234,8 @@ pub(super) fn run_writer_with_index(
                         "thread writes suspended by storage limit".into(),
                     ))
                 } else {
-                    crate::repo::threads::upsert(&state.conn, writer, &threads)
+                    ledger_clock
+                        .write(|| crate::repo::threads::upsert(&state.conn, writer, &threads))
                 };
                 match reply {
                     Some(reply) => {
@@ -901,12 +904,14 @@ pub(super) fn run_writer_with_index(
                             "retention confirmation suspended by storage limit".into(),
                         ));
                     }
-                    crate::repo::thread_retention::online::confirm(
-                        &state.conn,
-                        &request,
-                        budget,
-                        fence.as_ref(),
-                    )
+                    ledger_clock.write(|| {
+                        crate::repo::thread_retention::online::confirm(
+                            &state.conn,
+                            &request,
+                            budget,
+                            fence.as_ref(),
+                        )
+                    })
                 })();
                 let _ = reply.send(result);
             }

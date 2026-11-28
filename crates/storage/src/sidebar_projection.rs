@@ -77,7 +77,7 @@ impl crate::StorageHandle {
         fence: SidebarMembershipFence,
         acknowledge: bool,
     ) -> Result<usize, StorageError> {
-        self.lane_job(true, move |conn| {
+        self.thread_ledger_job(move |conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             if crate::repo::lane_management::topology_revision(&tx)? != fence.topology_revision {
                 return Err(StorageError::LaneManagement(
