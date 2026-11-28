@@ -191,11 +191,20 @@ impl AdminFacade for OwnedGraphsFacade {
                     }
                     // A legacy graph is only ever discarded, never resumed.
                     for header in headers.into_iter().filter(view::is_legacy) {
-                        let current =
+                        let mut current =
                             view::legacy_binding_for(&header, binding.graph.operation_id.clone())?;
                         if current.graph.graph_id != binding.graph.graph_id {
                             continue;
                         }
+                        // The header records no core epoch. The management query
+                        // quotes the live core's epoch in every detail it serves,
+                        // so that is the one value a confirmation of it carries:
+                        // compare it with the live epoch, and compare everything
+                        // else (revisions, threads) with the header as read now.
+                        if live_epoch != Some(binding.graph.expected_core_epoch) {
+                            return Err(admin::conflict());
+                        }
+                        current.graph.expected_core_epoch = binding.graph.expected_core_epoch;
                         if selected.is_some()
                             || resume
                             || current != binding

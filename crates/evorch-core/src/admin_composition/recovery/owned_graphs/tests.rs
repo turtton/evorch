@@ -479,3 +479,102 @@ async fn a_cold_graph_is_complete_only_after_every_thread_is_recorded() {
     assert_eq!(view.progress.scratch, StepObservation::ConfirmedApplied);
     core.shutdown().await;
 }
+
+/// An unsupported (legacy-format) graph is shown by its relational header and
+/// can only be released. The binding its detail quotes (the live core epoch
+/// included, as the management query stamps every detail) is the very one the
+/// release is inspected against, and the release discards it durably.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_unsupported_graph_is_released_with_the_binding_its_detail_quoted() {
+    use storage::{Database, admin_audit::AuditOutcome};
+    use workbench_protocol::namespaces::lifecycle::owned_graphs::{
+        GraphProblemDetail, RestartDispositionView,
+    };
+    let (core, _) = Installed::start(true).await;
+    core.boot.admin.publish_for_test();
+    let mut conn = Conn::open(&core.socket, "q2-install").await;
+    // The graph the cold start quarantined keeps its reference when its restart
+    // is in a format this build does not execute (old rows carry version 1).
+    let item = quarantined(&mut conn, "r-list").await;
+    let current = detail(&mut conn, "r-current", &item.graph_id).await;
+    assert_eq!(
+        current.binding.graph.expected_core_epoch.get(),
+        conn.hello.instance_epoch.get()
+    );
+    rusqlite::Connection::open(&core.config.db_path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE restart_transactions SET format_version = 1;
+             UPDATE recovery_manifests SET schema_version = 1;",
+        )
+        .unwrap();
+    let view = detail(&mut conn, "r-legacy", &item.graph_id).await;
+    assert_eq!(view.graph_ref, item.graph_id);
+    assert_eq!(view.disposition, RestartDispositionView::Quarantined);
+    assert!(matches!(
+        view.resume,
+        ActionAvailability::Blocked {
+            detail: GraphProblemDetail::Cold,
+            ..
+        }
+    ));
+    assert!(matches!(view.release, ActionAvailability::Available));
+    assert_eq!(
+        view.binding.graph.expected_core_epoch.get(),
+        conn.hello.instance_epoch.get()
+    );
+
+    // A stale binding is refused, whatever the graph's kind: the epoch is
+    // checked against the live core and every other field against the header.
+    for (name, edit) in [("op-stale-revision", 0), ("op-stale-epoch", 1)] {
+        let mut stale = view.binding.clone();
+        stale.graph.operation_id = id(name);
+        if edit == 0 {
+            stale.graph.expected_revision = Revision(stale.graph.expected_revision.get() + 1);
+        } else {
+            stale.graph.expected_core_epoch =
+                InstanceEpoch(stale.graph.expected_core_epoch.get() + 1);
+        }
+        let refused = conn
+            .call(&command(
+                name,
+                OwnedGraphsCommand::Release(confirmed(stale)),
+            ))
+            .await;
+        assert_eq!(error_of(&refused).0, ErrorCode::Conflict, "{name}");
+    }
+    assert_eq!(core.untouched().1, 0, "a refused request leaves no effect");
+
+    let mut binding = view.binding.clone();
+    binding.graph.operation_id = id("op-release-legacy");
+    let accepted = conn
+        .call(&command(
+            "op-release-legacy",
+            OwnedGraphsCommand::Release(confirmed(binding.clone())),
+        ))
+        .await;
+    assert!(
+        matches!(
+            accepted.result,
+            ReplyResult::Success(ReplyPayload::Command(_))
+        ),
+        "{accepted:?}"
+    );
+    core.boot.admin.wait_for_request_slots().await;
+    let outcome = Database::read_admin_audit_record(&core.config, "op-release-legacy")
+        .unwrap()
+        .and_then(|record| record.outcome);
+    assert_eq!(outcome, Some(AuditOutcome::Succeeded));
+    let superseded: i64 = rusqlite::Connection::open(&core.config.db_path)
+        .unwrap()
+        .query_row(
+            "SELECT superseded FROM recovery_manifests WHERE manifest_id = 'component'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(superseded, 1, "the unsupported graph was discarded");
+
+    core.shutdown().await;
+}
