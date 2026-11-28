@@ -173,6 +173,87 @@ async fn write_intent_is_durable_before_effects_and_restart_never_repeats_it() {
 }
 
 #[tokio::test]
+async fn legacy_ownership_checkpoint_resumes_without_replaying_uncertain_effects() {
+    for human_continue in [true, false] {
+        let fixture = Fixture::new();
+        let original = fixture.runtime();
+        let root =
+            original.delegate_background(Role::Worker, "original".into(), RunConfig::default());
+        fixture.entered.notified().await;
+        // The old build saved ownership as the reason even when a dispatched
+        // write's outcome was still unknown. Preserve that pre-dispatch history.
+        let mut pending = storage::Database::open(&fixture.config)
+            .unwrap()
+            .run_context(&root.to_string())
+            .unwrap()
+            .unwrap();
+        original.cancel(root).unwrap();
+        original.wait(root).await.unwrap();
+        drop(original);
+        let mut descriptor: runtime::restore::RunRestoreDescriptor =
+            serde_json::from_str(&pending.config_json).unwrap();
+        assert!(
+            descriptor
+                .interrupted_tool_calls
+                .iter()
+                .any(|call| call.may_have_side_effects)
+        );
+        descriptor.restorable = false;
+        descriptor.non_restorable_reason = Some("復元対象外の実行状態: ownership".into());
+        pending.restorable = false;
+        pending.config_json = serde_json::to_string(&descriptor).unwrap();
+        fixture
+            .storage
+            .handle()
+            .upsert_run_context(&pending)
+            .unwrap();
+
+        let model = Arc::new(ScriptedModel::new([
+            Err(runtime::RuntimeError::Model {
+                reason: "stop after recovered input".into(),
+            }),
+            Err(runtime::RuntimeError::Model {
+                reason: "stop after next input".into(),
+            }),
+        ]));
+        let restarted =
+            fixture.runtime_with_model("write", Permissions::read_write(), model.clone());
+        assert!(
+            restarted.inspect_agent(root).is_err(),
+            "a cold, disk-only run"
+        );
+        let continued = if human_continue {
+            restarted.resume_chat(root, RunConfig::default())
+        } else {
+            restarted.continue_goal(root, "continue".into(), RunConfig::default())
+        };
+        assert_eq!(continued.unwrap(), root);
+        assert_eq!(restarted.wait(root).await.unwrap(), AgentRunPhase::Error);
+        restarted
+            .continue_goal(root, "next".into(), RunConfig::default())
+            .unwrap();
+        assert_eq!(restarted.wait(root).await.unwrap(), AgentRunPhase::Error);
+
+        let saved: Vec<providers::Message> = serde_json::from_str(&pending.messages_json).unwrap();
+        let observed = model.observed().await;
+        assert_eq!(observed.len(), 2);
+        assert!(observed[0].starts_with(&saved));
+        assert!(observed[1].starts_with(&observed[0]));
+        for messages in &observed {
+            let text = serde_json::to_string(messages).unwrap();
+            assert_eq!(text.matches("ToolExecutionOutcomeUnknown").count(), 1);
+            assert!(text.contains("write-1"));
+            assert!(!messages.iter().flat_map(|m| &m.content).any(|b| matches!(
+                b,
+                providers::ContentBlock::ToolUse { .. }
+                    | providers::ContentBlock::ToolResult { .. }
+            )));
+        }
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
 async fn mixed_incomplete_batch_reports_all_call_ids_without_fabricating_tool_results() {
     let fixture = Fixture::new();
     let first = fixture.runtime();

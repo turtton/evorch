@@ -938,7 +938,7 @@ async fn persisted_stop_survives_a_fresh_runtime_and_startup_scan() {
 }
 
 #[tokio::test]
-async fn an_inactive_checkpoint_with_unknown_stop_state_never_auto_wakes() {
+async fn an_inactive_checkpoint_without_an_operator_stop_resumes_for_delivery() {
     let mut f = Fixture::new();
     let (lead, host) = f.lead().await;
     let lane = f.lane(lead, "unknown-stop").await;
@@ -949,10 +949,14 @@ async fn an_inactive_checkpoint_with_unknown_stop_state_never_auto_wakes() {
     ));
     assert_eq!(
         f.drive().await,
-        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::Stopped)
+        LaneDeliveryOutcome::Delivered { notifications: 1 }
     );
-    assert_eq!(host.restores.load(Ordering::SeqCst), 0);
-    assert_eq!(f.receipts(), 0);
+    assert_eq!(host.restores.load(Ordering::SeqCst), 1);
+    assert_eq!(f.receipts(), 1);
+    for root in [lead, lane.root_run_id] {
+        f.runtime.stop(root, crate::StopScope::SelfOnly).unwrap();
+        f.runtime.wait(root).await.unwrap();
+    }
 }
 #[test]
 fn binding_without_an_executor_remains_unbound() {

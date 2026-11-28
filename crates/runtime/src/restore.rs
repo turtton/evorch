@@ -302,12 +302,11 @@ impl RunRestoreDescriptor {
 
     /// ownership のみが復元不可の理由である記録かを返す。
     ///
-    /// chat 系入口は ownership をスナップショットから復元しないため、
-    /// この条件を満たす記録は `restorable` / `non_restorable_reason` に
-    /// かかわらず history 復元を許可してよい。
+    /// ownership は復元しない。未確定の副作用があっても、現在の権限で
+    /// history のみ再利用し、既存の outcome-unknown 通知を追記できる。
+    /// ツールの再実行や disk execution の復元を許可する条件ではない。
     pub(crate) fn renewable_ownership_only(&self) -> bool {
-        !self.has_uncertain_effects()
-            && self.non_restorable_reason.as_deref() == Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON)
+        self.non_restorable_reason.as_deref() == Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON)
     }
 
     pub(crate) fn renewable_root_context(&self) -> bool {

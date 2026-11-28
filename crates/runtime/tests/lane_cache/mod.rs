@@ -19,12 +19,20 @@ fn result(h: &Harness, id: &str) -> Value {
         .recorded_requests()
         .iter()
         .rev()
-        .filter(|r| r.path == Wire::ChatCompletions.path())
         .find_map(|r| {
-            r.body["messages"].as_array()?.iter().rev().find_map(|m| {
-                (m["role"] == "tool" && m["tool_call_id"] == id)
-                    .then(|| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
-            })
+            if r.path == Wire::ChatCompletions.path() {
+                r.body["messages"].as_array()?.iter().rev().find_map(|m| {
+                    (m["role"] == "tool" && m["tool_call_id"] == id)
+                        .then(|| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
+                })
+            } else if r.path == Wire::Responses.path() {
+                r.body["input"].as_array()?.iter().rev().find_map(|item| {
+                    (item["type"] == "function_call_output" && item["call_id"] == id)
+                        .then(|| serde_json::from_str(item["output"].as_str().unwrap()).unwrap())
+                })
+            } else {
+                None
+            }
         })
         .unwrap_or_else(|| panic!("missing tool result {id}"))
 }

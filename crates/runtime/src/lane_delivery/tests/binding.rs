@@ -65,7 +65,7 @@ async fn only_the_exact_obsolete_ownership_reason_allows_lane_history_reuse() {
         (
             Some(crate::restore::OWNERSHIP_ONLY_UNRESTORABLE_REASON),
             true,
-            false,
+            true,
         ),
     ] {
         let mut bundle = f
