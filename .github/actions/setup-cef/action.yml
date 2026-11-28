@@ -11,6 +11,21 @@ inputs:
       carries a Vulkan loader that shadows the system one, so use it only in
       jobs that do not render with wgpu.
     default: libcef
+  export-env:
+    description: >-
+      "true" writes CEF_PATH and LD_LIBRARY_PATH to GITHUB_ENV, so every later
+      step of the job sees them. "false" writes nothing there: the same values
+      are returned as the cef-path and loader-path outputs, for the steps that
+      pass them to their own env (a job that runs both CEF and non-CEF cells keeps
+      the CEF loader path away from the latter).
+    default: "true"
+outputs:
+  cef-path:
+    description: The CEF distribution directory (what CEF_PATH is set to).
+    value: ${{ steps.install.outputs.cef-path }}
+  loader-path:
+    description: The LD_LIBRARY_PATH value that makes libcef.so loadable.
+    value: ${{ steps.install.outputs.loader-path }}
 runs:
   using: composite
   steps:
@@ -30,6 +45,7 @@ runs:
       shell: bash
       env:
         RUNTIME_PATH: ${{ inputs.runtime-path }}
+        EXPORT_ENV: ${{ inputs.export-env }}
       run: |
         set -euo pipefail
         dist="$RUNNER_TEMP/cef-dist"
@@ -47,10 +63,21 @@ runs:
             ;;
           *) echo "unknown runtime-path: $RUNTIME_PATH" >&2; exit 2 ;;
         esac
+        loader="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         {
-          echo "CEF_PATH=$dist"
-          echo "LD_LIBRARY_PATH=$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-        } >> "$GITHUB_ENV"
+          echo "cef-path=$dist"
+          echo "loader-path=$loader"
+        } >> "$GITHUB_OUTPUT"
+        case "$EXPORT_ENV" in
+          true)
+            {
+              echo "CEF_PATH=$dist"
+              echo "LD_LIBRARY_PATH=$loader"
+            } >> "$GITHUB_ENV"
+            ;;
+          false) ;;
+          *) echo "unknown export-env: $EXPORT_ENV" >&2; exit 2 ;;
+        esac
     - if: steps.install.outputs.save == 'true'
       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:

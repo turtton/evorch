@@ -21,7 +21,7 @@ jobs:
   # checks configured today.
   ci:
     if: always()
-    needs: [quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests]
+    needs: [quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests, release-expiry]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -131,11 +131,14 @@ jobs:
         run: python3 scripts/tests/test_check_harness.py
       # The consumer side of the product artifact: the wait for the producer job
       # (mock GitHub API, virtual clock, no network) and how the consumer jobs and
-      # the tests matrix are wired to it and to scripts/ci-test-groups.json.
+      # the tests matrix are wired to it and to scripts/ci-test-groups.json; the
+      # release-expiry job's cell groups, evidence and CEF environment rule
+      # (mock cargo and guard-cargo).
       - name: Product artifact wait and CI workflow configuration
         run: |
           scripts/tests/test_wait_product_artifact.sh
           scripts/tests/test_ci_workflow_config.sh
+          scripts/tests/test_release_expiry.sh
       # The flaky/hang reproduction wrapper, against mock systemd-run/systemctl
       # (no load, no systemd needed): argument passthrough, --repeat, start
       # failures, name collisions, timeout and interruption.
@@ -532,18 +535,8 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" remaining "$EVORCH_TEST_INVENTORY_DIR"
-      # B3-07: real ten-second planned-shutdown expiry (exit 74 and reaping of
-      # owned children) in a RELEASE test binary of the product components. The
-      # cells are ignored tests, so no debug inventory run selects them; this is
-      # their only run. Once per event (runtime shard 1). Real elapsed time
-      # (~1 min); nextest's runner timeout owns hang detection, and each cell
-      # has its own failure backstops. Not a product-ELF check (5a-V T3).
-      - name: Real planned-shutdown expiry (release test binary)
-        if: matrix.group == 'runtime' && matrix.shard == 1
-        timeout-minutes: 40
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/guard-cargo.sh run -p evorch-core --release --features bootstrap-test-support --locked --test core_expiry --run-ignored only --test-threads 1 --no-tests fail
+      # The real ten-second planned-shutdown expiry cells (release test binaries,
+      # ignored tests) run in the release-expiry job, not in a shard.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && matrix.group == 'runtime'
         with:
@@ -563,7 +556,7 @@ jobs:
 
   # The only writer of the shared dependency cache (key *-ci-workspace-v2) that
   # every cargo job restores: lint, docs-schema, otel, the test groups,
-  # browser-e2e and cef-e2e. It runs on
+  # browser-e2e, cef-e2e and release-expiry. It runs on
   # main pushes only, so it is never on a PR's critical path and PRs never
   # crowd the repository's 10GB cache budget. It compiles every dependency
   # artifact the other jobs need, with each of their own package and feature
@@ -571,11 +564,11 @@ jobs:
   # sandbox check (lint), the doctests and the schema example (docs-schema),
   # the otel-exporter build
   # (otel), the test binaries of every group in scripts/ci-test-groups.json
-  # (the test jobs share the gui group's selection) and the browser-e2e and cef-e2e selections, which resolve
-  # features differently. It does not run the normal nextest suite (the
+  # (the test jobs share the gui group's selection) and the browser-e2e, cef-e2e and release-expiry
+  # selections, which resolve features differently. It does not run the normal nextest suite (the
   # doctests above do run). A failing recipe fails the job, and rust-cache does
-  # not save after a failure, so a partial cache is never written. The browser
-  # and CEF selections must match the readers' `prepare` and `cargo build`
+  # not save after a failure, so a partial cache is never written. The browser,
+  # CEF and release expiry selections must match the readers' `prepare` and `cargo build`
   # lines (scripts/tests/test_ci_workflow_config.sh compares them).
   cache-save:
     if: github.ref == 'refs/heads/main'
@@ -671,8 +664,7 @@ jobs:
           scripts/guard-cargo.sh prepare "$warm/cef-4" -p core-client-e2e --features gui/cef --test preview_cef
           scripts/guard-cargo.sh prepare "$warm/cef-5" -p evorch-core --test f4_product_cef --test agent_observation_restart
           scripts/guard-cargo.sh prepare "$warm/cef-6" -p core-client-e2e --features gui/cef --test agent_observation_gui
-          scripts/guard-cargo.sh prepare "$warm/expiry-1" -p evorch-core --release --features bootstrap-test-support --test core_expiry --locked
-          scripts/guard-cargo.sh prepare "$warm/expiry-2" -p evorch-core --release --features bootstrap-test-support --test core_browser_expiry --locked
+          scripts/guard-cargo.sh prepare "$warm/expiry" -p evorch-core --release --features bootstrap-test-support --test core_expiry --test core_browser_expiry --locked
       - name: Report disk usage
         if: always()
         run: |
@@ -992,18 +984,8 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
           scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=chromium_p) | test(=chromium_stopped_p) | test(=chromium_navigating_p) | test(=classify_control_t) | test(=harness_timeout_control_t) | test(=harness_panic_control_t)' --run-ignored only --success-output immediate --no-tests fail
-      # D-3a2 B3-08b (class T, not a product-ELF expiry): the composition worker
-      # owns a real Chromium through the product's AgentBrowser, the navigation
-      # completes, then the real 10 s planned-shutdown expiry ends the worker with
-      # exit 74 and every owned process must be dead by pidfd. Release test binary.
-      - name: Real Chromium navigation then ten-second expiry (release test binary)
-        timeout-minutes: 40
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
-          scripts/guard-cargo.sh run -p evorch-core --release --features bootstrap-test-support --locked --test core_browser_expiry -E 'test(=expiry_chromium_t) | test(=expiry_chromium_stopped_t)' --run-ignored only --test-threads 1 --success-output immediate --no-tests fail
+      # The real Chromium navigation then ten-second expiry cells (D-3a2 B3-08b,
+      # release test binary) run in the release-expiry job.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -1172,21 +1154,144 @@ jobs:
           export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
           export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
           scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=cef_p) | test(=cef_stopped_p) | test(=cef_navigating_p) | test(=renderer_launch_failure_p) | test(=cef_init_failure_p)' --run-ignored only --success-output immediate --no-tests fail
-      # D-3a2 B3-08b (class T, not a product-ELF expiry): the composition worker
-      # owns the real renderer and CEF through RuntimePages, the page is read
-      # back, then the real 10 s planned-shutdown expiry ends the worker with
-      # exit 74 and every owned process must be dead by pidfd. Release test binary.
-      - name: Real CEF navigation then ten-second expiry (release test binary)
-        timeout-minutes: 40
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
-          export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
-          scripts/guard-cargo.sh run -p evorch-core --release --features bootstrap-test-support --locked --test core_browser_expiry -E 'test(=expiry_cef_t) | test(=expiry_cef_stopped_t)' --run-ignored only --test-threads 1 --success-output immediate --no-tests fail
+      # The real CEF navigation then ten-second expiry cells (D-3a2 B3-08b,
+      # release test binary) run in the release-expiry job.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: core-browser-sigkill-cef
           if-no-files-found: warn
           path: ${{ runner.temp }}/core-browser-sigkill
+
+  # The real ten-second planned-shutdown expiry cells (B3-07, D-3a2 B3-08b):
+  # six ignored tests of two RELEASE test binaries of evorch-core, `core_expiry`
+  # (two worker cells) and `core_browser_expiry` (two real Chromium and two real
+  # CEF cells). No debug inventory run selects them; this is their only run, once
+  # per event, and every cell is part of the `ci` gate. They are not product-ELF
+  # checks (5a-V T3): a release test binary is built with the product's helper
+  # bundle bound to it, never in place of the sealed product ELF.
+  #
+  # One job builds the release workspace once (it used to be built in three jobs)
+  # while the product artifact job runs, then waits for the product, installs it
+  # and runs the six cells from the one prepared metadata: no cargo invocation
+  # follows the install (scripts/guard-cargo.sh). The CEF distribution reaches
+  # only what needs it: setup-cef does not export its environment, its paths go to
+  # the build of the CEF helper and renderer and to the CEF cells' step, so the
+  # worker and Chromium cells keep the loader path they had before. This job only
+  # restores the shared dependency cache; cache-save builds the same selections.
+  release-expiry:
+    needs: scope-gate
+    # The artifact wait reads this run's jobs (actions: read); nothing else is
+    # granted. The workflow has no top-level permissions.
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
+    # into its key, so a different set restores nothing. CARGO_TARGET_DIR is set on
+    # the steps that run cargo only.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.0
+      # Restore only: the cache-save job writes the shared dependency cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ${{ runner.os }}-ci-workspace-v2
+          save-if: false
+      # libnss3-tools: the Chromium cells build the loopback CA's NSS database with
+      # certutil.
+      - name: Install linker, Claude transport build dependencies and certutil
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git libnss3-tools
+      # CEF reads its resources beside the libcef.so it was loaded from. Nothing is
+      # written to GITHUB_ENV: the paths are step outputs, used below.
+      - uses: ./.github/actions/setup-cef
+        id: cef
+        with:
+          runtime-path: full
+          export-env: "false"
+      # The Chromium cells' browser; only their step receives it.
+      - name: Locate Chrome/Chromium executable
+        id: chrome
+        run: |
+          CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
+          echo "path=$CHROME_PATH" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest
+      # Chromium's sandbox needs unprivileged user namespaces; the SUID
+      # chrome-sandbox is never used (ADR 0034).
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Everything that compiles comes before the product artifact is installed
+      # (`prepare` compiles and lists, it runs no cell): both release test binaries
+      # in one invocation, whose listing must be exactly the cells the three groups
+      # below select; then the debug helper and renderer the CEF cells start.
+      - name: Build the release expiry test binaries and check their cells (no product needed)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          scripts/guard-cargo.sh prepare "$RUNNER_TEMP/release-expiry" -p evorch-core --release --features bootstrap-test-support --test core_expiry --test core_browser_expiry --locked
+          scripts/release-expiry.sh check-inventory "$RUNNER_TEMP/release-expiry"
+      - name: Build the CEF helper and renderer of the CEF cells (no product needed)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+          CEF_PATH: ${{ steps.cef.outputs.cef-path }}
+        run: |
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper
+          cargo build -p evorch-renderer
+      # The product artifact job runs beside this job (no `needs`): wait for its
+      # success, take this run's artifact, check it was built from this commit,
+      # then verify and install it. Nothing that runs a cell comes before this, and
+      # no cargo invocation comes after it.
+      - name: Wait for the product artifact job
+        timeout-minutes: 31
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/wait-product-artifact.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Check the product artifact was built from this commit
+        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
+      # Each group runs its cells with `--run-ignored only --test-threads 1
+      # --no-tests fail` and needs the death evidence of every cell; nextest's
+      # runner timeout (.config/nextest.toml) owns hang detection.
+      - name: Real planned-shutdown expiry (release test binary)
+        timeout-minutes: 40
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: scripts/release-expiry.sh run "$RUNNER_TEMP/release-expiry" core "$RUNNER_TEMP/release-expiry-evidence"
+      - name: Real Chromium navigation then ten-second expiry (release test binary)
+        timeout-minutes: 40
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+          CHROME: ${{ steps.chrome.outputs.path }}
+        run: scripts/release-expiry.sh run "$RUNNER_TEMP/release-expiry" chromium "$RUNNER_TEMP/release-expiry-evidence"
+      - name: Real CEF navigation then ten-second expiry (release test binary)
+        timeout-minutes: 40
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+          CEF_PATH: ${{ steps.cef.outputs.cef-path }}
+          LD_LIBRARY_PATH: ${{ steps.cef.outputs.loader-path }}
+        run: |
+          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
+          scripts/release-expiry.sh run "$RUNNER_TEMP/release-expiry" cef "$RUNNER_TEMP/release-expiry-evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: release-expiry-evidence
+          if-no-files-found: error
+          path: ${{ runner.temp }}/release-expiry-evidence
