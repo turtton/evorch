@@ -103,6 +103,33 @@ impl Database {
             .map(Option::flatten)
     }
 
+    /// Terminal snapshot of the root run a thread is durably bound to, whatever
+    /// name that run was saved under. A child, a running run and a tombstoned
+    /// run never match.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn bound_root_terminal_run_context(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<RunContextRecord>, StorageError> {
+        use rusqlite::OptionalExtension;
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT c.run_id FROM threads t JOIN run_contexts c ON c.run_id = t.root_run_id \
+             WHERE t.thread_id = ?1 AND c.parent_run_id IS NULL \
+             AND c.terminal_phase IN ('Done', 'Error', 'Checkpoint', 'Stopped') \
+             AND c.run_id NOT IN (SELECT run_id FROM run_tombstones)",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        id.map(|id| self.run_context(&id))
+            .transpose()
+            .map(Option::flatten)
+    }
+
     /// Read only the identity needed to authorize access to a run's context.
     ///
     /// # Errors

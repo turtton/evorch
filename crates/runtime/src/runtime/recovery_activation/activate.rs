@@ -215,6 +215,12 @@ impl AgentRuntime {
             }
             let mut config = authority.members.remove(&id).expect("membership checked");
             self.validate_recovery_authority(source, &config)?;
+            if config.name.is_none() && source.record.run_id == source.record.root {
+                config.name = restored_chat_name(
+                    source.record.thread.as_deref(),
+                    source.record.recipe.descriptor.as_ref(),
+                );
+            }
             // Resolve before candidate construction: its ordinary registration
             // fallback logs errors, which is not sufficient for atomic recovery.
             if let Some(bundle) = &source.bundle {
@@ -520,5 +526,46 @@ impl AgentRuntime {
             _ => return Err(error("current team identity mismatch")),
         }
         Ok(())
+    }
+}
+
+/// A chat root keeps the identity it was started under, or its next snapshot
+/// is saved as a bare role and the thread can no longer find its conversation.
+/// Only the exact chat name of the record's own thread is taken.
+fn restored_chat_name(
+    thread: Option<&str>,
+    saved: Option<&crate::restore::RunRestoreDescriptor>,
+) -> Option<String> {
+    let (thread, saved) = (thread?, saved?);
+    saved
+        .name
+        .clone()
+        .filter(|name| *name == format!("chat:{}:{thread}", saved.role))
+}
+
+#[cfg(test)]
+mod chat_name_tests {
+    use super::restored_chat_name;
+    use crate::restore::RunRestoreDescriptor;
+    fn saved(name: Option<&str>) -> RunRestoreDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "role": "Orchestrator", "name": name, "interactive": true, "keep_alive": true,
+            "load_skills": [], "restorable": true
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn only_the_exact_chat_name_of_the_records_thread_is_restored() {
+        let chat = saved(Some("chat:Orchestrator:thread"));
+        assert_eq!(
+            restored_chat_name(Some("thread"), Some(&chat)).as_deref(),
+            Some("chat:Orchestrator:thread")
+        );
+        assert_eq!(restored_chat_name(Some("other"), Some(&chat)), None);
+        assert_eq!(restored_chat_name(None, Some(&chat)), None);
+        assert_eq!(restored_chat_name(Some("thread"), None), None);
+        for name in [None, Some("goal-1"), Some("chat:Worker:thread")] {
+            assert_eq!(restored_chat_name(Some("thread"), Some(&saved(name))), None);
+        }
     }
 }

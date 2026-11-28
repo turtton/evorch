@@ -789,6 +789,14 @@ impl AgentRuntime {
                 latest = Some(record);
             }
         }
+        // A snapshot saved without the chat name (a restart that did not carry
+        // it) is still the thread's conversation: the durable binding names it.
+        // Binding, tombstone and restore guards apply as for a named root.
+        if latest.is_none() {
+            latest = store
+                .bound_root_terminal(thread_id)
+                .map_err(|error| fail(error.to_string()))?;
+        }
         latest
             .map(|record| crate::meta::parse_run_id(&record.run_id).map_err(fail))
             .transpose()

@@ -253,6 +253,16 @@ impl RunStore {
             .latest_terminal_run_context(name)
     }
 
+    pub(crate) fn bound_root_terminal(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<RunContextRecord>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|error| StorageError::Io(error.to_string()))?
+            .bound_root_terminal_run_context(thread_id)
+    }
+
     /// 同じ DB を使用する writer handle と読み取り接続を束ねる。
     ///
     /// # Errors

@@ -1,8 +1,8 @@
 //! The host's adapter for the runtime's durable lane delivery (ADR 0044 Phase 1c).
 //!
 //! The runtime owns the outbox, claim lease, receipts, wake guard and Stop; it asks this host
-//! only *who* a thread currently is: its current root run and the authority (ownership permit,
-//! project, model) under which a finished root may be restored. A sidebar name is never used to
+//! only *who* a thread currently is: its current root run and the context (project, model)
+//! under which a finished root may be restored. A sidebar name is never used to
 //! guess a root, and a thread this host cannot act for answers with a typed NACK so the
 //! notifications stay durable and the lease is released.
 //!

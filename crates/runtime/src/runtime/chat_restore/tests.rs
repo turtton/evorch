@@ -548,3 +548,43 @@ async fn ownership_only_record_with_an_uncertain_effect_is_not_restored() {
     assert!(!renewable(&fixture));
     assert!(descriptor.has_uncertain_effects() && !descriptor.renewable_ownership_only());
 }
+
+#[tokio::test]
+async fn latest_chat_run_follows_the_thread_binding_when_the_saved_name_lost_its_chat_identity() {
+    // Given: a thread's root whose latest snapshot was saved as a bare role,
+    // as a restart that did not carry the chat name leaves it.
+    let fixture = Fixture::new();
+    let run = fixture
+        .runtime
+        .delegate_chat(
+            "thread",
+            Role::Orchestrator,
+            "task".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    fixture.runtime.wait(run).await.unwrap();
+    let store = fixture.runtime.shared.run_store.get().unwrap();
+    let mut record = store.restore_record(run).unwrap().unwrap();
+    assert_eq!(record.name, "chat:Orchestrator:thread");
+    record.name = "Orchestrator".into();
+    fixture
+        .storage
+        .handle()
+        .upsert_run_context(&record)
+        .unwrap();
+    assert!(
+        store
+            .latest_terminal_named("chat:Orchestrator:thread")
+            .unwrap()
+            .is_none(),
+        "the name no longer finds it"
+    );
+    // When/Then: the durable binding still resolves the same root, and only
+    // for the thread it is bound to.
+    assert_eq!(
+        fixture.runtime.latest_chat_run("thread").unwrap(),
+        Some(run)
+    );
+    assert_eq!(fixture.runtime.latest_chat_run("other").unwrap(), None);
+}
