@@ -574,3 +574,77 @@ fn the_live_view_draws_the_recent_pace_and_forecasts_without_a_refresh_button() 
     screen.run_steps(2);
     screen.get_by_label("$8.00/h");
 }
+
+// Given: unpriced tokens inside the window and in today and the month
+// When: the Live view is drawn
+// Then: the pace, the window, today and the month are marked as lower bounds
+#[test]
+fn the_live_view_marks_lower_bounds_where_the_ledger_lacks_a_price() {
+    let mut screen = live_screen();
+    let actions = asked(&mut screen);
+    let get = live_query(&actions[0]).unwrap().clone();
+    let mut live = live_fixture();
+    live.minutes[LIVE_USAGE_MINUTES - 1].unpriced_tokens = 7;
+    live.today.unpriced_tokens = 7;
+    live.month.unpriced_tokens = 7;
+    let reply = FeatureReply::Query(Ok(QueryReply::Diagnostics(DiagnosticsReply::LiveUsage(
+        Box::new(ReadOutcome {
+            operation: view(&get.operation_id, OperationState::Ready),
+            data: Some(live),
+        }),
+    ))));
+    answer(&mut screen, actions[0].tag, reply);
+    for label in ["$3.00/h*", "$30.00*"] {
+        let _ = screen
+            .get_all_by_label(label)
+            .next()
+            .unwrap_or_else(|| panic!("{label}"));
+    }
+    assert!(screen.get_all_by_label("$3.00*").count() >= 2);
+}
+
+// Given: a read of the thread and of Live in flight / When: the session is reset and the
+//        old answers arrive
+// Then: they are dropped, and both are read again by themselves
+#[test]
+fn a_reset_during_a_read_drops_the_old_answer_and_reads_again() {
+    let mut feature = DiagnosticsFeature::default();
+    let cache = cache_of(&["t1"], &[]);
+    let t0 = Instant::now();
+    let thread_ask = maintain_with(&mut feature, &cache, Some("t1"), shown(), t0);
+    let old_thread = thread_query(&thread_ask[0]).unwrap().clone();
+    let live_ask = keep_live_at(&mut feature, t0);
+    let old_live = live_query(&live_ask[0]).unwrap().clone();
+
+    feature.reset();
+    feature.reply(
+        thread_ask[0].tag,
+        thread_reply(&old_thread, OperationState::Ready, 9_000_000, 0),
+    );
+    feature.reply(
+        live_ask[0].tag,
+        live_reply(&old_live, OperationState::Ready),
+    );
+    assert_eq!(total_of(&feature, "t1"), None);
+    assert!(feature.live.is_none());
+
+    let thread_again = maintain_with(&mut feature, &cache, Some("t1"), shown(), t0);
+    assert_eq!(thread_again.len(), 1);
+    let new_thread = thread_query(&thread_again[0]).unwrap().clone();
+    assert_ne!(new_thread.operation_id, old_thread.operation_id);
+    let live_again = keep_live_at(&mut feature, t0);
+    assert_eq!(live_again.len(), 1);
+    let new_live = live_query(&live_again[0]).unwrap().clone();
+    assert_ne!(new_live.operation_id, old_live.operation_id);
+
+    feature.reply(
+        thread_again[0].tag,
+        thread_reply(&new_thread, OperationState::Ready, 1_000_000, 0),
+    );
+    feature.reply(
+        live_again[0].tag,
+        live_reply(&new_live, OperationState::Ready),
+    );
+    assert_eq!(total_of(&feature, "t1"), Some(1_000_000));
+    assert!(feature.live.is_some());
+}

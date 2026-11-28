@@ -208,6 +208,7 @@ impl LiveData {
                     value,
                     detail,
                     sparkline: None,
+                    hint: None,
                 })
                 .collect(),
         );
