@@ -60,6 +60,8 @@ pub struct Descriptor {
     pub input: Option<InputBody>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<super::ToolRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<super::PresentationRow>,
 }
 
 #[derive(Debug)]
@@ -356,6 +358,7 @@ fn inputs(
                     bytes,
                 }),
                 tool: None,
+                presentation: None,
             };
             result.push(Input {
                 id,
@@ -586,6 +589,7 @@ impl PreparedHistory<'_> {
                         bytes: input.bytes,
                     }),
                     tool: None,
+                    presentation: None,
                 })
             }
             Choice::Event(header) => {
@@ -656,6 +660,7 @@ impl PreparedHistory<'_> {
                     parts: message.parts,
                     input: None,
                     tool: message.tool,
+                    presentation: message.presentation,
                 })
             }
         }

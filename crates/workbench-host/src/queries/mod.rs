@@ -83,6 +83,10 @@ pub(crate) fn text(value: &str, max: usize) -> String {
     masked[..end].to_owned()
 }
 
+fn serialized_len<T: Serialize>(item: &T) -> usize {
+    serde_json::to_vec(item).expect("serializable view").len()
+}
+
 #[derive(Default)]
 pub(crate) struct Pager(Mutex<VecDeque<(String, String, Revision, CursorPosition)>>);
 enum CursorPosition {
@@ -184,14 +188,26 @@ impl Pager {
             .map(|(_, _, revision, _)| Some(*revision))
             .ok_or_else(|| error(ErrorCode::Conflict, "unknown page cursor or wrong query"))
     }
-    /// Backward cursors hold an exclusive end offset; items within each page
-    /// stay chronological so a client can prepend the older page unchanged.
+    #[cfg(test)]
     pub fn page_backward<T: Clone + Serialize>(
         &self,
         key: &str,
         items: &[T],
         request: &PageRequest,
         rev: Revision,
+    ) -> Result<Page<T>, WorkbenchError> {
+        self.page_backward_sized(key, items, request, rev, serialized_len)
+    }
+    /// Backward cursors hold an exclusive end offset; items within each page
+    /// stay chronological so a client can prepend the older page unchanged. The page
+    /// budget is charged by `size_of`, as in [`Self::page_sized`].
+    pub fn page_backward_sized<T: Clone + Serialize>(
+        &self,
+        key: &str,
+        items: &[T],
+        request: &PageRequest,
+        rev: Revision,
+        size_of: impl Fn(&T) -> usize,
     ) -> Result<Page<T>, WorkbenchError> {
         request.validate()?;
         let mut tokens = self.0.lock().unwrap();
@@ -217,10 +233,7 @@ impl Pager {
         let mut start = end;
         let mut bytes = 256;
         while start > 0 && end - start < request.limit as usize {
-            let size = serde_json::to_vec(&items[start - 1])
-                .expect("serializable view")
-                .len()
-                + 1;
+            let size = size_of(&items[start - 1]) + 1;
             if bytes + size > PAGE_BYTES {
                 if start == end {
                     return Err(error(
@@ -261,6 +274,18 @@ impl Pager {
         request: &PageRequest,
         rev: Revision,
     ) -> Result<Page<T>, WorkbenchError> {
+        self.page_sized(key, items, request, rev, serialized_len)
+    }
+    /// [`Self::page`] with the page budget charged by `size_of` instead of the serialized
+    /// length, for items whose view is larger than what they serialize to.
+    pub fn page_sized<T: Clone + Serialize>(
+        &self,
+        key: &str,
+        items: &[T],
+        request: &PageRequest,
+        rev: Revision,
+        size_of: impl Fn(&T) -> usize,
+    ) -> Result<Page<T>, WorkbenchError> {
         request.validate()?;
         let mut tokens = self.0.lock().unwrap();
         let start = match &request.cursor {
@@ -287,10 +312,7 @@ impl Pager {
         let mut end = start;
         let mut bytes = 256;
         while end < items.len() && end - start < request.limit as usize {
-            let size = serde_json::to_vec(&items[end])
-                .expect("serializable view")
-                .len()
-                + 1;
+            let size = size_of(&items[end]) + 1;
             if bytes + size > PAGE_BYTES {
                 if end == start {
                     return Err(error(

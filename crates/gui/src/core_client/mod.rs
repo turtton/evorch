@@ -1186,6 +1186,7 @@ impl CoreClientScreen {
                     | shell::Effect::Lane(_)
                     | shell::Effect::PullRequest(_)
                     | shell::Effect::PullRequestChip(_)
+                    | shell::Effect::OpenArtifact(_)
                     | shell::Effect::Settings(_)
             )
         }) {
@@ -1395,6 +1396,7 @@ fn apply_effect(
                     shared.features.reveal(features::FeatureId::PullRequests);
                 }
             }
+            shell::Effect::OpenArtifact(open) => shared.features.open_card_artifact(open),
             shell::Effect::PullRequestChip(action) => {
                 if let Some(pull_requests) = shared.features.pull_requests_mut() {
                     pull_requests.enqueue_chip(action);

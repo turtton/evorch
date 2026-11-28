@@ -61,6 +61,7 @@ fn features(log: &Log, availability: Availability) -> Features {
         selection: None,
         expanded: Default::default(),
         pins: Default::default(),
+        pending_pages: Default::default(),
     }
 }
 fn take(log: &Log) -> Vec<Observed> {
@@ -676,6 +677,7 @@ fn a_revealed_area_missing_from_the_layout_is_opened_as_a_tab() {
             selection: None,
             expanded: Default::default(),
             pins: Default::default(),
+            pending_pages: Default::default(),
         },
         ..Shared::default()
     }));
@@ -710,4 +712,82 @@ fn a_revealed_area_missing_from_the_layout_is_opened_as_a_tab() {
     take(&log);
     compose(&ctx, &mut screen, input(false));
     assert!(!take(&log).contains(&Observed::Render));
+}
+
+// Given: a card's artifact that is a page, then one that is an image
+// Then: the page is a browser preview and the image is queued for the artifacts feature, whose
+//       section comes forward; neither reads anything
+#[test]
+fn a_card_sends_a_page_to_the_preview_and_anything_else_to_the_artifacts_feature() {
+    use crate::core_client::transcript::artifacts::OpenArtifact;
+    let log = Log::default();
+    let mut features = features(&log, Availability::Implemented { required: &[] });
+    features
+        .features
+        .push(Box::new(artifacts::ArtifactsFeature::default()));
+    let open = |media_type: &str| OpenArtifact {
+        reference: picture(),
+        title: "chart".into(),
+        media_type: media_type.into(),
+    };
+    let here = || Selection {
+        project: Some(ProjectId::new("p").unwrap()),
+        thread: Some(ThreadId::new("t").unwrap()),
+    };
+    features.open_card_artifact(open("text/html"));
+    assert!(
+        take(&log).is_empty(),
+        "nothing is handed over from the click itself"
+    );
+    features.observe_selection(&here());
+    assert_eq!(take(&log), [Observed::Preview]);
+    assert_eq!(features.take_focus(), [FeatureId::Browser]);
+    let requested = |features: &mut Features| {
+        features
+            .features
+            .iter_mut()
+            .find_map(|f| f.as_artifacts_mut())
+            .and_then(|artifacts| artifacts.requested().cloned())
+    };
+    assert_eq!(requested(&mut features), None);
+    features.open_card_artifact(open("image/png"));
+    assert!(take(&log).is_empty());
+    assert_eq!(features.take_focus(), [FeatureId::Artifacts]);
+    assert_eq!(requested(&mut features), Some(picture()));
+}
+
+// Given: a card's page asked for, but not yet handed to the browser feature
+// Then: a disconnect, a new snapshot or another selected thread drops it, so no preview is
+//       requested later in a session or conversation that never asked for it
+#[test]
+fn a_page_a_card_asked_for_is_dropped_by_a_disconnect_a_new_snapshot_or_another_thread() {
+    use crate::core_client::transcript::artifacts::OpenArtifact;
+    let log = Log::default();
+    let mut features = features(&log, Availability::Implemented { required: &[] });
+    let selection = |thread: &str| Selection {
+        project: Some(ProjectId::new("p").unwrap()),
+        thread: Some(ThreadId::new(thread).unwrap()),
+    };
+    let click = |features: &mut Features| {
+        features.open_card_artifact(OpenArtifact {
+            reference: picture(),
+            title: "page".into(),
+            media_type: "text/html".into(),
+        });
+    };
+    click(&mut features);
+    features.disconnected();
+    features.observe_selection(&selection("t"));
+    click(&mut features);
+    features.begin_session(&[], Vec::new());
+    features.observe_selection(&selection("t"));
+    click(&mut features);
+    features.observe_selection(&selection("other"));
+    features.observe_selection(&selection("t"));
+    let seen = take(&log);
+    assert!(!seen.contains(&Observed::Preview), "{seen:?}");
+    assert!(features.take_focus().is_empty());
+    click(&mut features);
+    features.observe_selection(&selection("t"));
+    assert_eq!(take(&log), [Observed::Preview]);
 }

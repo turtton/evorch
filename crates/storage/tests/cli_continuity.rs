@@ -895,7 +895,7 @@ fn undoing_v72_then_opening_migrates_again() {
         .sql()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 81);
+    assert_eq!(version, 82);
     assert_eq!(
         database
             .issue_cli_continuity(&binding("inv-a", "r1"), &token(1), 1)

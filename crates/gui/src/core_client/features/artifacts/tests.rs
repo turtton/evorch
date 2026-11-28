@@ -1230,6 +1230,7 @@ fn composition() -> (
             selection: None,
             expanded: Default::default(),
             pins: Default::default(),
+            pending_pages: Default::default(),
         },
         ..crate::core_client::Shared::default()
     }));
@@ -1880,4 +1881,114 @@ fn the_panel_reads_in_english() {
     for problem in &problems {
         assert!(!has_cjk(&problem.line()), "{}", problem.line());
     }
+}
+
+// Given: a card's request for an image the thread's list does not hold
+// Then: nothing is sent when it is queued; the feature's next pass asks the core for exactly
+//       that artifact, fetches it by reference and decodes it
+#[test]
+fn a_card_opens_an_image_the_list_does_not_hold() {
+    let listed = reference("t1", 2);
+    let picture = reference("t1", 1);
+    let bytes = png(4, 3);
+    let len = bytes.len() as u64;
+    let mut harness = harness(Rig::new("t1"));
+    let sent = frames(&mut harness);
+    let (tag, _) = only_query(&sent);
+    harness.state_mut().feature.reply(
+        tag,
+        list(vec![meta(&listed, "listed.png", "image/png", len)], None),
+    );
+    frames(&mut harness);
+    harness
+        .state_mut()
+        .feature
+        .request_open(picture.clone(), "chart.png".into());
+    assert!(frames(&mut harness).queries.is_empty());
+    harness.state_mut().maintain_as(false);
+    let sent = frames(&mut harness);
+    let (tag, query) = only_query(&sent);
+    assert!(matches!(query, ArtifactsQuery::Get { artifact } if *artifact == picture));
+    harness.state_mut().feature.reply(
+        tag,
+        ok(ArtifactsReply::Metadata(meta(
+            &picture,
+            "chart.png",
+            "image/png",
+            len,
+        ))),
+    );
+    let sent = frames(&mut harness);
+    assert!(matches!(&sent.started[..], [(_, DataSource::Artifact(r))] if *r == picture));
+    let data_tag = sent.started[0].0;
+    harness
+        .state_mut()
+        .publish_blob(data_tag, digest(1), len, bytes);
+    harness.step();
+    let egui_ctx = harness.ctx.clone();
+    harness.state_mut().finish_decode(&egui_ctx);
+    assert!(matches!(
+        harness.state().body(),
+        Body::Image(ImageView::Shown { size: [4, 3], .. })
+    ));
+    assert!(harness.state().feature.requested().is_none());
+}
+
+// Given: a queued request from a card, and then a card of another thread or project, a
+//        selection change, a disconnect, or a new snapshot before the next pass
+// Then: it is dropped, and nothing is asked of the core for it
+#[test]
+fn a_requested_artifact_is_dropped_when_its_scope_is_gone() {
+    for case in 0..5 {
+        let mut harness = harness(Rig::new("t1"));
+        frames(&mut harness);
+        let mut picture = reference(if case == 0 { "t2" } else { "t1" }, 1);
+        if case == 4 {
+            picture.project = project("q");
+        }
+        harness
+            .state_mut()
+            .feature
+            .request_open(picture, "chart.png".into());
+        match case {
+            1 => harness.state_mut().selection.thread = Some(thread("t2")),
+            2 => harness.state_mut().feature.disconnected(),
+            3 => harness.state_mut().feature.reset(),
+            _ => {}
+        }
+        harness.state_mut().maintain_as(false);
+        let sent = frames(&mut harness);
+        assert!(
+            sent.queries
+                .iter()
+                .all(|(_, query)| !matches!(query, ArtifactsQuery::Get { .. })),
+            "case {case}: {sent:?}"
+        );
+        assert!(harness.state().feature.open.is_none(), "case {case}");
+        assert!(harness.state().feature.requested().is_none(), "case {case}");
+    }
+}
+
+// Given: a card's request for an artifact whose content was deleted after it was presented
+// Then: the core's refusal shows as the existing "gone" state, and the card is not involved
+#[test]
+fn a_card_whose_artifact_is_gone_gets_the_existing_unavailable_state() {
+    let picture = reference("t1", 1);
+    let mut harness = harness(Rig::new("t1"));
+    frames(&mut harness);
+    harness
+        .state_mut()
+        .feature
+        .request_open(picture, "chart.png".into());
+    harness.state_mut().maintain_as(false);
+    let sent = frames(&mut harness);
+    let (tag, _) = only_query(&sent);
+    harness.state_mut().feature.reply(
+        tag,
+        err(FeatureError::new("not found").with_code(ErrorCode::NotFound)),
+    );
+    assert!(matches!(
+        harness.state().body(),
+        Body::Failed(Problem::Gone)
+    ));
 }

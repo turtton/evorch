@@ -19,6 +19,7 @@ use crate::theme::text::muted;
 use crate::theme::tokens::*;
 use crate::theme::widgets::{ghost, ghost_icon_button};
 
+pub(super) mod artifacts;
 mod cards;
 
 #[derive(Clone, Copy)]
@@ -294,6 +295,9 @@ fn data_fingerprint(
     for message in messages {
         message.run.as_str().hash(&mut hasher);
         message.index.get().hash(&mut hasher);
+        if let Some(presentation) = &message.presentation {
+            artifacts::fingerprint(presentation, &mut hasher);
+        }
         let contents = [Some(&message.content)].into_iter().chain(
             message
                 .tool
@@ -365,12 +369,13 @@ impl ViewAnchor {
     }
 }
 
-/// Whether this view draws `message`: a tool call always has a card, and a note without text
-/// is nothing to show.
+/// Whether this view draws `message`: a tool call always has a card, so does a presentation
+/// even without artifacts, and a note without text is nothing to show.
 fn drawn(message: &CommittedMessage) -> bool {
     match message.role {
         MessageRole::User | MessageRole::Assistant => true,
         MessageRole::Tool => message.tool.is_some(),
+        MessageRole::Artifacts => message.presentation.is_some(),
         MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error => {
             !matches!(&message.content, MessageContent::Inline { text } if text.is_empty())
         }
@@ -408,11 +413,37 @@ fn items<'a>(history: &[&'a CommittedMessage]) -> Vec<Item<'a>> {
             }
             _ if is_aside(message) && open_run => trailing.push(message),
             MessageRole::Assistant => {
-                let tools_at = items.len().checked_sub(1).filter(|_| open_run);
+                // The cards its run showed between its calls do not end its turn: the groups
+                // on either side of them fold with the reply.
+                let mut group = items.len();
+                while group > 0 {
+                    match &items[group - 1] {
+                        Item::Message(card)
+                            if card.role == MessageRole::Artifacts && card.run == message.run =>
+                        {
+                            group -= 1;
+                        }
+                        _ => break,
+                    }
+                }
+                let tools_at = group.checked_sub(1).filter(|&at| {
+                    matches!(&items[at], Item::Tools { rows, .. } if rows[0].run == message.run)
+                });
                 items.extend(trailing.drain(..).map(Item::Message));
-                if let Some(Item::Tools { folded, .. }) = tools_at.and_then(|at| items.get_mut(at))
-                {
-                    *folded = true;
+                if let Some(at) = tools_at {
+                    let mut at = at + 1;
+                    while at > 0 {
+                        at -= 1;
+                        match &mut items[at] {
+                            Item::Tools { rows, folded } if rows[0].run == message.run => {
+                                *folded = true;
+                            }
+                            Item::Message(card)
+                                if card.role == MessageRole::Artifacts
+                                    && card.run == message.run => {}
+                            _ => break,
+                        }
+                    }
                 }
                 items.push(Item::Message(message));
             }
@@ -529,6 +560,15 @@ fn message_row(
             }
             // A tool call is always drawn as part of its group.
             MessageRole::Tool => {}
+            MessageRole::Artifacts => {
+                let mut env = cards::Env {
+                    requested_bodies,
+                    cache,
+                    chips,
+                    effects,
+                };
+                artifacts::card(ui, &mut env, message);
+            }
             MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error => {
                 let mut env = cards::Env {
                     requested_bodies,
@@ -685,6 +725,61 @@ mod tests {
             committed("r", 1, "assistant", "not s's reply"),
         ];
         assert_eq!(shapes(&mixed), [(1, false), (1, false)]);
+    }
+
+    fn card(run: &str, index: u64) -> CommittedMessage {
+        serde_json::from_value(serde_json::json!({
+            "thread": "thr", "run": run, "index": index.to_string(), "role": "artifacts",
+            "content": inline(""), "presentation": {"artifacts": []},
+        }))
+        .unwrap()
+    }
+
+    // Given: a run's calls, a presentation, the present call's own row and the run's reply, in the
+    //        order the core saves them
+    // Then: the card is an item of its own that neither joins nor hides the calls, the reply folds
+    //       the groups on both sides of it, and the card stays in view after the reply
+    #[test]
+    fn a_card_splits_the_calls_and_the_reply_folds_both_groups() {
+        let history = [
+            call("r", 0),
+            card("r", 1),
+            call("r", 2),
+            committed("r", 3, "assistant", "here they are"),
+            committed("r", 4, "user", "thanks"),
+        ];
+        assert_eq!(shapes(&history), [(1, true), (1, true)]);
+        let refs: Vec<_> = history.iter().collect();
+        let kinds: Vec<_> = items(&refs)
+            .iter()
+            .map(|item| match item {
+                Item::Tools { .. } => "calls".to_owned(),
+                Item::Message(m) => format!("{:?}", m.role),
+            })
+            .collect();
+        assert_eq!(kinds, ["calls", "Artifacts", "calls", "Assistant", "User"]);
+
+        assert_eq!(
+            shapes(&[call("r", 0), card("r", 1), call("r", 2)]),
+            [(1, false), (1, false)]
+        );
+        let other = [
+            call("r", 0),
+            card("r", 1),
+            call("r", 2),
+            committed("s", 3, "assistant", "not r's reply"),
+        ];
+        assert_eq!(shapes(&other), [(1, false), (1, false)]);
+        let at_once = [
+            call("r", 0),
+            card("r", 1),
+            committed("r", 2, "assistant", "x"),
+        ];
+        assert_eq!(shapes(&at_once), [(1, true)]);
+        assert_eq!(
+            shapes(&[card("r", 0), committed("r", 1, "assistant", "x")]),
+            []
+        );
     }
 
     // Given: reasoning, a notice and an error around and between a run's tool calls

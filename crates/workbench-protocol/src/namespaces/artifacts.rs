@@ -3,7 +3,7 @@ use crate::{
     Capability,
     handshake::WireLimits,
     ids::{ProjectId, ThreadId},
-    validation::{ValidationError, check_count, check_line},
+    validation::{ValidationError, check_count, check_line, check_text},
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,11 @@ pub const EVENT_TYPES: &[&str] = &[];
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 pub const MAX_CONTENT_CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_ARTIFACT_PAGE: usize = 64;
+/// Most artifacts one presentation row carries; `present` itself allows no more.
+pub const MAX_PRESENTED_ARTIFACTS: usize = 8;
+pub const MAX_PRESENTATION_TITLE_BYTES: usize = 1024;
+pub const MAX_PRESENTATION_CAPTION_BYTES: usize = 4096;
+pub const MAX_PRESENTATION_MEDIA_TYPE_BYTES: usize = 128;
 
 /// A claim to verify against stored artifact AND conversation metadata.
 /// Neither this affiliation nor knowledge of an id grants access.
@@ -27,19 +32,100 @@ pub struct ArtifactRef {
     pub digest: String,
 }
 
+/// The syntax of an artifact id and its SHA-256 digest; what they name is not checked.
+fn check_artifact_identity(artifact_id: &str, digest: &str) -> Result<(), ValidationError> {
+    let valid = artifact_id
+        .strip_prefix("artifact-")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        && digest.len() == 64
+        && digest.bytes().all(|b| b.is_ascii_hexdigit());
+    if !valid {
+        return Err(ValidationError::OutOfRange {
+            field: "artifact",
+            reason: "expected an artifact id and SHA-256 digest",
+        });
+    }
+    Ok(())
+}
+
 impl ArtifactRef {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        let valid = self
-            .artifact_id
-            .strip_prefix("artifact-")
-            .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-            && self.digest.len() == 64
-            && self.digest.bytes().all(|b| b.is_ascii_hexdigit());
-        if !valid {
-            return Err(ValidationError::OutOfRange {
-                field: "artifact",
-                reason: "expected an artifact id and SHA-256 digest",
-            });
+        check_artifact_identity(&self.artifact_id, &self.digest)
+    }
+}
+
+/// One artifact of a presentation row. It names the artifact and describes it for a card.
+/// The owning thread comes from the row and the project from the thread; neither the
+/// source path nor any content is carried. Presentation grants no access: opening still
+/// goes through a verified [`ArtifactRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresentedArtifactView {
+    pub artifact_id: String,
+    pub digest: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    pub media_type: String,
+}
+
+/// The artifacts the conversation owner showed at one point of the conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactPresentationView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    /// In the order `present` listed them. May be empty, and may repeat an artifact.
+    pub artifacts: Vec<PresentedArtifactView>,
+}
+
+impl ArtifactPresentationView {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(title) = &self.title {
+            check_line(
+                "presentation.title",
+                title,
+                MAX_PRESENTATION_TITLE_BYTES,
+                false,
+            )?;
+        }
+        if let Some(caption) = &self.caption {
+            check_text(
+                "presentation.caption",
+                caption,
+                MAX_PRESENTATION_CAPTION_BYTES,
+                true,
+            )?;
+        }
+        check_count(
+            "presentation.artifacts",
+            self.artifacts.len(),
+            MAX_PRESENTED_ARTIFACTS,
+        )?;
+        for item in &self.artifacts {
+            check_artifact_identity(&item.artifact_id, &item.digest)?;
+            check_line(
+                "artifact.title",
+                &item.title,
+                MAX_PRESENTATION_TITLE_BYTES,
+                false,
+            )?;
+            if let Some(caption) = &item.caption {
+                check_text(
+                    "artifact.caption",
+                    caption,
+                    MAX_PRESENTATION_CAPTION_BYTES,
+                    true,
+                )?;
+            }
+            check_line(
+                "artifact.media_type",
+                &item.media_type,
+                MAX_PRESENTATION_MEDIA_TYPE_BYTES,
+                false,
+            )?;
         }
         Ok(())
     }

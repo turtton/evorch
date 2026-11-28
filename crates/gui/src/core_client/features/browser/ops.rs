@@ -212,6 +212,21 @@ impl<P: Clone> Ops<P> {
         self.ops.contains_key(&id)
     }
 
+    /// Whether the next send of the command of `id` is not handed to the connection yet: it was
+    /// never sent, or it was refused as busy and waits to be sent again.
+    pub fn awaits_send(&self, id: OpId) -> bool {
+        self.ops
+            .get(&id)
+            .is_some_and(|op| matches!(op.stage, Stage::Ready | Stage::Backoff { .. }))
+    }
+
+    /// The command of `id` is not sent again by itself after a busy answer from now on.
+    pub fn forbid_retry(&mut self, id: OpId) {
+        if let Some(op) = self.ops.get_mut(&id) {
+            op.retries = MAX_AUTO_RETRIES;
+        }
+    }
+
     /// The reply of a command is lost: shown as unknown.
     pub fn is_unknown(&self, id: OpId) -> bool {
         self.ops

@@ -10,7 +10,7 @@ use std::{
 };
 
 pub(crate) const FORMAT_VERSION: i64 = 1;
-pub(crate) const REDUCER_VERSION: i64 = 4;
+pub(crate) const REDUCER_VERSION: i64 = 5;
 pub(crate) const MAX_DESCRIPTOR_BYTES: usize = 8 * 1024 * 1024;
 
 fn invalid() -> StorageError {
@@ -350,6 +350,8 @@ struct EncodedMessage<'a> {
     input: Option<()>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool: &'a Option<super::ToolRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presentation: &'a Option<super::PresentationRow>,
 }
 fn encoded_len(run: &str, message: &super::Message) -> Result<usize, StorageError> {
     let role = message.role.as_str();
@@ -373,10 +375,15 @@ fn encoded_len(run: &str, message: &super::Message) -> Result<usize, StorageErro
             parts: &message.parts,
             input: None,
             tool: &message.tool,
+            presentation: &message.presentation,
         },
     )
     .map_err(|e| StorageError::Serialization(e.to_string()))?;
-    Ok(count.0)
+    Ok(count.0
+        + message
+            .presentation
+            .as_ref()
+            .map_or(0, super::rows::presentation_public_bound))
 }
 
 /// CAS the source and checkpoint before applying a prepared row from another connection.

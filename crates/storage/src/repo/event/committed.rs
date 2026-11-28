@@ -12,7 +12,7 @@ use crate::StorageError;
 use crate::thread_retention::TombstoneSet;
 
 /// The `(kind, subkind)` pairs of the rows a transcript is built from.
-pub const COMMITTED_SUBKINDS: [(&str, &str); 11] = [
+pub const COMMITTED_SUBKINDS: [(&str, &str); 12] = [
     ("Message", "MessageCompleted"),
     ("Message", "ReasoningCompleted"),
     ("Message", "FinalResultPublished"),
@@ -20,6 +20,7 @@ pub const COMMITTED_SUBKINDS: [(&str, &str); 11] = [
     ("Lifecycle", "TaskPromptPublished"),
     ("Tool", "ToolStarted"),
     ("Tool", "ToolCompleted"),
+    ("Tool", "ArtifactsPresented"),
     ("Lifecycle", "AgentRunStateChanged"),
     ("Provider", "RequestFailed"),
     ("Provider", "CooldownStarted"),
@@ -48,7 +49,7 @@ pub(crate) const IDS_COMMITTED_OF_RUN_SQL: &str = "SELECT id FROM events \
      WHERE run_id = ?1 AND id <= ?2 AND CASE +kind \
      WHEN 'Message' THEN +subkind IN ('MessageCompleted', 'ReasoningCompleted', 'FinalResultPublished', 'MessagePart') \
      WHEN 'Lifecycle' THEN +subkind IN ('TaskPromptPublished', 'AgentRunStateChanged') \
-     WHEN 'Tool' THEN +subkind IN ('ToolStarted', 'ToolCompleted') \
+     WHEN 'Tool' THEN +subkind IN ('ToolStarted', 'ToolCompleted', 'ArtifactsPresented') \
      WHEN 'Provider' THEN +subkind IN ('RequestFailed', 'CooldownStarted', 'FallbackTriggered') ELSE 0 END";
 // A compressed or tokenized payload cannot be searched for the run id, so it stays a
 // candidate and decoding confirms it.

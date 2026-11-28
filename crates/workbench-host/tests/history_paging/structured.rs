@@ -3,6 +3,45 @@ use super::*;
 use event_bus::{AgentRunPhase, LifecycleEvent, ProviderEvent, ProviderFailureKind, ToolEvent};
 use workbench_protocol::views::{ToolCallStatus, ToolCallView};
 
+fn artifact(
+    id: u8,
+    title: &str,
+    caption: Option<&str>,
+    media_type: &str,
+) -> event_bus::PresentedArtifact {
+    event_bus::PresentedArtifact {
+        artifact_id: format!("artifact-{id:032x}"),
+        title: title.into(),
+        caption: caption.map(Into::into),
+        media_type: media_type.into(),
+        path: "/store/blobs/never-published.png".into(),
+        byte_len: 3,
+        sha256: format!("{id:064x}"),
+    }
+}
+fn presented(
+    title: Option<&str>,
+    caption: Option<&str>,
+    artifacts: Vec<event_bus::PresentedArtifact>,
+) -> ToolEvent {
+    ToolEvent::ArtifactsPresented {
+        run_id: "run-1".into(),
+        presentation: event_bus::ArtifactPresentation {
+            presentation_id: "presentation-1".into(),
+            title: title.map(Into::into),
+            caption: caption.map(Into::into),
+            artifacts,
+        },
+    }
+}
+fn artifacts_row(
+    message: &CommittedMessage,
+) -> &workbench_protocol::namespaces::artifacts::ArtifactPresentationView {
+    assert_eq!(message.role, MessageRole::Artifacts);
+    assert!(message.tool.is_none());
+    message.presentation.as_ref().unwrap()
+}
+
 fn save(f: &Fixture, kind: impl Into<event_bus::EventKind>) {
     f.store
         .handle()
@@ -90,6 +129,21 @@ fn tool(message: &CommittedMessage) -> &ToolCallView {
     message.tool.as_ref().unwrap()
 }
 
+// Longer than the 2048 bytes from which a stored string is a body token, and within the 1000
+// characters `present` accepts.
+fn long_japanese(ch: char) -> String {
+    ch.to_string().repeat(1000)
+}
+// Short, but a string that starts with the escape character is stored as a body as well.
+const ESCAPED_TITLE: &str = "\u{e000}evorch-body:v1:looks like a token";
+fn seeded_artifacts() -> Vec<event_bus::PresentedArtifact> {
+    vec![
+        artifact(2, "Chart\n1", Some(&long_japanese('い')), "image/png"),
+        artifact(1, "\u{1}", Some("line one\nline two\u{7}"), "text/html"),
+        artifact(2, "Chart again", None, "image/png"),
+    ]
+}
+
 fn seed_every_kind(f: &Fixture) {
     save(
         f,
@@ -129,6 +183,19 @@ fn seed_every_kind(f: &Fixture) {
             run_id: Some("run-1".into()),
             parent_call_id: Some("call-1".into()),
         },
+    );
+    save(f, started("call-p", "present", serde_json::json!({})));
+    save(
+        f,
+        presented(
+            Some(ESCAPED_TITLE),
+            Some(&long_japanese('あ')),
+            seeded_artifacts(),
+        ),
+    );
+    save(
+        f,
+        completed("call-p", "present", Some("shown".into()), false),
     );
     save(
         f,
@@ -184,9 +251,56 @@ fn indexed_and_live_structured_history_agree() {
             MessageRole::Assistant,
             MessageRole::Tool,
             MessageRole::Tool,
+            MessageRole::Artifacts,
+            MessageRole::Tool,
             MessageRole::Error,
             MessageRole::Error,
         ]
+    );
+    let card = artifacts_row(&forward[4]);
+    assert_eq!(card.title.as_deref(), Some(ESCAPED_TITLE));
+    assert_eq!(card.caption.as_deref(), Some(long_japanese('あ').as_str()));
+    let shown: Vec<_> = card
+        .artifacts
+        .iter()
+        .map(|a| {
+            (
+                a.artifact_id.clone(),
+                a.title.as_str(),
+                a.caption.clone(),
+                a.media_type.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                format!("artifact-{:032x}", 2),
+                "Chart1",
+                Some(long_japanese('い')),
+                "image/png"
+            ),
+            (
+                format!("artifact-{:032x}", 1),
+                "Artifact",
+                Some("line one\nline two".to_owned()),
+                "text/html"
+            ),
+            (
+                format!("artifact-{:032x}", 2),
+                "Chart again",
+                None,
+                "image/png"
+            ),
+        ]
+    );
+    assert_eq!(card.artifacts[0].digest, format!("{:064x}", 2));
+    assert_eq!(forward[4].content, inline(""));
+    assert!(
+        !serde_json::to_string(&forward)
+            .unwrap()
+            .contains("never-published")
     );
     let first = tool(&forward[2]);
     assert_eq!(first.tool_name, "shell");
@@ -488,4 +602,268 @@ fn durations_match_in_indexed_live_and_legacy_history_for_all_tool_names() {
     assert_eq!(read_all(&f, HistoryDirection::Forward, false), indexed);
     rebuild(&f);
     assert_eq!(read_all(&f, HistoryDirection::Backward, true), indexed);
+}
+
+fn thread_history(thread: &str, limit: u32) -> Query {
+    let Query::Conversation(ConversationQuery::ReadCommittedHistory(mut q)) =
+        history(PageRequest {
+            cursor: None,
+            limit,
+        })
+    else {
+        panic!()
+    };
+    q.thread = ThreadId::new(thread).unwrap();
+    Query::Conversation(ConversationQuery::ReadCommittedHistory(q))
+}
+
+// Given: a saved presentation whose text is held as stored bodies, read page by page
+// Then: reading resolves exactly the bodies the card shows (not the large text of other
+//       rows) and keeps the same position on the indexed and the legacy route
+#[test]
+fn reading_a_card_resolves_only_its_own_bodies() {
+    let f = current_thread_fixture();
+    save(
+        &f,
+        MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: "x".repeat(20 * 1024),
+        },
+    );
+    save(
+        &f,
+        presented(
+            Some(ESCAPED_TITLE),
+            Some("short"),
+            vec![artifact(1, "A", Some(&long_japanese('う')), "image/png")],
+        ),
+    );
+    save(
+        &f,
+        MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: "after".into(),
+        },
+    );
+    let meter = read_meter(&f);
+    let indexed = read_all(&f, HistoryDirection::Forward, true);
+    assert_eq!(
+        meter.counts().calls,
+        2,
+        "the title and the artifact's caption"
+    );
+    dirty(&f);
+    let before = meter.counts().calls;
+    let legacy = read_all(&f, HistoryDirection::Backward, false);
+    assert_eq!(meter.counts().calls - before, 2);
+    let place = |rows: &[CommittedMessage]| -> Vec<_> {
+        rows.iter()
+            .map(|m| (m.index, m.role, m.presentation.clone()))
+            .collect()
+    };
+    assert_eq!(place(&legacy), place(&indexed));
+    let roles: Vec<_> = indexed.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        [
+            MessageRole::Assistant,
+            MessageRole::Artifacts,
+            MessageRole::Assistant
+        ]
+    );
+    assert_eq!(artifacts_row(&indexed[1]).caption.as_deref(), Some("short"));
+}
+
+// Given: a presentation that cannot be shown whole: too many artifacts, an artifact id of the
+//        wrong shape, and a text body that is gone
+// Then: reading the history fails with the matching error and never returns the row without
+//       an item, on both routes, and the stream asks clients to read again
+#[test]
+fn an_unrepresentable_presentation_fails_the_read_and_resyncs_the_stream() {
+    let many = || {
+        (0..9)
+            .map(|i| artifact(i, "A", None, "image/png"))
+            .collect()
+    };
+    let misshapen = || {
+        let mut bad = artifact(1, "A", None, "image/png");
+        bad.artifact_id = "artifact-1".into();
+        vec![bad]
+    };
+    let gone = || vec![artifact(1, "A", Some(&long_japanese('え')), "image/png")];
+    let cases: [(Vec<event_bus::PresentedArtifact>, ErrorCode); 3] = [
+        (many(), ErrorCode::LimitExceeded),
+        (misshapen(), ErrorCode::StorageUnavailable),
+        (gone(), ErrorCode::StorageUnavailable),
+    ];
+    for (index, (artifacts, code)) in cases.into_iter().enumerate() {
+        let f = current_thread_fixture();
+        let mut sub = f.subscribe();
+        save(&f, presented(None, None, artifacts));
+        if index == 2 {
+            let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+            db.pragma_update(None, "foreign_keys", false).unwrap();
+            assert_eq!(db.execute("DELETE FROM content_blobs", []).unwrap(), 1);
+        }
+        for dirty_first in [false, true] {
+            if dirty_first {
+                dirty(&f);
+            }
+            assert_eq!(
+                query_error(&f, thread_history("thread-1", 10)),
+                code,
+                "case {index}"
+            );
+        }
+        f.rt.block_on(async {
+            loop {
+                match sub.recv().await.expect("open subscription").event {
+                    UiEvent::Projection(ProjectionEvent::ResyncRequired { .. }) => break,
+                    UiEvent::Conversation(ConversationEvent::MessageCommitted { message }) => {
+                        panic!("an unrepresentable presentation was published: {message:?}")
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+}
+
+// Given: a presentation that is not stored yet, then a stored message
+// Then: only the stored rows reach a subscriber, and the card, once stored, arrives at the
+//       position it was saved at
+#[test]
+fn a_card_is_published_only_after_it_is_stored() {
+    let f = current_thread_fixture();
+    let mut sub = f.subscribe();
+    f.runtime.event_bus().emit(Event::new(presented(
+        Some("unsaved"),
+        None,
+        vec![artifact(1, "A", None, "image/png")],
+    )));
+    let says = |text: &str| {
+        let event = Event::new(MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: text.into(),
+        });
+        f.store.handle().append_event(None, &event).unwrap();
+        f.runtime.event_bus().emit(event);
+    };
+    says("before");
+    let first = next_message(&f, &mut sub);
+    assert_eq!(
+        (first.role, first.index),
+        (MessageRole::Assistant, Sequence(0))
+    );
+    let card = Event::new(presented(
+        Some("saved"),
+        None,
+        vec![artifact(1, "A", None, "image/png")],
+    ));
+    f.store.handle().append_event(None, &card).unwrap();
+    f.runtime.event_bus().emit(card);
+    says("after");
+    let second = next_message(&f, &mut sub);
+    assert_eq!(
+        (second.role, second.index),
+        (MessageRole::Artifacts, Sequence(1))
+    );
+    assert_eq!(artifacts_row(&second).title.as_deref(), Some("saved"));
+    let third = next_message(&f, &mut sub);
+    assert_eq!(
+        (third.role, third.index),
+        (MessageRole::Assistant, Sequence(2))
+    );
+    let stored = read_all(&f, HistoryDirection::Forward, true);
+    assert_eq!(stored, [first, second, third]);
+}
+
+// Given: a conversation that belongs to no project
+// Then: its card is a row like any other
+#[test]
+fn a_card_of_a_conversation_without_a_project_is_readable() {
+    let f = current_thread_fixture();
+    f.store
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "loose".into(),
+            project_id: None,
+            project_root: None,
+            title: Some("Loose".into()),
+            root_run_id: Some("run-loose".into()),
+            ..Default::default()
+        }])
+        .unwrap();
+    save(
+        &f,
+        ToolEvent::ArtifactsPresented {
+            run_id: "run-loose".into(),
+            presentation: event_bus::ArtifactPresentation {
+                presentation_id: "presentation-1".into(),
+                title: None,
+                caption: None,
+                artifacts: vec![artifact(1, "A", None, "image/png")],
+            },
+        },
+    );
+    let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) =
+        f.query(thread_history("loose", 10))
+    else {
+        panic!()
+    };
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(artifacts_row(&page.items[0]).artifacts.len(), 1);
+    assert!(page.items[0].validate().is_ok());
+}
+
+// Given: presentations in a history that exists before the host starts
+// Then: a host opened on it restores each card at its saved position
+#[test]
+fn cards_are_restored_when_the_core_is_reopened() {
+    let f = Fixture::with_history(|store, _| {
+        let save = |kind: ToolEvent| {
+            store
+                .handle()
+                .append_event(None, &Event::new(kind))
+                .unwrap();
+        };
+        let says = |text: &str| {
+            store
+                .handle()
+                .append_event(
+                    None,
+                    &Event::new(MessageEvent::MessageCompleted {
+                        run_id: "run-1".into(),
+                        text: text.into(),
+                    }),
+                )
+                .unwrap();
+        };
+        says("one");
+        save(presented(
+            None,
+            Some(&long_japanese('お')),
+            vec![artifact(1, "A", None, "text/html")],
+        ));
+        says("two");
+        save(presented(None, None, vec![]));
+    });
+    let rows = read_all(&f, HistoryDirection::Forward, true);
+    let shape: Vec<_> = rows.iter().map(|m| (m.index.0, m.role)).collect();
+    assert_eq!(
+        shape,
+        [
+            (0, MessageRole::Assistant),
+            (1, MessageRole::Artifacts),
+            (2, MessageRole::Assistant),
+            (3, MessageRole::Artifacts),
+        ]
+    );
+    assert_eq!(
+        artifacts_row(&rows[1]).caption.as_deref(),
+        Some(long_japanese('お').as_str())
+    );
+    assert!(artifacts_row(&rows[3]).artifacts.is_empty());
+    dirty(&f);
+    assert_eq!(read_all(&f, HistoryDirection::Forward, false), rows);
 }

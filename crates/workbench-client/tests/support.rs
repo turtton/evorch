@@ -264,6 +264,7 @@ pub fn big_event(id: &str, cursor: EventCursor, bytes: usize) -> EventEnvelope {
                     text: "x".repeat(bytes),
                 },
                 tool: None,
+                presentation: None,
             },
         }),
     )

@@ -14,6 +14,7 @@ struct LegacyScanner {
 impl LegacyScanner {
     fn observe(&mut self, kind: &EventKind, tokenized: bool) -> Option<RawMessage> {
         let mut tool = None;
+        let mut presentation = None;
         let (run, role, parts) = if let EventKind::Message(MessageEvent::MessagePart {
             run_id,
             response_id,
@@ -55,6 +56,7 @@ impl LegacyScanner {
             }
             let row = committed_row(kind, tokenized, start)?;
             tool = row.tool;
+            presentation = row.presentation;
             (row.run, message_role(row.role), row.parts)
         };
         let prompt = matches!(
@@ -66,6 +68,7 @@ impl LegacyScanner {
             role,
             parts,
             tool,
+            presentation,
             prompt,
             matches!(
                 kind,
@@ -97,6 +100,7 @@ impl LegacyScanner {
                 bytes: input.text_bytes,
             }),
             tool: None,
+            presentation: None,
         };
         *index += 1;
         Some(raw)
@@ -109,14 +113,16 @@ impl LegacyScanner {
         prompt: bool,
         finish: bool,
     ) -> Option<RawMessage> {
-        self.message_with(run, role, parts, None, prompt, finish)
+        self.message_with(run, role, parts, None, None, prompt, finish)
     }
+    #[allow(clippy::too_many_arguments)]
     fn message_with(
         &mut self,
         run: &str,
         role: MessageRole,
         parts: Vec<(String, bool)>,
         tool: Option<storage::history::ToolRow>,
+        presentation: Option<storage::history::PresentationRow>,
         prompt: bool,
         finish: bool,
     ) -> Option<RawMessage> {
@@ -173,6 +179,7 @@ impl LegacyScanner {
             parts,
             input: None,
             tool,
+            presentation,
         };
         *index += 1;
         Some(raw)
@@ -343,6 +350,7 @@ fn fixed_digest_matches_vector_oracle_at_parts_boundaries() {
                         parts: m.parts,
                         input: None,
                         tool: None,
+                        presentation: None,
                     });
                 assert_eq!(
                     serde_json::to_value(actual).unwrap(),
