@@ -198,8 +198,24 @@ impl RestartCoordinator {
         } else {
             None
         };
+        #[cfg(target_os = "linux")]
+        let ledger_fence = if let Some(source) = &source {
+            match source.source.verify_ledgers(source.ledgers.clone()).await {
+                Ok(fence) => fence,
+                Err(error) => {
+                    let reason = if error.code == workbench_protocol::errors::ErrorCode::Conflict {
+                        PreparationFailure::BindingChanged
+                    } else {
+                        PreparationFailure::Storage
+                    };
+                    return Ok(Observed::Cancel(reason, None));
+                }
+            }
+        } else {
+            None
+        };
         let begin = || {
-            // Binding -> coordinator -> runtime registration locks use the same
+            // Ledger -> binding -> coordinator -> runtime registration locks use the same
             // order as commit. No I/O/await lies inside this final transition.
             let mut state = self.0.state.lock().unwrap();
             if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
@@ -234,10 +250,13 @@ impl RestartCoordinator {
         if let Some(bindings) = binding_observation {
             // Runtime's existing registration exclusion covers new live members;
             // this guard independently excludes host binding publication.
-            return bindings.with_current(begin).unwrap_or(Ok(Observed::Cancel(
-                PreparationFailure::BindingChanged,
-                None,
-            )));
+            let changed = || Ok(Observed::Cancel(PreparationFailure::BindingChanged, None));
+            let commit = || bindings.with_current(begin).unwrap_or_else(changed);
+            return match ledger_fence {
+                Some(fence) => fence.with_current(commit).unwrap_or_else(changed),
+                None if source.as_ref().is_none_or(|p| p.ledgers.is_empty()) => commit(),
+                None => changed(),
+            };
         }
         begin()
     }

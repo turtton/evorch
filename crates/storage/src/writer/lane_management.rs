@@ -20,7 +20,7 @@ impl crate::StorageHandle {
         attach_guard: Option<LaneAttachGuard>,
         at_ns: i64,
     ) -> Result<LaneManagementResult, StorageError> {
-        self.lane_job(true, move |c| {
+        self.thread_ledger_job(move |c| {
             crate::repo::lane_management::apply(c, &request, &actor, attach_guard, at_ns)
         })
     }

@@ -28,6 +28,7 @@ pub struct RestartRecipeMember {
     pub thread: Option<String>,
     pub role: String,
     pub conversation: bool,
+    pub active: bool,
     pub lane: bool,
     pub team: bool,
     pub goal: bool,
@@ -321,6 +322,7 @@ impl AgentRuntime {
                     thread: None,
                     role: intent.role.clone(),
                     conversation: config.conversation,
+                    active: intent.active,
                     lane: config.lane_scope.is_some(),
                     team: config.team.is_some()
                         || config.team_task.is_some()

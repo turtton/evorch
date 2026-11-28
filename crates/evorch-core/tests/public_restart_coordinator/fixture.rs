@@ -54,10 +54,13 @@ impl RecipeSource for RecipesSource {
             })
         })
     }
-    fn verify_ledgers(&self, expected: RecipeLedgers) -> AdminIo<'_, ()> {
+    fn verify_ledgers(
+        &self,
+        expected: RecipeLedgers,
+    ) -> AdminIo<'_, Option<storage::ThreadLedgerObservation>> {
         Box::pin(async move {
             assert!(expected.is_empty());
-            Ok(())
+            Ok(None)
         })
     }
 }

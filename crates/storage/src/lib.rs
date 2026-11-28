@@ -100,12 +100,14 @@ pub mod sidebar_projection;
 pub mod task_queue;
 pub mod team;
 pub mod thread_index;
+mod thread_ledger_fence;
 pub mod thread_retention;
 pub mod thread_search;
 pub mod thread_start;
 pub mod threads;
 pub mod usage;
 mod writer;
+pub use thread_ledger_fence::ThreadLedgerObservation;
 
 pub use config::{HardLimits, LimitKind, StorageConfig};
 pub use db::{Database, ns_to_system_time, system_time_to_ns, watch_exclusions};

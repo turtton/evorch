@@ -647,6 +647,7 @@ async fn ordinary_or_lane_graph(is_lane: bool, switch_choice: bool) {
             host: f.boot.host.clone(),
             storage: recovery_config.clone(),
             reader: f.source.reader.clone(),
+            writer: recovered_storage.handle(),
         };
         let recollected = source.collect().await.unwrap();
         assert_eq!(recollected.recipes[&root].lane, scope);
@@ -958,6 +959,39 @@ async fn cli_like_non_conversation_root_is_not_promoted_by_a_binding() {
 }
 
 #[tokio::test]
+async fn archived_thread_with_unfinished_child_refuses_before_gate_with_child_identity() {
+    let mut f = Fixture::new().await;
+    let root = f.chat().await;
+    let child = f
+        .boot
+        .runtime
+        .delegate_background_as_child(
+            root,
+            Role::Worker,
+            "unfinished child",
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.waiting(child).await;
+    f.boot
+        .storage_writer()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "plain".into(),
+            root_run_id: Some(root.to_string()),
+            archived: Some(true),
+            archive_revision: 1,
+            ..Default::default()
+        }])
+        .unwrap();
+    f.rejected(&format!("unfinished child {child} of archived thread plain has no current execution authority; unarchive the thread or wait for the child to finish")).await;
+    f.shutdown().await;
+}
+
+#[tokio::test]
 async fn one_special_child_rejects_the_whole_graph_without_partial_recipes() {
     let mut f = Fixture::new().await;
     let root = f.chat().await;
@@ -1116,6 +1150,46 @@ async fn lane_ledger_scope_and_snapshot_refusals_keep_the_cause_run() {
         failure.message.contains(&lane.root_run_id.to_string())
             && failure.message.contains("snapshot"),
         "{failure:?}"
+    );
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn archive_commit_after_final_db_read_invalidates_the_memory_fence() {
+    let mut f = Fixture::new().await;
+    let run = f.chat().await;
+    let observed = f.source.collect().await.unwrap();
+    let stamp = f
+        .source
+        .verify_ledgers(observed.ledgers)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stamp.with_current(|| run), Some(run));
+
+    // Use the same projection path as a workspace archive command, then wait
+    // for the writer ACK. Root, runtime proof and chat DB binding are unchanged.
+    let writer = f.boot.storage_writer();
+    let membership = writer
+        .sidebar_projection_snapshot(vec!["plain".into()])
+        .unwrap();
+    writer
+        .project_sidebar_threads(
+            vec![storage::threads::ThreadUpsert {
+                thread_id: "plain".into(),
+                root_run_id: Some(run.to_string()),
+                archived: Some(true),
+                archive_revision: 1,
+                ..Default::default()
+            }],
+            membership.fence,
+            false,
+        )
+        .unwrap();
+    assert!(
+        stamp
+            .with_current(|| panic!("commit admitted stale archive evidence"))
+            .is_none()
     );
     f.shutdown().await;
 }

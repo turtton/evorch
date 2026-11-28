@@ -14,7 +14,7 @@ use core_launcher::handoff::{
 };
 pub use local::{LocalTargets, Requirements};
 use observation::*;
-pub(crate) use observation::{RecipeSourceProof, ordinary_recipe_progress};
+pub(crate) use observation::{RecipeSourceProof, ledger_changed, ordinary_recipe_progress};
 use runtime::{RunId, quiesce::RecoveryRecipe};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -61,7 +61,10 @@ pub type RecipeLedgers = BTreeMap<String, RecipeThreadLedger>;
 /// Runtime preflight remains authoritative; this port cannot grant execution authority.
 pub trait RecipeSource: Send + Sync + 'static {
     fn collect(&self) -> AdminIo<'_, ObservedRecipes>;
-    fn verify_ledgers(&self, expected: RecipeLedgers) -> AdminIo<'_, ()>;
+    fn verify_ledgers(
+        &self,
+        expected: RecipeLedgers,
+    ) -> AdminIo<'_, Option<storage::ThreadLedgerObservation>>;
 }
 /// Hold the live Q2 collector's revision/empty-set lock through the supplied memory-only
 /// transition. A read followed by an unlocked comparison is NOT an implementation.
@@ -121,6 +124,7 @@ struct Prepared {
     binding: RestartBinding,
     target: RestartTarget,
     proof: RecipeProof,
+    ledger_fence: Option<storage::ThreadLedgerObservation>,
 }
 #[derive(Clone)]
 struct Active {
@@ -231,6 +235,7 @@ impl PublicRestartCoordinator {
             binding: binding.clone(),
             target,
             proof,
+            ledger_fence: None,
         });
         Ok(AdminInspection::Restart(binding.clone()))
     }
@@ -275,33 +280,40 @@ impl PublicRestartCoordinator {
         let timeout = prepared.target.timeout();
         let id = self.graphs.admit(revision, &mut || {
             let recipes = recipes.take().ok_or_else(conflict)?;
-            prepared
-                .proof
-                .bindings
-                .with_current(|| {
-                    self.core
-                        .0
-                        .runtime
-                        .validate_restart_preflight(&prepared.proof.preflight, &recipes)
-                        .map_err(preflight_error)?;
-                    self.core
-                        .request_with_source(
-                            Some(recipes),
-                            timeout,
-                            preparation_source.clone(),
-                            Some(operation.clone()),
-                        )
-                        .map_err(|error| match error {
-                            runtime::RuntimeError::RestartRefusedByInvocations { running } => {
-                                invocation_refusal(running)
-                            }
-                            runtime::RuntimeError::RestartRefusedByApprovals { pending } => {
-                                approval_refusal(pending)
-                            }
-                            error => preflight_error(error),
-                        })
-                })
-                .ok_or_else(binding_changed)?
+            let commit = || {
+                prepared
+                    .proof
+                    .bindings
+                    .with_current(|| {
+                        self.core
+                            .0
+                            .runtime
+                            .validate_restart_preflight(&prepared.proof.preflight, &recipes)
+                            .map_err(preflight_error)?;
+                        self.core
+                            .request_with_source(
+                                Some(recipes),
+                                timeout,
+                                preparation_source.clone(),
+                                Some(operation.clone()),
+                            )
+                            .map_err(|error| match error {
+                                runtime::RuntimeError::RestartRefusedByInvocations { running } => {
+                                    invocation_refusal(running)
+                                }
+                                runtime::RuntimeError::RestartRefusedByApprovals { pending } => {
+                                    approval_refusal(pending)
+                                }
+                                error => preflight_error(error),
+                            })
+                    })
+                    .ok_or_else(binding_changed)?
+            };
+            match &prepared.ledger_fence {
+                Some(fence) => fence.with_current(commit).ok_or_else(ledger_changed)?,
+                None if prepared.proof.ledgers.is_empty() => commit(),
+                None => Err(ledger_changed()),
+            }
         })?;
         state.active = Some(Active { binding, id });
         state.cancelled = None;

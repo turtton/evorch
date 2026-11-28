@@ -119,9 +119,6 @@ impl PublicRestartCoordinator {
         if !prepared.proof.bindings.is_current() {
             return Err(binding_changed());
         }
-        self.recipes
-            .verify_ledgers(prepared.proof.ledgers.clone())
-            .await?;
         match self
             .core
             .0
@@ -134,6 +131,10 @@ impl PublicRestartCoordinator {
             }
             Err(error) => return Err(preflight_error(error)),
         }
+        prepared.ledger_fence = self
+            .recipes
+            .verify_ledgers(prepared.proof.ledgers.clone())
+            .await?;
         let mut state = self.state.lock().unwrap();
         if state.prepared.len() == 32 {
             state.prepared.pop_front();
@@ -149,6 +150,10 @@ pub(super) fn refused(reason: &str) -> AdminFailure {
 
 pub(super) fn binding_changed() -> AdminFailure {
     refused("current chat, goal, project or lane authority changed")
+}
+
+pub(crate) fn ledger_changed() -> AdminFailure {
+    refused("lane generation or thread/archive ledger changed")
 }
 
 pub(crate) fn ordinary_recipe_progress(error: &AdminFailure) -> bool {

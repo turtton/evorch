@@ -416,10 +416,10 @@ mod observation_retry {
         fn verify_ledgers(
             &self,
             expected: crate::restart::public::RecipeLedgers,
-        ) -> AdminIo<'_, ()> {
+        ) -> AdminIo<'_, Option<storage::ThreadLedgerObservation>> {
             Box::pin(async move {
                 assert!(expected.is_empty());
-                Ok(())
+                Ok(None)
             })
         }
     }

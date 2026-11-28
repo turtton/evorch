@@ -25,6 +25,7 @@ fn start(conn: Connection, config: StorageConfig) -> Storage {
         Arc::new(config.clone()),
         Default::default(),
         Default::default(),
+        Default::default(),
     );
     let writer =
         std::thread::spawn(move || run_writer(conn, rx, config, false, false, false, false));

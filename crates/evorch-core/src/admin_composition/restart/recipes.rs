@@ -27,6 +27,7 @@ pub struct HostRecipeSource {
     host: Arc<Mutex<CommandHost>>,
     storage: storage::StorageConfig,
     reader: Arc<AdminReader>,
+    writer: storage::StorageHandle,
 }
 struct Bindings {
     observed: BindingObservation,
@@ -42,6 +43,7 @@ impl HostRecipeSource {
             host: host.host.clone(),
             storage: host.storage_config().clone(),
             reader: host.admin.reader().clone(),
+            writer: host.storage_writer().clone(),
         }
     }
     fn bindings(&self) -> Result<Bindings, AdminFailure> {
@@ -113,6 +115,23 @@ impl HostRecipeSource {
         if !bindings.observed.is_current() {
             return Err(binding_changed());
         }
+        // A captured parent must not accidentally grant its children fresh
+        // authority. Check children first so an archived root cannot mask the
+        // actual blocker with the generic missing-binding failure.
+        for member in &members {
+            if !member.lane
+                && member.active
+                && member.parent.is_some()
+                && let Some(thread) = &member.thread
+                && bindings
+                    .ledgers
+                    .get(thread)
+                    .and_then(|l| l.thread.as_ref())
+                    .is_some_and(|row| row.archived)
+            {
+                return Err(archived_child_without_authority(member.run, thread));
+            }
+        }
         for member in &members {
             if member.team {
                 return Err(unsupported(member.run, "team"));
@@ -182,9 +201,17 @@ impl RecipeSource for HostRecipeSource {
         Box::pin(self.collect_current())
     }
 
-    fn verify_ledgers(&self, expected: RecipeLedgers) -> AdminIo<'_, ()> {
+    fn verify_ledgers(
+        &self,
+        expected: RecipeLedgers,
+    ) -> AdminIo<'_, Option<storage::ThreadLedgerObservation>> {
         let storage = self.storage.clone();
         Box::pin(async move {
+            if expected.is_empty() {
+                return Ok(None);
+            }
+            let changed = crate::restart::public::ledger_changed;
+            let observed = self.writer.observe_thread_ledger().ok_or_else(changed)?;
             self.reader
                 .read(move || {
                     let db = open_database(&storage)?;
@@ -203,7 +230,9 @@ impl RecipeSource for HostRecipeSource {
                     }
                     Ok(())
                 })
-                .await
+                .await?;
+            observed.with_current(|| ()).ok_or_else(changed)?;
+            Ok(Some(observed))
         })
     }
 }
@@ -431,6 +460,20 @@ fn conflict_for(run: RunId) -> AdminFailure {
         ErrorCode::Conflict,
         format!("restart recipe inventory changed: {run}; inspect again"),
         RetryAdvice::AfterResync,
+    )
+}
+fn archived_child_without_authority(run: RunId, thread: &str) -> AdminFailure {
+    let thread: String = thread
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    WorkbenchError::new(
+        ErrorCode::UnsupportedCapability,
+        format!(
+            "restart refused: unfinished child {run} of archived thread {thread} has no current execution authority; unarchive the thread or wait for the child to finish before retrying"
+        ),
+        RetryAdvice::Never,
     )
 }
 fn unsupported(run: RunId, kind: &str) -> AdminFailure {
