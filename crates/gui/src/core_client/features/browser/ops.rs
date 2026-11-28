@@ -212,6 +212,14 @@ impl<P: Clone> Ops<P> {
         self.ops.contains_key(&id)
     }
 
+    /// Whether the command of `id` has not been accepted by the core: it is yet to be sent, or
+    /// was refused as busy and waits to be sent again.
+    pub fn is_unsent(&self, id: OpId) -> bool {
+        self.ops
+            .get(&id)
+            .is_some_and(|op| matches!(op.stage, Stage::Ready | Stage::Backoff { .. }))
+    }
+
     /// The reply of a command is lost: shown as unknown.
     pub fn is_unknown(&self, id: OpId) -> bool {
         self.ops

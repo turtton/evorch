@@ -2541,3 +2541,104 @@ fn a_preview_waiting_for_its_session_is_lost_when_the_snapshot_is_replaced() {
     assert_eq!(rig.preview(0).phase, Phase::Open);
     assert_eq!(rig.core.count("open"), 1);
 }
+
+// ---- every state before the OpenPreview is sent, against every event ----------
+
+#[derive(Clone, Copy, Debug)]
+enum Unsent {
+    /// Accepted by the browser area, waiting for its session to be created.
+    WaitingForSession,
+    /// Refused as busy once: the command waits to be sent again.
+    BackingOff,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Cause {
+    Disconnect,
+    NewSnapshot,
+    OtherThread,
+    SameThread,
+}
+
+impl Rig {
+    /// The selection changes the way a pass applies it: the feature is told before it draws.
+    fn select(&mut self, thread: &str) {
+        let state = self.harness.state_mut();
+        state.selection.thread = Some(ThreadId::new(thread).unwrap());
+        let capabilities = [Capability::Queries, Capability::Commands];
+        let view = FeatureView {
+            connected: true,
+            capabilities: &capabilities,
+            cache: &state.cache,
+            selection: &state.selection,
+        };
+        let mut ctx = FeatureContext {
+            data: &mut state.inbox,
+            feature: FeatureId::Browser,
+            view,
+            frame: &mut state.frame,
+        };
+        state.feature.selection_changed(&mut ctx);
+    }
+}
+
+// Given: a preview of the conversation `t` that the core has not accepted yet
+// Then: a disconnect, a new snapshot or another thread ends it, and nothing is opened later
+//       however long it takes; the same thread, as a control, still opens it
+#[test]
+fn an_open_the_core_has_not_accepted_is_not_sent_after_the_session_or_conversation_changed() {
+    use Cause::*;
+    use Unsent::*;
+    for state in [WaitingForSession, BackingOff] {
+        for event in [Disconnect, NewSnapshot, OtherThread, SameThread] {
+            let mut rig = Rig::new();
+            rig.select("t");
+            match state {
+                WaitingForSession => rig.core.script("create", Script::Hold),
+                BackingOff => rig
+                    .core
+                    .script("open", Script::Refuse(busy(RetryAdvice::SameRequest))),
+            }
+            rig.feature().open_preview(artifact(1));
+            rig.pump();
+            let operation = rig.core.held.keys().next().cloned();
+            let sent = rig.core.count("open");
+            assert_eq!(sent, usize::from(matches!(state, BackingOff)));
+            assert!(
+                matches!(rig.preview(0).phase, Phase::Waiting | Phase::Opening(_)),
+                "{state:?} {event:?}"
+            );
+            match event {
+                Disconnect => {
+                    rig.core.keys.clear();
+                    rig.feature().disconnected();
+                }
+                NewSnapshot => rig.reset(),
+                OtherThread => rig.select("other"),
+                SameThread => rig.select("t"),
+            }
+            if let Some(operation) = &operation {
+                rig.core
+                    .states
+                    .insert(operation.clone(), RendererOperationState::Running);
+            }
+            rig.pump();
+            if let Some(operation) = &operation {
+                rig.release(operation);
+            }
+            rig.advance(Duration::from_secs(10));
+            rig.pump();
+            let opened = rig.core.count("open");
+            if matches!(event, SameThread) {
+                assert_eq!(opened, 1 + sent.min(1), "{state:?} {event:?}");
+                assert_eq!(rig.preview(0).phase, Phase::Open, "{state:?} {event:?}");
+            } else {
+                assert_eq!(opened, sent, "{state:?} {event:?}: nothing new is sent");
+                assert!(
+                    matches!(rig.preview(0).phase, Phase::Lost(_)),
+                    "{state:?} {event:?}"
+                );
+            }
+        }
+    }
+}

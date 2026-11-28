@@ -85,6 +85,9 @@ use workbench_protocol::{
 const MAX_PREVIEWS: usize = MAX_RENDERER_TABS;
 /// Artifacts waiting for a later render; the newest are kept.
 const MAX_QUEUED: usize = 8;
+
+/// Why a preview whose opening the core never accepted is not opened any more.
+const LOST_BEFORE_SENT: &str = "The connection or the conversation changed before this opened";
 /// A preview opens at this size and is resized to its area afterwards.
 const OPEN_VIEWPORT: (u32, u32) = (960, 640);
 const MIN_VIEWPORT: u32 = 64;
@@ -497,6 +500,30 @@ impl BrowserFeature {
                 self.probe = Probe::Need;
             } else if let Some(at) = self.last_probe {
                 self.wake_at(at + PROBE_INTERVAL);
+            }
+        }
+    }
+
+    /// Ends the previews that were asked for but whose opening the core never accepted (waiting
+    /// for a session, or an `OpenPreview` still to be sent or sent again after a busy answer)
+    /// and that `keep` does not keep. They are lost, as when a session cannot be created: a
+    /// later session or conversation does not open what was asked in an earlier one, and
+    /// only an explicit reopen does.
+    fn lose_unsent_opens(&mut self, why: &str, keep: impl Fn(&Preview) -> bool) {
+        for p in &mut self.previews {
+            if keep(p) {
+                continue;
+            }
+            let unsent = match p.phase {
+                Phase::Waiting => true,
+                Phase::Opening(op) => self.ops.is_unsent(op),
+                _ => false,
+            };
+            if unsent {
+                if let Phase::Opening(op) = p.phase {
+                    self.ops.abandon(op);
+                }
+                p.phase = Phase::Lost(why.to_owned());
             }
         }
     }
@@ -1403,6 +1430,7 @@ impl Feature for BrowserFeature {
         // An open that was asked for and not yet taken belongs to the session it was asked in
         // (a card's Open, an artifact's preview): a new snapshot does not carry it over.
         self.queue.clear();
+        self.lose_unsent_opens(LOST_BEFORE_SENT, |_| false);
         self.pending_cancel.clear();
         self.ops.on_reset(now);
         self.data_tags.clear();
@@ -1417,9 +1445,6 @@ impl Feature for BrowserFeature {
         for p in &mut self.previews {
             p.forget_connection();
             p.lane = p.lane.filter(|op| self.ops.contains(*op));
-            if p.phase == Phase::Waiting {
-                p.phase = Phase::Lost("The connection was replaced before this opened".into());
-            }
             if p.tab.is_some() && matches!(p.phase, Phase::Open | Phase::Suspended) {
                 p.phase = Phase::Suspended;
             }
@@ -1521,6 +1546,7 @@ impl Feature for BrowserFeature {
     fn disconnected(&mut self) {
         self.observation.disconnected();
         self.queue.clear();
+        self.lose_unsent_opens(LOST_BEFORE_SENT, |_| false);
         // The data connections are gone with the control session: no texture,
         // decoded image or stream state may outlive it. What was asked of the
         // core is settled by `reset` when a session is back.
@@ -1540,12 +1566,14 @@ impl Feature for BrowserFeature {
     }
 
     fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
-        // What waits to be taken was asked for in the conversation that was selected then.
+        // What waits to be taken or sent was asked for in the conversation that was selected then.
         let now = ctx.selection();
-        self.queue.retain(|artifact| {
+        let selected = |artifact: &ArtifactRef| {
             now.project.as_ref() == Some(&artifact.project)
                 && now.thread.as_ref() == Some(&artifact.thread)
-        });
+        };
+        self.queue.retain(&selected);
+        self.lose_unsent_opens(LOST_BEFORE_SENT, |p| selected(&p.artifact));
         self.observation.selection_changed(ctx);
     }
 
