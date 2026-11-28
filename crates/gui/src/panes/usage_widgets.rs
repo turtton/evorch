@@ -578,10 +578,6 @@ fn cells_row(
 
 pub const TILE_WIDTH: f32 = 132.0;
 
-pub fn overview_tiles(total: &UsageCells, days: &[(LocalDay, UsageCells)]) -> Vec<Tile> {
-    overview_tiles_over(total, days, days.len())
-}
-
 /// `day_count` is the number of days `total` covers, which can exceed `days` when
 /// older days are left out of the charts.
 pub fn overview_tiles_over(
@@ -787,11 +783,6 @@ pub fn message_heading(listed: usize, hidden: usize, total: usize) -> (String, O
     (heading, note)
 }
 
-/// Stacked budget bar over the whole window; the unfilled tail is free space.
-pub fn budget_bar(ui: &mut Ui, segments: &[(&str, u64)], window: u64) {
-    segments_bar(ui, segments, Some(window));
-}
-
 /// [`budget_bar`] without a free share when the context window is not known.
 pub fn segments_bar(ui: &mut Ui, segments: &[(&str, u64)], window: Option<u64>) {
     let used: u64 = segments.iter().map(|(_, tokens)| tokens).sum();
@@ -864,31 +855,5 @@ mod tests {
         assert_eq!(SortColumn::Input.format(&some), "290");
         assert_eq!(SortColumn::Total.format(&some), "430");
         assert_eq!(SortColumn::CacheHit.value(&some), 25.0);
-    }
-
-    #[test]
-    fn overview_tiles_name_each_measure_and_an_unknown_latency_is_a_dash() {
-        let day = LocalDay::parse("2026-10-14").unwrap();
-        let total = cells(400, 100, 1.5, true);
-        let tiles = overview_tiles(
-            &total,
-            &[(day, total), (day.add_days(1), UsageCells::default())],
-        );
-        let text: Vec<_> = tiles
-            .iter()
-            .map(|tile| format!("{} {} {}", tile.title, tile.value, tile.detail))
-            .collect();
-        assert_eq!(
-            text,
-            [
-                "Cost $1.50* $0.75 / day",
-                "Tokens 430 in 400 · out 30",
-                "Requests 4 75.0% succeeded",
-                "Cache hit 25.0% 100 read",
-                "Per 1M tokens $3488.37 blended cost",
-                "Avg TTFT — 7 reasoning",
-            ]
-        );
-        assert_eq!(tiles[0].sparkline.as_deref(), Some(&[1.5, 0.0][..]));
     }
 }

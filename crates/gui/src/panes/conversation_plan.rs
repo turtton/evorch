@@ -43,8 +43,6 @@ pub enum PlanPanelAction {
     HistoryPage(u32),
 }
 
-/// The ConversationPlan panel's id; the band's open button asks to focus it.
-pub const PANEL_ID: &str = "conversation-plan-main";
 pub const OPEN_LABEL: &str = "Open plan";
 const NOT_PLANNED: &str = "Not planned";
 const CLEARED: &str = "Plan cleared";

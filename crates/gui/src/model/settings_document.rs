@@ -31,10 +31,6 @@ impl SettingsDocument {
         })
     }
 
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
     fn view(&self, preferred: Option<&str>) -> (Config, RoleProfilePicker) {
         let picker = RoleProfilePicker::new(&self.config, preferred, None);
         (profile_view(&self.config, &picker.selected), picker)

@@ -265,3 +265,57 @@ async fn a_conversation_plan_change_on_the_bus_is_never_stored_by_the_recorder()
             .any(|row| matches!(row.event.kind, EventKind::ConversationPlan(_)))
     );
 }
+
+// Given: a real ledger and diagnostics with explicit run and thread attribution.
+// When: they are persisted under the `all` policy and read back from a reopened database.
+// Then: the exact ordered payloads survive, the session view agrees, and diagnostics do not
+// create a restorable session.
+#[test]
+fn diagnostics_survive_storage_replay_with_run_and_thread_attribution() {
+    use event_bus::{DiagnosticEvent, DiagnosticSeverity};
+    use recorder::storage_bridge::DiagnosticPersistence;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("ledger.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut bridge = StorageBridge::new(storage.handle(), "session")
+        .with_diagnostic_persistence(DiagnosticPersistence::All);
+    let events: Vec<_> = [
+        DiagnosticSeverity::Info,
+        DiagnosticSeverity::Warning,
+        DiagnosticSeverity::Error,
+    ]
+    .into_iter()
+    .map(|severity| {
+        Event::new(DiagnosticEvent {
+            source: "process_owner".into(),
+            severity,
+            code: "claim_conflict".into(),
+            detail: format!("{} diagnostic detail", severity.as_str()),
+            run_id: Some("run-1".into()),
+            thread_id: Some("thread-1".into()),
+            call_id: None,
+        })
+    })
+    .collect();
+    for event in &events {
+        bridge.handle_event(event).unwrap();
+    }
+    drop(bridge);
+    drop(storage);
+
+    let db = Database::open(&config).unwrap();
+    let stored = db.events_all_ordered().unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|value| value.event.clone())
+            .collect::<Vec<_>>(),
+        events
+    );
+    assert_eq!(db.events_by_session("session").unwrap(), stored);
+    assert!(db.restore_sessions().unwrap().is_empty());
+}

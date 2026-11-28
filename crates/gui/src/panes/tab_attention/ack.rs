@@ -80,12 +80,4 @@ impl AttentionAck {
     pub const fn phase(&self) -> ThreadRunPhase {
         self.phase
     }
-
-    pub const fn state_change_seq(&self) -> u64 {
-        self.revision.seq
-    }
-
-    pub const fn acknowledged_seq(&self) -> u64 {
-        self.acknowledged_seq
-    }
 }

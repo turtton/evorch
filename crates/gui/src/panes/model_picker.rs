@@ -31,14 +31,6 @@ pub const DEFAULT_EFFORT_LABEL: &str = "Default effort";
 /// Heading of the effort step.
 pub const EFFORT_HEADING: &str = "Reasoning effort";
 
-pub fn model_picker(
-    ui: &mut egui::Ui,
-    context: ModelPickerContext<'_>,
-    state: &mut ModelPickerState,
-) -> Option<Option<ModelPreference>> {
-    model_picker_with(ui, context, state, ButtonStyle::default())
-}
-
 /// How the model button sits in its row.
 #[derive(Clone, Copy, Default)]
 pub struct ButtonStyle<'a> {

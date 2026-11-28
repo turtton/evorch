@@ -33,8 +33,6 @@ base64 = { workspace = true }
 agents = { path = "../agents" }
 alacritty_terminal = { workspace = true }
 ashpd = { workspace = true }
-async-trait = { workspace = true }
-catalog = { path = "../catalog" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 config = { path = "../config" }
 eframe = { workspace = true }
@@ -45,7 +43,6 @@ egui_commonmark = { version = "0.25", default-features = false, features = ["pul
 egui_dock = { workspace = true }
 egui-phosphor = { version = "0.14", default-features = false, features = ["regular", "fill"] }
 egui_kittest = { workspace = true }
-eval = { path = "../eval" }
 event-bus = { path = "../event-bus" }
 image = { workspace = true, default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # evorch-gui's Rust heap; see the global allocator in src/bin/evorch-gui.rs.
@@ -55,13 +52,10 @@ portable-pty = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 providers = { path = "../providers" }
 secret-guard = { path = "../secret-guard" }
-recorder = { path = "../recorder" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }
-rusqlite = { workspace = true }
 sandbox = { path = "../sandbox", features = ["keychain"] }
 serde = { workspace = true }
-storage = { path = "../storage" }
 serde_json = { workspace = true }
 # CPU / memory / disk readings for the footer; the other components stay off.
 sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
@@ -83,19 +77,11 @@ core-launcher = { path = "../core-launcher" }
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-notify-rust = "4"
-
 [dev-dependencies]
 test-socket-dir = { path = "../test-socket-dir" }
-workbench-host = { path = "../workbench-host", features = ["test-support"] }
-# The history restore test converts a database the build wrote, after taking it back to version 39.
-storage = { path = "../storage", features = ["unchecked-open"] }
 # Leaves a descriptor without O_CLOEXEC open to check child launches.
 rustix = "1"
 test-support = { path = "../test-support" }
 sha2 = { workspace = true }
-wiremock = { workspace = true }
 mock-openai = { path = "../mock-openai" }
-tools = { path = "../tools" }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

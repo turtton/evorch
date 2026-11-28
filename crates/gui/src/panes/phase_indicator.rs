@@ -18,10 +18,6 @@ pub fn phase_circle(ui: &mut Ui, phase: Option<ThreadRunPhase>) {
     response.on_hover_text(phase.map_or("Idle", phase_hint));
 }
 
-pub fn phase_indicator(ui: &mut Ui, phase: ThreadRunPhase) {
-    phase_indicator_with_ack(ui, phase, true);
-}
-
 pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool) {
     let label = phase_label(phase);
     ui.horizontal(|ui| match phase {
@@ -67,7 +63,7 @@ mod tests {
             crate::theme::install(ui.ctx());
             ui.horizontal(|ui| {
                 if let Some(phase) = phase {
-                    phase_indicator(ui, phase);
+                    phase_indicator_with_ack(ui, phase, true);
                 }
             });
         });

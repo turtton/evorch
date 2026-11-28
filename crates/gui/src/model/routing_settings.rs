@@ -1,10 +1,9 @@
 //! フォールバック順を保持するルーティング編集状態。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc::Receiver;
 
 pub use config::RouteCandidateConfig;
-use config::{Config, ConfigError, ModelKind, RoutingConfig};
+use config::{Config, ConfigError, ModelKind};
 
 /// The model overrides one route candidate can pick (ADR 0038).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,11 +44,9 @@ pub struct RoutingSettingsModel {
     pub providers: BTreeMap<String, config::ProviderProfileConfig>,
     /// 保存前に、route を使うチェーンの種別を検査するための agents (編集前の route 名で参照する)。
     pub agents: config::AgentsConfig,
-    pub new_route_name: String,
     pub route_name_edits: BTreeMap<String, String>,
     pub validation_error: Option<String>,
     pub profiles: super::role_profiles::RoleProfilePicker,
-    pub(crate) save_rx: Option<Receiver<Result<Config, String>>>,
 }
 
 /// route の候補の実モデル (上書き、なければ profile 既定) で選べる推論強度の和集合。
@@ -159,15 +156,6 @@ impl RoutingSettingsModel {
         }
     }
 
-    pub const fn is_saving(&self) -> bool {
-        self.save_rx.is_some()
-    }
-
-    /// Whether the draft differs from what was seeded or last saved, renames included.
-    pub fn is_dirty(&self) -> bool {
-        self.routes != self.base_routes || !self.route_renames().is_empty()
-    }
-
     /// Whether the route drafted under `key` is new, changed or renamed.
     pub fn route_is_dirty(&self, key: &str) -> bool {
         let renamed = self
@@ -268,12 +256,6 @@ impl RoutingSettingsModel {
         self.profile_models = fresh.profile_models;
         self.providers = fresh.providers;
         self.agents = fresh.agents;
-    }
-
-    pub fn seed_from_config_prefill(config: &Config, logical: &str) -> Self {
-        let mut model = Self::seed_from_config(config);
-        model.add_prefill_route(logical, &config.agents);
-        model
     }
 
     /// Adds `logical` as the route a role binding asks for and returns to roles after saving.
@@ -472,15 +454,6 @@ impl RoutingSettingsModel {
         Ok(())
     }
 
-    /// 編集前の論理名から変更後の論理名への対応。未変更の名前は含めない。
-    pub fn route_renames(&self) -> BTreeMap<String, String> {
-        self.route_name_edits
-            .iter()
-            .filter(|(original, draft)| original != draft)
-            .map(|(original, draft)| (original.clone(), draft.clone()))
-            .collect()
-    }
-
     /// The name and candidates `key` would be saved with: its draft alone, checked against the
     /// saved routes (`saved`) and the names the other drafts have, so another route's unsaved
     /// edits cannot stop this one.
@@ -537,133 +510,11 @@ impl RoutingSettingsModel {
         }
         Ok((name, candidates))
     }
-
-    /// 保存境界で検証し、空白だけのモデル指定を省略へ正規化する。
-    pub fn validated_routing(&self) -> Result<RoutingConfig, ConfigError> {
-        let mut routes = self.routes.clone();
-        for (name, candidates) in &mut routes {
-            if name.trim().is_empty() || candidates.is_empty() {
-                return Err(ConfigError::InvalidField {
-                    path: format!("routing.routes.{name}"),
-                    message: "Each route needs a logical model name and at least one candidate"
-                        .into(),
-                });
-            }
-            for candidate in candidates {
-                if candidate.profile.trim().is_empty()
-                    || !self.profile_names.contains(&candidate.profile)
-                {
-                    return Err(ConfigError::InvalidField {
-                        path: format!("routing.routes.{name}.profile"),
-                        message: "Select an existing provider profile".into(),
-                    });
-                }
-                if candidate
-                    .model
-                    .as_ref()
-                    .is_some_and(|model| model.trim().is_empty())
-                {
-                    candidate.model = None;
-                }
-            }
-        }
-        // Kinds are checked under the names the chains still use, before renaming.
-        let unrenamed = RoutingConfig {
-            routes: routes.clone(),
-            ..RoutingConfig::default()
-        };
-        if let Some(problem) = config::route_mixing_problems("", &unrenamed, &self.providers)
-            .into_iter()
-            .chain(config::chain_kind_problems(
-                "",
-                &self.agents,
-                &unrenamed,
-                &self.providers,
-            ))
-            .next()
-        {
-            return Err(problem);
-        }
-        let mut renamed = BTreeMap::new();
-        for (name, candidates) in routes {
-            let name = self.route_name_edits.get(&name).cloned().unwrap_or(name);
-            if name.trim().is_empty() || renamed.insert(name.clone(), candidates).is_some() {
-                return Err(ConfigError::InvalidField {
-                    path: "routing.routes".into(),
-                    message: "Enter a non-blank, unique logical model name".into(),
-                });
-            }
-        }
-        Ok(RoutingConfig {
-            routes: renamed,
-            cooldown: self.cooldown.clone(),
-            fallback: self.fallback.clone(),
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn route_renames_is_empty_without_edits() {
-        let model = RoutingSettingsModel::default();
-        assert!(model.route_renames().is_empty());
-    }
-
-    #[test]
-    fn route_renames_skips_identity_edits() {
-        let model = RoutingSettingsModel {
-            route_name_edits: [("worker".into(), "worker".into())].into(),
-            ..Default::default()
-        };
-        assert!(model.route_renames().is_empty());
-    }
-
-    #[test]
-    fn route_renames_includes_only_real_renames() {
-        let model = RoutingSettingsModel {
-            route_name_edits: [
-                ("unchanged".into(), "unchanged".into()),
-                ("old".into(), "new".into()),
-                ("new".into(), "old".into()),
-            ]
-            .into(),
-            ..Default::default()
-        };
-        assert_eq!(
-            model.route_renames(),
-            [("old".into(), "new".into()), ("new".into(), "old".into())].into()
-        );
-    }
-
-    #[test]
-    fn prefill_inserts_named_route_with_first_profile_candidate() {
-        // Given: 先頭プロファイルと明示的なロール使用先。
-        let mut config = Config::default();
-        config
-            .providers
-            .insert("first".into(), config::ProviderProfileConfig::default());
-        config.agents.explorer.models = vec![config::ChainEntryConfig::route("role-model")];
-        // When: 新しい論理名で設定を初期化する。
-        let model = RoutingSettingsModel::seed_from_config_prefill(&config, "role-model");
-        // Then: 既定モデルに委譲する候補が1件だけ追加される。
-        assert_eq!(
-            model.routes["role-model"],
-            vec![RouteCandidateConfig {
-                profile: "first".into(),
-                model: None,
-                auto: false,
-            }]
-        );
-        assert_eq!(model.pending_new_route.as_deref(), Some("role-model"));
-        assert_eq!(model.route_users["role-model"], vec!["explorer"]);
-        assert_eq!(
-            model.validated_routing().expect("routing").routes,
-            model.routes
-        );
-    }
 
     #[test]
     fn seed_lists_roles_for_existing_routes() {
@@ -681,30 +532,45 @@ mod tests {
         assert!(!model.routes_empty);
     }
 
-    #[test]
-    fn prefill_rejects_blank_and_preserves_existing_route() {
-        // Given: 既存ルートを持つ設定。
+    fn two_routes() -> Config {
         let mut config = Config::default();
-        config.routing.routes.insert(
-            "existing".into(),
-            vec![RouteCandidateConfig {
-                profile: "original".into(),
-                model: Some("custom".into()),
-                auto: false,
-            }],
-        );
-        // When: 重複名をプリフィルする。
-        let model = RoutingSettingsModel::seed_from_config_prefill(&config, "existing");
-        // Then: 既存ルートを重複追加せず展開して見せる。
-        assert_eq!(model.routes, config.routing.routes);
-        assert_eq!(model.pending_new_route, None);
-        assert!(model.validation_error.is_none());
-        assert!(model.expanded.contains("existing"));
-        // When: 空白名をプリフィルする。
-        let model = RoutingSettingsModel::seed_from_config_prefill(&config, " ");
-        // Then: 既存ルートを壊さず検証エラーを表示する。
-        assert_eq!(model.routes, config.routing.routes);
-        assert_eq!(model.pending_new_route, None);
-        assert!(model.validation_error.is_some());
+        config.providers.insert("local".into(), Default::default());
+        for (route, model) in [("worker", "custom"), ("other", "external")] {
+            config.routing.routes.insert(
+                route.into(),
+                vec![RouteCandidateConfig {
+                    profile: "local".into(),
+                    model: Some(model.into()),
+                    auto: false,
+                }],
+            );
+        }
+        config
+    }
+
+    // Given: a route that already has a pending rename
+    // When: it is renamed again, another route asks for that name, and a clash is typed
+    // Then: only the latest draft is kept, no other route can take it, a refused name leaves the
+    // draft as it was, and typing the original name back drops the draft
+    #[test]
+    fn renaming_the_same_route_again_keeps_only_the_latest_draft() {
+        let mut model = RoutingSettingsModel::seed_from_config(&two_routes());
+        model.set_route_name("worker", "first").expect("first");
+        model.set_route_name("worker", "latest").expect("latest");
+        assert_eq!(model.shown_name("worker"), "latest");
+        assert_eq!(model.route_name_edits.len(), 1);
+        assert!(model.route_is_dirty("worker"));
+
+        assert!(model.set_route_name("other", "latest").is_err());
+        assert_eq!(model.shown_name("other"), "other");
+        assert_eq!(model.route_name_edits.len(), 1);
+
+        assert!(model.set_route_name("worker", "other").is_err());
+        assert_eq!(model.shown_name("worker"), "latest");
+
+        model.set_route_name("worker", "worker").expect("back");
+        assert_eq!(model.shown_name("worker"), "worker");
+        assert!(model.route_name_edits.is_empty());
+        assert!(!model.route_is_dirty("worker"));
     }
 }

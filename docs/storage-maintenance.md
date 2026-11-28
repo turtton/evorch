@@ -22,7 +22,7 @@
 - **本文の正本は `run_messages` と `content_blobs`。** run の会話は `run_contexts`（header）と、メッセージ 1 件ごとの `run_messages` 行に保存する。UTF-8 で 2 KiB（2,048 バイト）以上の文字列は、内容アドレスの `content_blobs` に置いて骨組みには token だけを残す。blob は zstd レベル 3 で圧縮し、縮む場合だけ圧縮形式を採用する（しきい値は `body_ref.rs` の `TOKEN_THRESHOLD_BYTES`、圧縮は `body_store.rs` の `ZSTD_LEVEL`）。保存は変更のあったメッセージだけを書き（差分保存）、保存直後の全量読み戻しは行わない。詳細は[会話の保存形式](#会話の保存形式run_messages)。
 - **provenance は 1 メッセージ 1 行。** 以前は run ごとに `run_context_provenance.map_json` の 1 列へ全体を保存していた。現在は header と `run_message_provenance` の行に分割する。
 - **events の大きな本文も token 化されている。** Tool / Message / compaction の events の payload のうち、2 KiB 以上の文字列を同じ `content_blobs` に置く（`events.body_format`）。読み出しは token を本文に戻す。`evorch inspect events --bodies refs` は blob を読まずに token の hash と長さだけを示す。
-- **GUI は本文を遅延して読み込む。** 保存済みの本文はペインに表示されるまで参照のまま保持する。読み込み中はスピナーとサイズ、失敗時は "Couldn't load content" と Retry / Copy details を出す。busy や一時的な失敗は自動で再試行する（最大 3 回。`AUTO_RETRIES`）。missing / corrupt の整合性エラーは自動では再試行せず、1 回だけ報告する。読めない stored event は transcript 上で前後の位置に gap として表示する。読み出しは専用スレッドで行い、1 バッチは最大 256 本・16 MiB、キャッシュ（LRU）は 64 MiB（`crates/gui/src/body/resolver.rs`）。
+- **GUI は本文を自分では開かない。** 以前の GUI が持っていたローカルの本文 resolver（`crates/gui/src/body/`）は削除した。core client は本文を core の protocol 経由で受け取る。
 - **旧形式は開かない。** schema 44 未満の DB は、`Database::open`・GUI の起動・`evorch inspect`・保守コマンドのいずれでも `ConversionRequired` で拒否され、DB は変更されない（[回復手順](#回復手順)）。
 
 ## Tool 本文の保持期限とオンライン回収

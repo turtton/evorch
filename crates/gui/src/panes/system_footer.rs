@@ -20,15 +20,6 @@ pub struct SystemFooter {
 }
 
 impl SystemFooter {
-    /// Repaint-policy fixtures must not start the machine's periodic sampler.
-    #[cfg(test)]
-    pub fn without_sampling() -> Self {
-        Self {
-            started: true,
-            ..Default::default()
-        }
-    }
-
     #[cfg(test)]
     pub fn with_reading(reading: SystemSnapshot) -> Self {
         Self {
@@ -36,10 +27,6 @@ impl SystemFooter {
             reading: Some(reading),
             ..Default::default()
         }
-    }
-
-    pub fn set_storage_directory(&mut self, directory: Option<PathBuf>) {
-        self.storage_directory = directory;
     }
 
     pub fn latest(&mut self, ctx: &egui::Context) -> Option<&SystemSnapshot> {

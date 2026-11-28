@@ -211,14 +211,22 @@ fn epoch_replacement_keeps_human_input_and_deduplicates_thread_events() {
             id: "draft".into(),
             project: ProjectId::new("p").unwrap(),
             file: gui::attachments::AttachmentFile {
+                draft_id: "fixture-draft".into(),
+                filename: "notes.txt".into(),
+                media_type: "text/plain".into(),
                 bytes: b"retained bytes".to_vec(),
-                ..gui::fixture::attachment_draft().file
             },
             uploading: false,
             uncertain: false,
             upload_id: None,
             next_offset: 0,
-            reference: gui::fixture::attachment_draft().reference().cloned(),
+            reference: Some(workbench_protocol::commands::AttachmentRef {
+                id: workbench_protocol::ids::AttachmentId::new("fixture-attachment").unwrap(),
+                filename: "notes.txt".into(),
+                media_type: "text/plain".into(),
+                byte_length: 5,
+                sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into(),
+            }),
         }],
     );
     shared.outcome_unknown.insert("pending-request".into());

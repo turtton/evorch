@@ -14,32 +14,6 @@ impl ComposerRole {
     }
 }
 
-impl super::ComposerModel {
-    pub const fn toggle_role(&mut self) {
-        if self.role_locked {
-            return;
-        }
-        self.role = match self.role {
-            ComposerRole::Worker => ComposerRole::Orchestrator,
-            ComposerRole::Orchestrator => ComposerRole::Worker,
-        };
-    }
-
-    pub fn restore_thread_role(&mut self, thread: &workspace_ui::ThreadRecord) {
-        let role = if thread.escalation_source_run_id.is_some() {
-            Some(ComposerRole::Orchestrator)
-        } else {
-            thread.chat_role.map(Into::into)
-        };
-        self.role = role.unwrap_or_default();
-        self.role_locked = role.is_some();
-    }
-
-    pub fn parse_submission<'a>(&self, raw: &'a str) -> super::ComposerInput<'a> {
-        super::parse_input(raw)
-    }
-}
-
 impl From<workspace_ui::ThreadChatRole> for ComposerRole {
     fn from(role: workspace_ui::ThreadChatRole) -> Self {
         match role {

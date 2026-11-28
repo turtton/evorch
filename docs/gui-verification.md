@@ -15,14 +15,15 @@ gui group のテストは、PR でも main push でも同じものを実行す�
 
 | 検証 | PR | main push |
 | --- | --- | --- |
-| gui の通常テスト（ライブラリ、`attention`、`models_usage`、`pull_requests`、`settings_ui`、`transcript_cards`、`workbench_shell`、`runtime_threads`、`default_core_client`、`guard_entry`、gui の bin テスト）、`workspace-ui`、`workspace-state`、`core-client-e2e` | 実行する | 実行する |
+| gui の通常テスト（ライブラリ、`settings_ui`、`workbench_shell`、`runtime_threads`、`default_core_client`、`guard_entry`、gui の bin テスト）、`workspace-ui`、`workspace-state`、`core-client-e2e` | 実行する | 実行する |
 | cache 契約（`core-client-e2e::default_gui_cache`、`evorch-core::core_renderer_cache` ほか。`scripts/contract-test-filters.sh`） | 実行する | 実行する |
-| I/O 契約（`recorder::storage_bridge`、`workbench-host` の起動・flush テスト、`gui::diagnostic_ledger` ほか） | 実行する | 実行する |
+| I/O 契約（`recorder::storage_bridge`、`workbench-host` の起動・flush テスト ほか。gui group 自体の I/O 契約は無い） | 実行する | 実行する |
 | browser E2E (5 invocation)、CEF E2E (6 invocation) | 実行する | 実行する |
 
 - 一覧・分割 (`scripts/verify-test-inventory.sh`、`ci` job) は event に依存せず、PR でも main でも
-  同じ suite を列挙する。`default = cache + io + remaining`。gui group の suite が空になることは
-  許さない（`scripts/ci-test-groups.json` の `allow_empty_suites` は gui では空）。
+  同じ suite を列挙する。`default = cache + io + remaining`。gui group の cache と
+  remaining は空になることを許さない。I/O 契約は gui group に無いため、`scripts/ci-test-groups.json` の gui では
+  `allow_empty_suites` に `io` だけを置く。
 - cache / I/O 契約の登録を変える PR は、先に代替の検証を登録してから旧テストを消す。空の selector や
   常に成功する登録は置かない（`scripts/check-cache-contracts.sh`、`scripts/verify-test-inventory.sh`）。
 
@@ -32,7 +33,7 @@ gui group のテストは、PR でも main push でも同じものを実行す�
 
 - 役割: egui を介さないモデル・状態遷移・イベント変換の検証。
 - コマンド: `cargo nextest run -p gui`
-- 例: `crates/gui/tests/transcript_cards/transcript.rs`
+- 例: `crates/gui/tests/runtime_threads/`
 
 ### L2: ヘッドレス kittest 振る舞いテスト
 
@@ -63,7 +64,7 @@ gui group のテストは、PR でも main push でも同じものを実行す�
 ### L4: ブラウザ fake-source テスト
 
 - 役割: Chromium を起動せず、注入したフェイクビューで Agent browser タブの描画・操作履歴の重ね表示・
-  スレッドごとのタブ表示を検証する（`crates/gui/tests/workbench_shell/browser.rs` ほか）。
+  スレッドごとのタブ表示を検証する（`crates/gui/src/core_client/features/browser/tests.rs` と `browser/observation/tests.rs`）。
 - `cef` と `browser` は `gui` の既定 feature。`gui` は CEF なしのビルドを `compile_error!` で拒否し、
   `lint` ジョブは `--no-default-features` が拒否されることを確認する。
 

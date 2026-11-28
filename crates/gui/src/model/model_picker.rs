@@ -223,12 +223,6 @@ pub fn profile_options(profiles: &[ProfileSummary]) -> Vec<ModelPreference> {
         .collect()
 }
 
-pub fn parse_preference(label: &str, profiles: &[ProfileSummary]) -> Option<ModelPreference> {
-    profile_options(profiles)
-        .into_iter()
-        .find(|preference| preference_label(preference) == label)
-}
-
 /// Whether two preferences select the same profile and model, ignoring effort.
 pub fn same_model(a: &ModelPreference, b: &ModelPreference) -> bool {
     a.profile == b.profile && a.model == b.model

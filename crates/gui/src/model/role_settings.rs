@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc::Receiver;
 
 // The Core-client screens name these through the model, which owns the settings types.
 pub use config::{CategoryBindingConfig, ChainEntryConfig, ChainPurpose, RoleBindingConfig};
@@ -25,7 +24,6 @@ pub struct RoleSettingsModel {
     /// route の候補の種別を決めるプロバイダ設定。
     pub providers: BTreeMap<String, config::ProviderProfileConfig>,
     pub routes_empty: bool,
-    pub resolved_previews: BTreeMap<String, Option<String>>,
     pub error: Option<String>,
     /// The role (see [`ROLES`]) whose detail is shown, and the one a save or discard is for.
     pub selected: Option<&'static str>,
@@ -33,7 +31,6 @@ pub struct RoleSettingsModel {
     /// are not saved over the newer file, only discarded.
     pub conflicted: BTreeSet<&'static str>,
     pub profiles: super::role_profiles::RoleProfilePicker,
-    pub(crate) save_rx: Option<Receiver<Result<config::Config, String>>>,
 }
 
 impl RoleSettingsModel {
@@ -70,11 +67,6 @@ impl RoleSettingsModel {
             logical_models: names.into_iter().collect(),
             ..Self::default()
         }
-    }
-
-    /// Whether the draft differs from what was seeded or last saved.
-    pub fn is_dirty(&self) -> bool {
-        self.agents != self.base_agents
     }
 
     /// Whether `role`'s chain, preset, generation or categories differ from the saved ones.
@@ -141,10 +133,6 @@ impl RoleSettingsModel {
         self.logical_models = names.into_iter().collect();
     }
 
-    pub const fn is_saving(&self) -> bool {
-        self.save_rx.is_some()
-    }
-
     /// Whether the chains of `purpose` can use `route`: every candidate has the kind the
     /// purpose needs (ADR 0038). Undefined and empty routes fit every purpose.
     pub fn route_fits(&self, route: &str, purpose: config::ChainPurpose) -> bool {
@@ -175,42 +163,6 @@ impl RoleSettingsModel {
                 .cloned()
                 .collect(),
         }
-    }
-
-    pub fn validate(&self) -> Result<(), config::ConfigError> {
-        for (role, binding) in bindings(&self.agents) {
-            Self::validate_chain(&format!("agents.{role}.models"), &binding.models)?;
-            validate_generation(&binding.generation, role)?;
-        }
-        for (role, categories) in [
-            ("worker", &self.agents.worker.categories),
-            ("reviewer", &self.agents.reviewer.categories),
-        ] {
-            for (category, binding) in categories {
-                // 設定側で許可される内部カテゴリも保存時に検証する。
-                self.agents.binding_for(role, Some(category))?;
-                Self::validate_chain(
-                    &format!("agents.{role}.categories.{category}.models"),
-                    &binding.models,
-                )?;
-                validate_generation(
-                    &binding.generation,
-                    &format!("{role}.categories.{category}"),
-                )?;
-            }
-        }
-        let routing = config::RoutingConfig {
-            routes: self.routes.clone(),
-            ..Default::default()
-        };
-        if let Some(problem) =
-            config::chain_kind_problems("", &self.agents, &routing, &self.providers)
-                .into_iter()
-                .next()
-        {
-            return Err(problem);
-        }
-        Ok(())
     }
 
     /// The checks of [`Self::validate`] for the binding of `role` and its categories only, so
@@ -467,22 +419,6 @@ pub struct ChainRoutes {
     /// Configured routes whose candidates do not fit the chain; an entry naming one is
     /// shown as an error.
     pub misfits: BTreeSet<String>,
-}
-
-pub fn bindings(agents: &config::AgentsConfig) -> [(&str, &config::RoleBindingConfig); 11] {
-    [
-        ("orchestrator", &agents.orchestrator),
-        ("explorer", &agents.explorer),
-        ("worker", &agents.worker),
-        ("reviewer", &agents.reviewer.base),
-        ("roles.web_researcher", &agents.roles.web_researcher),
-        ("roles.planner", &agents.roles.planner),
-        ("roles.advisor", &agents.roles.advisor),
-        ("roles.multimodal_looker", &agents.roles.multimodal_looker),
-        ("roles.evaluator", &agents.roles.evaluator),
-        ("roles.compactor", &agents.roles.compactor),
-        ("roles.image_generator", &agents.roles.image_generator),
-    ]
 }
 
 fn validate_generation(

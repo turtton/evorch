@@ -244,21 +244,6 @@ impl MentionIndex {
             }));
     }
 
-    /// Drops every skill once the project no longer admits its repository
-    /// skills, so none of them completes before the rebuild lands. Which
-    /// skills came from the repository is not recorded, and a user skill one
-    /// of them shadowed only returns with the rebuild anyway, so the user and
-    /// builtin skills wait for it too. [`Self::is_built_for`] then calls for
-    /// that rebuild whichever trust it is asked about.
-    pub fn withhold_repo_skills(&mut self) {
-        if !self.repo_skills || self.skills_withheld {
-            return;
-        }
-        self.entries
-            .retain(|entry| entry.kind != CompletionKind::Skill);
-        self.skills_withheld = true;
-    }
-
     /// Whether this is what [`Self::index_within`] gives for `root`, `allowed` and
     /// `repo_skills`, short of files changed since: built for exactly them,
     /// with no directory's entries or skills dropped afterwards.
@@ -555,3 +540,7 @@ fn walk(root: &Path, dir: &Path, excluded: &[&Path], limit: usize, files: &mut V
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mentions_tests.rs"]
+mod tests;

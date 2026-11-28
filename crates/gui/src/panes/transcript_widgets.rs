@@ -3,8 +3,7 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, RichText, Ui};
 
-use crate::theme::icons::{self, with_icon};
-use crate::theme::text::medium;
+use crate::theme::icons::{self};
 use crate::theme::tokens::*;
 use crate::theme::widgets::soft_frame;
 
@@ -65,16 +64,6 @@ pub fn event_line(ui: &mut egui::Ui, icon: &str, text: &str, color: Color32, hov
             response.on_hover_text(hover);
         }
     });
-}
-
-pub fn role_label(ui: &mut egui::Ui, role: &str) {
-    let response = ui.label(
-        medium(with_icon(icons::ROBOT, role))
-            .size(FONT_SMALL)
-            .color(palette().TEXT_MUTED),
-    );
-    let label = format!("[{role}]");
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
 }
 
 pub fn request_card(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
@@ -165,11 +154,6 @@ pub fn ime_composing(ui: &egui::Ui, id: egui::Id) -> bool {
         }
     });
     composing
-}
-
-/// The heading of one run's transcript; the run ID itself stays behind a copy button.
-pub fn run_transcript_title(ui: &mut Ui, run_id: &str, agent_name: Option<&str>) {
-    run_transcript_header(ui, run_id, agent_name, None, |_| {});
 }
 
 /// The heading with `status` on its row and, under it in small type, the model and

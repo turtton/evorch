@@ -3,8 +3,6 @@
 
 pub mod ack;
 
-use std::collections::BTreeMap;
-
 use egui::Color32;
 use egui_dock::TabStyle;
 use workbench_protocol::views::RunPhase;
@@ -60,17 +58,6 @@ pub fn strongest<'a>(acks: impl IntoIterator<Item = &'a AttentionAck>) -> PaneAt
         .filter(|ack| ack.is_unread())
         .map(|ack| thread_phase_attention(ack.phase()))
         .fold(PaneAttention::None, PaneAttention::max)
-}
-
-pub fn acknowledged_attention<P: PartialEq, R>(
-    acks: &BTreeMap<(P, R), AttentionAck>,
-    panel: &P,
-) -> PaneAttention {
-    strongest(
-        acks.iter()
-            .filter(|((id, _), _)| id == panel)
-            .map(|(_, ack)| ack),
-    )
 }
 
 /// egui_dock paints tab titles without accesskit nodes, so the "• " prefix never reaches
@@ -135,17 +122,6 @@ mod tests {
         let failed = ack(ThreadRunPhase::Error);
         assert_eq!(strongest([&done, &failed]), PaneAttention::Error);
         assert_eq!(strongest([&read, &running]), PaneAttention::None);
-    }
-
-    #[test]
-    fn acknowledged_attention_reads_one_panel() {
-        let acks = BTreeMap::from([
-            (("a", "run-1"), ack(ThreadRunPhase::Done)),
-            (("b", "run-2"), ack(ThreadRunPhase::Error)),
-        ]);
-        assert_eq!(acknowledged_attention(&acks, &"a"), PaneAttention::Info);
-        assert_eq!(acknowledged_attention(&acks, &"b"), PaneAttention::Error);
-        assert_eq!(acknowledged_attention(&acks, &"c"), PaneAttention::None);
     }
 
     #[test]

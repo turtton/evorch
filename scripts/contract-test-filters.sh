@@ -33,7 +33,12 @@
 # contracts by core_renderer_cache and core-client-e2e's default_gui_cache,
 # gui_pull_request_cache (pull request operations and notice through the window) and
 # execution_teams_lanes' pending-attention test, the writer-drain contracts by recorder's
-# storage_bridge and the host's flush test.
+# storage_bridge and the host's flush test. gui::diagnostic_ledger (diagnostics surviving a
+# storage replay with their run and thread, then shown by the embedded transcript) was replaced
+# by recorder's storage_bridge scenario diagnostics_survive_storage_replay_with_run_and_thread_attribution;
+# the transcript view it also drove went with the embedded GUI, and the core client shows
+# diagnostics through gui's features::diagnostics tests. The gui group has no I/O contract
+# left, so it lists io in allow_empty_suites.
 # (No comments inside the filter itself: nextest does not parse them.)
 # scripts/tests/test_check_central_files.sh checks that every binary named in
 # CACHE_CONTRACT_FILTER has a test target.
@@ -104,7 +109,6 @@ IO_CONTRACT_FILTER='
   | (package(=runtime) & binary(=pull_request_log_source_io))
   | (package(=recorder) & binary(=storage_bridge))
   | (package(=workbench-host) & kind(lib) & test(bootstrap::tests::core_catalog_prices_usage_and_diagnostics_are_flushed_once))
-  | (package(=gui) & binary(=diagnostic_ledger))
 '
 
 # Explicit D-3a2-A registration in the existing remaining inventory (not cache

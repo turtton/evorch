@@ -18,8 +18,6 @@ use egui::{
     UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 
-#[cfg(test)]
-use crate::terminal::TerminalSessions;
 use crate::terminal::{GridSize, TerminalSession, TerminalSessionsOf, TerminalStatus, input};
 use crate::theme::icons;
 use crate::theme::text::muted;
@@ -318,7 +316,11 @@ mod tests {
 
     use egui::epaint::Shape;
 
+    use workspace_ui::ProjectId;
+
     use super::*;
+
+    type TerminalSessions = TerminalSessionsOf<Option<ProjectId>>;
 
     const SIZE: Vec2 = Vec2::new(400.0, 300.0);
 
