@@ -3180,6 +3180,7 @@ mod many_subagents;
 mod new_chat;
 mod pull_requests;
 mod read_panes;
+mod side_commands;
 mod skills;
 mod thread_search;
 mod usage_cost;

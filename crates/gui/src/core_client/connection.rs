@@ -78,6 +78,9 @@ enum Pending {
     Command {
         draft: Option<(String, u64)>,
         takes_files: bool,
+        /// The command creates a thread other than the draft's (`/run`): the draft's own
+        /// screen stays what it was.
+        elsewhere: bool,
     },
     Upload {
         thread: String,
@@ -467,8 +470,8 @@ pub async fn serve(
                         if matches!(action, Action::Shutdown) { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; release_own(&client, &shared).await; return; }
                         match action {
                             Action::Command { command, draft } => {
-                                let takes_files = takes_files(&command);
-                                send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Command { draft, takes_files }).await;
+                                let pending = Pending::command(&command, draft);
+                                send_command(&client, &shared, &ctx, &mut uncertain, command, pending).await;
                             }
                             Action::Feature(FeatureAction { feature, tag, request }) => match request {
                                 FeatureRequest::Command(command) => {
@@ -1039,12 +1042,16 @@ async fn accepted(
     let mut discarded = Vec::new();
     update(shared, ctx, |s| {
         let mut reply_error = None;
-        let (draft, takes_files) = match pending {
-            Pending::Command { draft, takes_files } => (draft, takes_files),
+        let (draft, takes_files, elsewhere) = match pending {
+            Pending::Command {
+                draft,
+                takes_files,
+                elsewhere,
+            } => (draft, takes_files, elsewhere),
             Pending::Feature { feature, tag } => {
                 s.features
                     .reply(feature, tag, FeatureReply::Command(Ok(reply.clone())));
-                (None, false)
+                (None, false, false)
             }
             Pending::Upload {
                 thread,
@@ -1090,14 +1097,17 @@ async fn accepted(
                     }
                     reply_error = Some("Attachment command returned no upload result".into());
                 }
-                (None, false)
+                (None, false, false)
             }
         };
         if let Some((thread, _)) = &draft {
             s.sending.remove(thread);
             // The thread exists in the core now: its screen is the thread's own from here,
             // wherever the person is. A refusal never gets here, so its draft stays a new one.
-            s.new_conversations.retain(|_, new| new.as_str() != thread);
+            // A command that created another thread leaves this one as it was.
+            if !elsewhere {
+                s.new_conversations.retain(|_, new| new.as_str() != thread);
+            }
         }
         if let Some((thread, _)) = &draft
             && takes_files
@@ -1132,6 +1142,23 @@ async fn accepted(
                 ConversationCommand::DiscardAttachment { attachment_id: id },
             ))
             .await;
+    }
+}
+
+impl Pending {
+    fn command(command: &Command, draft: Option<(String, u64)>) -> Self {
+        let elsewhere = match (command, &draft) {
+            (
+                Command::Conversation(ConversationCommand::CreateExecution(chat)),
+                Some((thread, _)),
+            ) => chat.thread.as_str() != thread,
+            _ => false,
+        };
+        Self::Command {
+            draft,
+            takes_files: takes_files(command) && !elsewhere,
+            elsewhere,
+        }
     }
 }
 
@@ -1504,10 +1531,7 @@ mod tests {
                 thread: ThreadId::new("t").unwrap(),
             },
         ));
-        let pending = Pending::Command {
-            draft: Some(("t".into(), 2)),
-            takes_files: takes_files(&command),
-        };
+        let pending = Pending::command(&command, Some(("t".into(), 2)));
         let (client, mut core) = connect().await;
         let (ctx, mut uncertain) = (egui::Context::default(), Vec::new());
         tokio::join!(
@@ -1568,10 +1592,7 @@ mod tests {
                 delegation: None,
             },
         ));
-        let pending = Pending::Command {
-            draft: Some(("t".into(), 2)),
-            takes_files: takes_files(&command),
-        };
+        let pending = Pending::command(&command, Some(("t".into(), 2)));
         let (client, mut core) = connect().await;
         let (ctx, mut uncertain) = (egui::Context::default(), Vec::new());
         tokio::join!(
@@ -1592,6 +1613,74 @@ mod tests {
             .collect();
         assert_eq!(still_new, ["q"]);
         assert_eq!(state.drafts["t"].text, "/goal ship it, and more");
+        assert!(!state.sending.contains("t"));
+        assert_eq!(state.attachment_drafts["t"].len(), 1);
+    }
+
+    // Given: a new conversation whose composer sent /run, a Worker in another new thread,
+    //          with a file pending
+    // When: the core accepts it
+    // Then: the draft is cleared and the file stays for the next message, and the
+    //       conversation on screen is still new: only the thread the command created
+    //       belongs to the core
+    #[tokio::test]
+    async fn an_accepted_background_run_leaves_the_new_conversation_on_screen() {
+        use workbench_protocol::envelope::{ReplyPayload, ReplyResult};
+        let project = ProjectId::new("p").unwrap();
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        {
+            let mut state = shared.lock().unwrap();
+            state
+                .new_conversations
+                .insert(project.clone(), ThreadId::new("t").unwrap());
+            state.drafts.insert(
+                "t".into(),
+                super::super::Draft {
+                    text: "/run fix it".into(),
+                    revision: 2,
+                },
+            );
+            state.sending.insert("t".into());
+            state.attachment_draft(
+                project.clone(),
+                "t",
+                crate::fixture::attachment_draft().file,
+            );
+        }
+        let command = Command::Conversation(ConversationCommand::CreateExecution(
+            workbench_protocol::commands::SendChat {
+                project,
+                thread: ThreadId::new("background").unwrap(),
+                submission_id: workbench_protocol::ids::SubmissionId::new("s").unwrap(),
+                composer_role: workbench_protocol::commands::ComposerRole::Worker,
+                text: "fix it".into(),
+                skills: vec![],
+                attachments: vec![],
+                model_preference: None,
+                fork_seed: None,
+            },
+        ));
+        let pending = Pending::command(&command, Some(("t".into(), 2)));
+        let (client, mut core) = connect().await;
+        let (ctx, mut uncertain) = (egui::Context::default(), Vec::new());
+        tokio::join!(
+            send_command(&client, &shared, &ctx, &mut uncertain, command, pending),
+            async {
+                let request = core.recv_request().await.unwrap();
+                core.reply(
+                    &request.request_id,
+                    ReplyResult::Success(ReplyPayload::Command(CommandReply::accepted())),
+                );
+            },
+        );
+        let state = shared.lock().unwrap();
+        let still_new: Vec<_> = state
+            .new_conversations
+            .values()
+            .map(ThreadId::as_str)
+            .collect();
+        assert_eq!(still_new, ["t"]);
+        assert_eq!(state.drafts["t"].text, "");
         assert!(!state.sending.contains("t"));
         assert_eq!(state.attachment_drafts["t"].len(), 1);
     }

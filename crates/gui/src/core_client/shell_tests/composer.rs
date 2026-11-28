@@ -17,7 +17,9 @@ const HELP: &str = "/team <delegation value> | <goal> — Submit a team goal wit
 /help — Show available commands\n\
 /new — Start a new thread\n\
 /compaction — Request context compaction at the next turn boundary\n\
-/continue — Resume the current conversation after a stop or error";
+/continue — Resume the current conversation after a stop or error\n\
+/run <text> — Start a background run without opening a pane\n\
+/btw <question> — Ask a side question without adding to the conversation";
 
 fn composer() -> Screen {
     let mut screen = screen(egui::vec2(1440.0, 900.0));
@@ -64,7 +66,7 @@ impl Screen {
     }
 
     /// What the actor does when the core accepts what `thread` sent.
-    fn accept(&mut self, thread: &str) {
+    pub(super) fn accept(&mut self, thread: &str) {
         let mut shared = self.shared.lock().unwrap();
         shared.sending.remove(thread);
         shared.drafts.remove(thread);
@@ -107,8 +109,7 @@ fn file(id: &str, ready: bool, uploading: bool) -> ClientAttachmentDraft {
 
 // Given: the composer of thr-1
 // When: "/" is typed
-// Then: the commands the core client carries out are offered, and /btw and /run,
-//       which it cannot, are not
+// Then: the commands the core client carries out are offered, /btw and /run among them
 #[test]
 fn a_slash_offers_the_commands_the_core_client_carries_out() {
     let mut screen = composer();
@@ -120,11 +121,10 @@ fn a_slash_offers_the_commands_the_core_client_carries_out() {
         "/new",
         "/compaction",
         "/continue",
+        "/run <text>",
+        "/btw <question>",
     ] {
         screen.harness.get_by_label(offered);
-    }
-    for absent in ["/btw <question>", "/run <text>"] {
-        assert!(screen.harness.query_by_label(absent).is_none(), "{absent}");
     }
     screen.capture("slash");
 }

@@ -1173,6 +1173,8 @@ impl CoreClientScreen {
             matches!(
                 effect,
                 shell::Effect::Goal(_)
+                    | shell::Effect::AskBtw { .. }
+                    | shell::Effect::CloseBtw(_)
                     | shell::Effect::Lane(_)
                     | shell::Effect::PullRequest(_)
                     | shell::Effect::PullRequestChip(_)
@@ -1354,6 +1356,20 @@ fn apply_effect(
             shell::Effect::Goal(action) => {
                 if let Some(execution) = shared.features.execution_mut() {
                     execution.enqueue_goal(action);
+                }
+            }
+            shell::Effect::AskBtw {
+                thread,
+                operation,
+                question,
+            } => {
+                if let Some(execution) = shared.features.execution_mut() {
+                    execution.ask_btw(thread, operation, question);
+                }
+            }
+            shell::Effect::CloseBtw(thread) => {
+                if let Some(execution) = shared.features.execution_mut() {
+                    execution.close_btw(&thread);
                 }
             }
             shell::Effect::Lane(action) => {

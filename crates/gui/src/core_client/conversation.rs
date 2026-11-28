@@ -16,7 +16,7 @@ use workspace_ui::ThreadRunPhase;
 use super::cache::Cache;
 use super::connection::Action;
 use super::features::diagnostics::{cost_hint, cost_text};
-use super::features::execution::ExecutionBand;
+use super::features::execution::{BtwCardView, ExecutionBand};
 use super::features::lanes::{CardChoice, CardPlace, LaneCardAction, LaneCardView, lane_body};
 use super::features::pull_requests::{PullRequestBar, PullRequestChips};
 use super::features::workspace::ProjectSkills;
@@ -40,6 +40,7 @@ use crate::theme::widgets::{
     empty_state, fill_label, ghost, icon_button, metric_detailed, pane_root, soft_frame,
 };
 
+mod btw;
 mod composer;
 mod mentions;
 mod new_chat;
@@ -88,6 +89,8 @@ pub struct ConversationPane {
     /// The message bodies asked of the projection numbered `projection`.
     requested_bodies: BTreeSet<String>,
     projection: u64,
+    /// The selected thread's side question is still being answered, as of the last frame.
+    btw_asking: bool,
 }
 
 impl Default for ConversationPane {
@@ -114,6 +117,7 @@ impl Default for ConversationPane {
             navigation: None,
             requested_bodies: BTreeSet::new(),
             projection: 0,
+            btw_asking: false,
         }
     }
 }
@@ -212,6 +216,8 @@ pub struct Bands<'a> {
     pub pull_request: Option<PullRequestBar<'a>>,
     /// The open suggestions of the thread's pull requests, offered on the tool cards.
     pub chips: Option<PullRequestChips<'a>>,
+    /// The selected thread's side question, drawn directly above the composer.
+    pub btw: Option<BtwCardView<'a>>,
 }
 
 /// `root` is the thread's current root run, as its detail names it.
@@ -225,6 +231,7 @@ pub fn show(
         lane,
         pull_request,
         chips,
+        btw,
     }: Bands<'_>,
     root: Option<&RunId>,
     effects: &mut Vec<Effect>,
@@ -254,6 +261,7 @@ pub fn show(
             return;
         }
         let activity = activity(io.cache, &thread, root);
+        pane.btw_asking = btw.as_ref().is_some_and(BtwCardView::asking);
         ui.add_enabled_ui(io.connected, |ui| {
             header(
                 ui,
@@ -279,6 +287,12 @@ pub fn show(
                     let vertical_spacing = ui.spacing().item_spacing.y;
                     ui.spacing_mut().item_spacing.y = 0.0;
                     progress(ui, io.cache, &thread, band, details_max, effects);
+                    if let Some(card) = &btw
+                        && let Some(btw::BtwChoice::Close) =
+                            btw::btw_card(ui, card, io.link_base, details_max)
+                    {
+                        effects.push(Effect::CloseBtw(thread.clone()));
+                    }
                     composer::composer(ui, pane, io, &project, &thread, activity, effects);
                     ui.spacing_mut().item_spacing.y = vertical_spacing;
                     status_strip(ui, io.cache, &thread, activity, io.thread_usage);

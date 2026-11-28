@@ -49,7 +49,16 @@ fn plan_node() -> Value {
 pub fn samples() -> AreaSamples {
     AreaSamples {
         name: "execution",
-        commands: Vec::<Command>::new(),
+        commands: vec![
+            de::<Command>(
+                json!({"type": "execution", "payload": {"type": "ask_btw", "payload": {
+            "operation_id": "op-1", "thread": "thread-1", "question": "what did you just change?"}}}),
+            ),
+            de::<Command>(
+                json!({"type": "execution", "payload": {"type": "cancel_btw", "payload": {
+            "operation_id": "op-1"}}}),
+            ),
+        ],
         queries: vec![
             de::<Query>(
                 json!({"type":"execution","payload":{"type":"get_conversation_plan","payload":{"thread":"thread-1"}}}),
@@ -79,6 +88,10 @@ pub fn samples() -> AreaSamples {
                 json!({"type": "execution", "payload": {"type": "get_invocation", "payload": {
                 "invocation": "inv-1"}}}),
             ),
+            de::<Query>(
+                json!({"type": "execution", "payload": {"type": "get_btw", "payload": {
+                "operation_id": "op-1"}}}),
+            ),
         ],
         ui_events: vec![
             de::<UiEvent>(
@@ -87,6 +100,10 @@ pub fn samples() -> AreaSamples {
             de::<UiEvent>(json!({"type": "execution", "payload": {
             "type": "thread_execution_changed", "payload": {
                 "thread": "thread-1", "goal": goal()}}})),
+            de::<UiEvent>(json!({"type": "execution", "payload": {
+            "type": "btw_changed", "payload": {
+                "thread": "thread-1",
+                "operation": {"operation_id": "op-1", "state": {"type": "ready"}, "revision": "2"}}}})),
         ],
         query_replies: vec![
             de::<QueryReply>(
@@ -116,6 +133,12 @@ pub fn samples() -> AreaSamples {
                 json!({"type": "execution", "payload": {"type": "invocation", "payload": {
                 "invocation": "inv-1", "thread": "thread-1", "state": "succeeded",
                 "owned_run": "run-1", "final_text": "done"}}}),
+            ),
+            de::<QueryReply>(
+                json!({"type": "execution", "payload": {"type": "btw", "payload": {
+            "operation": {"operation_id": "op-1", "state": {"type": "ready"}, "revision": "2"},
+            "thread": "thread-1", "source": {"run": "run-1", "settled": true},
+            "answer": "**done**", "truncated": false}}}),
             ),
         ],
     }

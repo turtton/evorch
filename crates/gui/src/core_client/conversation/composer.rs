@@ -3,6 +3,7 @@
 //! selectors, the attached files as chips, and the input with the attach "+" on its
 //! left and Stop, Queue and Send on its right.
 use egui::Ui;
+use workbench_protocol::namespaces::execution::AskBtw;
 use workbench_protocol::namespaces::{ConversationCommand, ExecutionCommand};
 use workbench_protocol::{commands::*, ids::*};
 
@@ -10,6 +11,7 @@ use super::skills::{self, SkillSend};
 use super::slash::{self, Ctx, OFFERED, Outcome};
 use super::{Activity, ConversationIo, ConversationPane, stop};
 use crate::attachments::Intake;
+use crate::composer_input::slash::{ComposerInput, parse_input};
 use crate::composer_input::{CompletionItem, mention_query};
 use crate::core_client::connection::Action;
 use crate::core_client::features::Navigation;
@@ -25,6 +27,9 @@ use crate::theme::tokens::*;
 use crate::theme::widgets::{ghost, primary_icon_button, surface_frame};
 
 const MAX_NOTICES: usize = 20;
+const BTW_BUSY: &str = "A side question is still being answered. Close it or wait for its answer.";
+const RUN_STARTED: &str =
+    "Sent /run: a Worker starts in a new thread of this project, listed with its threads.";
 const WAITING_FOR_SKILLS: &str =
     "Reading the project's skills for the @mentions. Send again in a moment.";
 const TOO_MANY_SKILLS: &str = "A message can name at most 32 skills.";
@@ -249,7 +254,11 @@ pub(super) fn composer(
                         {
                             effects.push(Effect::send(stop(thread)));
                         }
-                        let send_button = if activity.root_active && !completing {
+                        // A slash command is carried out at once, even while the root works.
+                        let queues = activity.root_active
+                            && !completing
+                            && !matches!(parse_input(draft_text), ComposerInput::Command { .. });
+                        let send_button = if queues {
                             ui.add_enabled(can_send, egui::Button::new("Queue"))
                                 .on_hover_text("Queue as a follow-up (Enter)")
                         } else if can_send {
@@ -578,6 +587,52 @@ fn submit(
         Outcome::NewConversation => {
             clear(draft);
             pane.navigation = Some(Navigation::NewConversation(project.clone()));
+            return;
+        }
+        Outcome::Btw(_) if pane.btw_asking => {
+            pane.notice(thread, BTW_BUSY.into());
+            return;
+        }
+        // The draft goes when the core accepts, and a refusal keeps it; the card is
+        // registered first so that its read follows the command.
+        Outcome::Btw(question) => {
+            let operation_id = OperationId::new(uuid::Uuid::new_v4().to_string()).unwrap();
+            effects.push(Effect::AskBtw {
+                thread: thread.clone(),
+                operation: operation_id.clone(),
+                question: question.clone(),
+            });
+            effects.push(Effect::send(Action::Command {
+                command: Command::Execution(ExecutionCommand::AskBtw(AskBtw {
+                    operation_id,
+                    thread: thread.clone(),
+                    question,
+                })),
+                draft: Some((thread.to_string(), draft.revision)),
+            }));
+            pane.notices.remove(thread.as_str());
+            return;
+        }
+        // A Worker in a thread of its own: the screen stays on this one, and the files
+        // wait for the next message.
+        Outcome::Run(text) => {
+            let chat = SendChat {
+                project: project.clone(),
+                thread: ThreadId::new(uuid::Uuid::new_v4().to_string()).unwrap(),
+                submission_id: SubmissionId::new(uuid::Uuid::new_v4().to_string()).unwrap(),
+                composer_role: ComposerRole::Worker,
+                text,
+                skills: Vec::new(),
+                attachments: Vec::new(),
+                model_preference: None,
+                fork_seed: None,
+            };
+            effects.push(Effect::send(Action::Command {
+                command: Command::Conversation(ConversationCommand::CreateExecution(chat)),
+                draft: Some((thread.to_string(), draft.revision)),
+            }));
+            pane.notices.remove(thread.as_str());
+            pane.notice(thread, RUN_STARTED.into());
             return;
         }
     }

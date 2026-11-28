@@ -58,6 +58,15 @@ pub enum Effect {
     OpenRun(RunPane),
     /// A goal control pressed in the composer band, for the execution feature.
     Goal(GoalAction),
+    /// A side question was sent from the composer as `operation`, for the execution feature
+    /// to read the answer of.
+    AskBtw {
+        thread: ThreadId,
+        operation: workbench_protocol::ids::OperationId,
+        question: String,
+    },
+    /// Close pressed on a thread's side question card.
+    CloseBtw(ThreadId),
     /// A control pressed on the lane card of a lane's conversation, for the lanes feature.
     Lane(super::features::lanes::LaneCardAction),
     /// A control pressed on the pull request bar of a conversation, for the pull requests
@@ -491,6 +500,11 @@ impl TabViewer for Viewer<'_, '_> {
                 let lane = self.pass.lanes().and_then(|lanes| lanes.card());
                 let pull_request = self.pass.pull_requests().and_then(|prs| prs.bar());
                 let chips = self.pass.pull_requests().and_then(|prs| prs.chips());
+                let btw = self
+                    .selection
+                    .thread
+                    .as_ref()
+                    .and_then(|thread| self.pass.execution().and_then(|e| e.btw_card(thread)));
                 self.conversation.set_mention_scope(self.local.roots());
                 conversation::show(
                     ui,
@@ -502,6 +516,7 @@ impl TabViewer for Viewer<'_, '_> {
                         lane,
                         pull_request,
                         chips,
+                        btw,
                     },
                     root.as_ref(),
                     self.effects,
