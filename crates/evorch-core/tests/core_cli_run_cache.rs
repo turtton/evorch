@@ -4,17 +4,22 @@
 //! back at the HTTP boundary of the offline mock, whose prompt cache is derived
 //! from the request bytes.
 //!
-//! * The run asks a blocking question, the command line answers it, and the
-//!   run goes on: its second request extends the first (same model, cache key,
-//!   tool schema and prefix), and starting, following and answering add nothing
-//!   to what the model is sent.
+//! * The run asks a blocking question, ends its turn while the question is
+//!   open, the command line answers it, and the run goes on: each request
+//!   extends the one before it (same model, cache key, tool schema and
+//!   prefix), and starting, following and answering add nothing to what the
+//!   model is sent.
 //!
-//! No test waits for time: every wait is for an event of the core's bus (the
-//! timeouts only bound a failing test).
+//! The answer is sent only once the run waits for it. An answer that arrives
+//! while a model turn is in flight is, by design, work for one more turn, so
+//! sending it as soon as the question is visible would race the run's second
+//! request (the model's script has no turn for that).
+//!
+//! No test waits for time: every wait is for an event of the core's bus.
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use event_bus::{EventBus, EventKind};
+use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, WaitingCause};
 use evorch_core::{backend::HostBackend, instance::Instance, unix};
 use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
@@ -35,7 +40,6 @@ use workbench_protocol::namespaces::{
 use workbench_protocol::queries::{PendingQuery, Query, QueryReply};
 
 const MODEL: &str = "mock-model";
-const WAIT: Duration = Duration::from_secs(60);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cli_invocation_keeps_the_sent_prefix_across_its_question_and_answer() {
@@ -50,6 +54,9 @@ async fn a_cli_invocation_keeps_the_sent_prefix_across_its_question_and_answer()
                 "ask_user",
                 [r#"{"title":"Which format?","options":["JSON","YAML"],"blocking":true}"#],
             ),
+            // The turn ends with the blocking question open, so the run waits
+            // for the answer; the answer then starts the last turn.
+            ScriptedResponse::text_stream("wait", MODEL, ["waiting for the answer"]),
             ScriptedResponse::text_stream("done", MODEL, ["all done"]),
         ],
         vec![MODEL.into()],
@@ -197,28 +204,38 @@ context_window_tokens = 1000000
     };
     let thread = started.thread.clone();
 
-    let question = loop {
-        let QueryReply::Questions(QuestionsReply::Questions(page)) = client
-            .query(Query::Questions(QuestionsQuery::ListQuestions(
-                PendingQuery {
-                    thread: Some(thread.clone()),
-                    pending_only: true,
-                    page: Default::default(),
-                },
-            )))
-            .await
-            .unwrap()
-        else {
-            panic!("questions reply")
-        };
-        if let Some(question) = page.items.into_iter().next() {
-            break question;
+    // The second turn ends with the blocking question open, so the run waits
+    // for the answer. Only then is the answer sent: the bus was subscribed
+    // before the run started, so this event cannot be missed.
+    loop {
+        let event = events.recv().await.expect("the bus is open");
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            to: AgentRunPhase::Waiting,
+            waiting: Some(WaitingCause::BlockingQuestions),
+            ..
+        }) = event.kind
+        {
+            break;
         }
-        tokio::time::timeout(WAIT, events.recv())
-            .await
-            .expect("the run asks its question")
-            .expect("the bus is open");
+    }
+    let QueryReply::Questions(QuestionsReply::Questions(page)) = client
+        .query(Query::Questions(QuestionsQuery::ListQuestions(
+            PendingQuery {
+                thread: Some(thread.clone()),
+                pending_only: true,
+                page: Default::default(),
+            },
+        )))
+        .await
+        .unwrap()
+    else {
+        panic!("questions reply")
     };
+    let question = page
+        .items
+        .into_iter()
+        .next()
+        .expect("the waiting run has its question open");
     assert_eq!(question.title, "Which format?");
     client
         .command(Command::Questions(QuestionsCommand::AnswerUserQuestion(
@@ -247,15 +264,11 @@ context_window_tokens = 1000000
         if view.state.is_terminal() {
             break view;
         }
-        tokio::time::timeout(WAIT, async {
-            loop {
-                if let EventKind::Lifecycle(_) = events.recv().await.unwrap().kind {
-                    return;
-                }
+        loop {
+            if let EventKind::Lifecycle(_) = events.recv().await.unwrap().kind {
+                break;
             }
-        })
-        .await
-        .expect("the run ends");
+        }
     };
     assert_eq!(finished.state, InvocationState::Succeeded, "{finished:?}");
 
@@ -265,17 +278,23 @@ context_window_tokens = 1000000
         .filter(|request| request.method == "POST" && request.path == "/v1/chat/completions")
         .map(|request| request.body)
         .collect();
-    assert_eq!(requests.len(), 2, "one request per model turn");
-    assert_append_only(CacheProtocol::OpenAi, &requests[0], &requests[1])
-        .expect("the answered run keeps the sent prefix and the settings");
-    for field in ["model", "prompt_cache_key", "tools"] {
-        assert_eq!(requests[0][field], requests[1][field], "{field}");
-    }
-    assert!(
-        requests[1]["messages"].as_array().unwrap().len()
-            > requests[0]["messages"].as_array().unwrap().len(),
-        "the second request only appends"
+    assert_eq!(
+        requests.len(),
+        3,
+        "one request per model turn: the question, the wait, the answer"
     );
+    for pair in requests.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1])
+            .expect("the answered run keeps the sent prefix and the settings");
+        for field in ["model", "prompt_cache_key", "tools"] {
+            assert_eq!(pair[0][field], pair[1][field], "{field}");
+        }
+        assert!(
+            pair[1]["messages"].as_array().unwrap().len()
+                > pair[0]["messages"].as_array().unwrap().len(),
+            "each request only appends"
+        );
+    }
     assert_eq!(
         mock.remaining_scripts(),
         0,
