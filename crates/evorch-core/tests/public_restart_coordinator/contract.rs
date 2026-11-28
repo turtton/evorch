@@ -28,11 +28,33 @@ async fn refusals_leave_gate_and_transaction_unchanged() {
     let mut unknown = base.clone();
     unknown.binding.target_id = id("not-allowlisted");
     unknown.binding.operation_id = id("unknown");
-    assert!(result(&f, unknown).await.is_err());
+    assert!(
+        result(&f, unknown)
+            .await
+            .unwrap_err()
+            .message
+            .contains("target")
+    );
+    let mut epoch = base.clone();
+    epoch.binding.expected_core_epoch = workbench_protocol::wire::InstanceEpoch(EPOCH.0 + 1);
+    epoch.binding.operation_id = id("old-epoch");
+    assert!(
+        result(&f, epoch)
+            .await
+            .unwrap_err()
+            .message
+            .contains("core epoch changed")
+    );
     let mut stale = base.clone();
     stale.binding.target_revision = Revision(999);
     stale.binding.operation_id = id("stale");
-    assert!(result(&f, stale).await.is_err());
+    assert!(
+        result(&f, stale)
+            .await
+            .unwrap_err()
+            .message
+            .contains("target")
+    );
     f.graphs.state.lock().unwrap().1 = 1;
     assert!(result(&f, base).await.is_err());
     f.assert_running_untouched();
@@ -374,12 +396,73 @@ async fn recipe_binding_aba_after_inspect_refuses_before_gate_and_transaction() 
     f.port.hold.store(2, Ordering::SeqCst);
     let response = f.submit(command(request)).unwrap();
     f.event(2, "recipe-binding-race").await;
-    // Equal contents do not restore an older binding observation.
-    f.recipes.1.replace(Default::default());
+    // A real change followed by a return to the original contents does not
+    // restore an older proof. A no-op publication is tested separately.
+    f.recipes.1.replace(std::collections::BTreeMap::from([(
+        "changed".into(),
+        workbench_host::lane::ThreadBinding {
+            root: runtime::RunId::new(1),
+            project_root: None,
+            goal_project: None,
+        },
+    )]));
     f.recipes.1.replace(Default::default());
     f.port.release();
-    assert!(response.await.unwrap().is_err());
+    let error = response.await.unwrap().unwrap_err();
+    assert!(error.message.contains("authority changed"));
     f.assert_running_untouched();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn unchanged_publish_and_turn_completion_during_audit_can_commit() {
+    let mut f = Fixture::new().await;
+    let mut events = f.host.runtime.event_bus().subscribe();
+    let run = f
+        .host
+        .runtime
+        .delegate_chat(
+            "progress",
+            runtime::Role::Worker,
+            "first".into(),
+            runtime::RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let waiting = |event| {
+        matches!(event, event_bus::EventKind::Lifecycle(
+        event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Waiting, .. }
+    ) if run_id == run.to_string())
+    };
+    while !waiting(events.recv().await.unwrap().kind) {}
+    f.recipes.0.lock().unwrap().insert(
+        run,
+        runtime::quiesce::RecoveryRecipe {
+            settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+            policy: runtime::quiesce::ResumePolicy::CoreOwned,
+            goal_id: None,
+            team: None,
+            lane: None,
+            descriptor: None,
+        },
+    );
+    let request = f.request("normal-progress").await;
+    f.port.hold.store(2, Ordering::SeqCst);
+    let response = f.submit(command(request)).unwrap();
+    f.event(2, "normal-progress").await;
+    f.recipes.1.replace(Default::default());
+    f.host
+        .runtime
+        .send_message(run, "another turn".into())
+        .unwrap();
+    while !waiting(events.recv().await.unwrap().kind) {}
+    f.port.release();
+    response.await.unwrap().unwrap();
+    let attempt = f.core.snapshot().id.unwrap();
+    f.core.wait_sealed(attempt).await.unwrap();
     f.shutdown().await;
 }
 

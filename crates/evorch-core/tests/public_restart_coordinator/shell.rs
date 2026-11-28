@@ -145,6 +145,39 @@ async fn binding(f: &Fixture) -> InterruptBinding {
         changes.changed().await.unwrap();
     }
 }
+#[tokio::test]
+async fn shell_deadline_retains_run_thread_and_operation_after_reopen() {
+    use evorch_core::restart::{PreparationFailure, PreparationStage, RestartPhase};
+    let (f, model) = fixture().await;
+    let _ = binding(&f).await;
+    let snapshot = f.core.snapshot();
+    let attempt = snapshot.id.unwrap();
+    let run = snapshot.blockers.first().unwrap().run;
+    tokio::time::pause();
+    // The configured preparation limit is 300s. The held model request cannot
+    // finish until the test explicitly releases it; use only virtual time.
+    tokio::time::advance(std::time::Duration::from_secs(301)).await;
+    assert!(f.core.wait_sealed(attempt).await.is_err());
+    assert_eq!(f.core.snapshot().phase, RestartPhase::Running);
+    assert!(f.core.snapshot().blockers.is_empty());
+    let recorded = f.core.operation_diagnostic(&id("request")).unwrap();
+    assert_eq!(
+        Some(recorded.clone()),
+        f.core.preparation_diagnostic(attempt)
+    );
+    assert_eq!(recorded.stage, PreparationStage::SafePoints);
+    assert_eq!(recorded.reason, PreparationFailure::Deadline);
+    assert_eq!((recorded.total, recorded.omitted), (1, 0));
+    let cause = recorded.causes.first().unwrap();
+    assert_eq!(cause.run, run);
+    assert_eq!(cause.thread.as_deref(), Some("thread"));
+    assert!(cause.blocker.is_some());
+    assert!(recorded.retryable);
+    tokio::time::resume();
+    model.release_all();
+    f.shutdown().await;
+}
+
 fn intent(binding: InterruptBinding, op: &str, confirmed: bool) -> AdminIntent {
     LifecycleCommand::Restart(RestartCommand::Interrupt(InterruptShell {
         binding,

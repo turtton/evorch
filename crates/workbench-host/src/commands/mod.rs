@@ -238,7 +238,7 @@ impl CommandService {
             .keys()
             .chain(self.bindings.goal_runs.keys())
             .collect();
-        self.lane_bindings.replace(
+        self.lane_bindings.publish_roles(
             threads
                 .into_iter()
                 .filter_map(|thread| {
@@ -258,6 +258,9 @@ impl CommandService {
                     ))
                 })
                 .collect(),
+            &self.bindings.chat_runs,
+            &self.bindings.goal_runs,
+            &self.bindings.goal_projects,
         );
     }
 

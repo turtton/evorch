@@ -1,7 +1,9 @@
 //! Current read-only recipe evidence. Installation belongs to V1b-2b.
 //! No binding or execution authority is restored from a saved recipe.
 #![cfg(target_os = "linux")]
-use crate::restart::public::{ObservedRecipes, RecipeSource, Recipes};
+use crate::restart::public::{
+    ObservedRecipes, RecipeLedgers, RecipeSource, RecipeThreadLedger, RecipeThreadState, Recipes,
+};
 use runtime::{
     AgentRuntime, RestartRecipeMember, RunId,
     quiesce::{CORE_RECOVERY_SETTINGS_REFERENCE, RecoveryRecipe, ResumePolicy},
@@ -31,7 +33,7 @@ struct Bindings {
     chats: BTreeMap<String, RunId>,
     goals: BTreeMap<String, RunId>,
     projects: BTreeMap<String, String>,
-    lanes: BTreeMap<String, (String, u64)>,
+    ledgers: RecipeLedgers,
 }
 impl HostRecipeSource {
     pub fn new(host: &BootstrappedHost) -> Self {
@@ -52,7 +54,7 @@ impl HostRecipeSource {
             chats: service.bindings.chat_runs.clone(),
             goals: service.bindings.goal_runs.clone(),
             projects: service.bindings.goal_projects.clone(),
-            lanes: BTreeMap::new(),
+            ledgers: BTreeMap::new(),
         })
     }
     fn check_inventory(&self, expected: &[RestartRecipeMember]) -> Result<(), AdminFailure> {
@@ -89,12 +91,9 @@ impl HostRecipeSource {
                         .lane_by_thread(thread)
                         .map_err(|_| unavailable_for(member.run))?;
                     check_lane(member, lane.as_ref())?;
-                    if let Some(lane) = lane {
-                        bindings.lanes.insert(
-                            thread.to_owned(),
-                            (lane.root_run_id.unwrap(), lane.generation),
-                        );
-                    }
+                    bindings
+                        .ledgers
+                        .insert(thread.to_owned(), read_ledger(&db, thread, lane.as_ref())?);
                 }
                 Ok(bindings)
             })
@@ -112,7 +111,7 @@ impl HostRecipeSource {
             .map_err(inventory_error)?;
         inventory_unchanged(&initial, &members)?;
         if !bindings.observed.is_current() {
-            return Err(conflict());
+            return Err(binding_changed());
         }
         for member in &members {
             if member.team {
@@ -173,7 +172,7 @@ impl HostRecipeSource {
         // binds this inventory to its opaque runtime observation.
         self.check_inventory(&members)?;
         if !recipes.bindings.is_current() {
-            return Err(conflict());
+            return Err(binding_changed());
         }
         Ok(recipes)
     }
@@ -182,17 +181,53 @@ impl RecipeSource for HostRecipeSource {
     fn collect(&self) -> AdminIo<'_, ObservedRecipes> {
         Box::pin(self.collect_current())
     }
+
+    fn verify_ledgers(&self, expected: RecipeLedgers) -> AdminIo<'_, ()> {
+        let storage = self.storage.clone();
+        Box::pin(async move {
+            self.reader
+                .read(move || {
+                    let db = open_database(&storage)?;
+                    for (thread, expected) in expected {
+                        let lane = db.lane_by_thread(&thread).map_err(|_| unavailable())?;
+                        check_ledger(
+                            &thread,
+                            expected
+                                .thread
+                                .as_ref()
+                                .and_then(|row| row.root.as_ref())
+                                .and_then(|run| run.parse().ok()),
+                            &expected,
+                            &read_ledger(&db, &thread, lane.as_ref())?,
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await
+        })
+    }
 }
 fn inventory_unchanged(
     expected: &[RestartRecipeMember],
     current: &[RestartRecipeMember],
 ) -> Result<(), AdminFailure> {
-    if let Some((member, _)) = expected.iter().zip(current).find(|(a, b)| a != b) {
-        return Err(conflict_for(member.run));
-    }
     let common = expected.len().min(current.len());
     if let Some(member) = expected.get(common).or_else(|| current.get(common)) {
-        return Err(conflict_for(member.run));
+        return Err(member_changed(member.run));
+    }
+    for (before, after) in expected.iter().zip(current) {
+        if before != after {
+            let mut prior = before.clone();
+            prior.snapshots.clone_from(&after.snapshots);
+            prior
+                .context_fingerprint
+                .clone_from(&after.context_fingerprint);
+            return Err(if prior == *after {
+                conflict_for(before.run)
+            } else {
+                member_changed(before.run)
+            });
+        }
     }
     Ok(())
 }
@@ -247,15 +282,13 @@ fn read_recipes(
         let lane = db
             .lane_by_thread(thread)
             .map_err(|_| unavailable_for(member.run))?;
-        let current_lane = lane.as_ref().map(|lane| {
-            (
-                lane.root_run_id.clone().unwrap_or_default(),
-                lane.generation,
-            )
-        });
-        if current_lane.as_ref() != bindings.lanes.get(thread) {
-            return Err(conflict_for(member.run));
-        }
+        let expected = bindings.ledgers.get(thread).ok_or_else(binding_changed)?;
+        check_ledger(
+            thread,
+            Some(member.run),
+            expected,
+            &read_ledger(&db, thread, lane.as_ref())?,
+        )?;
         check_lane(member, lane.as_ref())?;
         let record = db
             .run_context(&member.run.to_string())
@@ -320,18 +353,84 @@ fn read_recipes(
         );
     }
     if !bindings.observed.is_current() {
-        return Err(conflict());
+        return Err(binding_changed());
     }
     Ok(ObservedRecipes {
         recipes,
         bindings: bindings.observed.clone(),
+        ledgers: bindings.ledgers.clone(),
     })
+}
+fn read_ledger(
+    db: &storage::Database,
+    thread: &str,
+    lane: Option<&storage::lanes::LaneRecord>,
+) -> Result<RecipeThreadLedger, AdminFailure> {
+    let thread = db
+        .thread(thread)
+        .map_err(|_| unavailable())?
+        .map(|row| RecipeThreadState {
+            root: row.root_run_id,
+            project_id: row.project_id,
+            project_root: row.project_root,
+            archived: row.archived,
+            archive_revision: row.archive_revision,
+            superseded: row.superseded,
+        });
+    let lane = lane.map(|row| {
+        (
+            row.lane_id.clone(),
+            row.root_run_id.clone().unwrap_or_default(),
+            row.generation,
+            row.management_revision,
+        )
+    });
+    Ok(RecipeThreadLedger { thread, lane })
+}
+fn check_ledger(
+    thread: &str,
+    run: Option<RunId>,
+    expected: &RecipeThreadLedger,
+    actual: &RecipeThreadLedger,
+) -> Result<(), AdminFailure> {
+    let reason = if expected.lane != actual.lane {
+        "lane identity, management revision or generation changed"
+    } else if expected.thread != actual.thread {
+        "thread root, project or archive ledger changed"
+    } else {
+        return Ok(());
+    };
+    let thread: String = thread
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    let subject = run.map(|run| format!("{thread}/{run}")).unwrap_or(thread);
+    Err(WorkbenchError::new(
+        ErrorCode::Conflict,
+        format!("restart refused: {reason}: {subject}"),
+        RetryAdvice::Never,
+    ))
+}
+fn binding_changed() -> AdminFailure {
+    WorkbenchError::new(
+        ErrorCode::Conflict,
+        "restart chat, goal or project binding changed",
+        RetryAdvice::Never,
+    )
+}
+fn member_changed(run: RunId) -> AdminFailure {
+    WorkbenchError::new(
+        ErrorCode::Conflict,
+        format!("restart authority or membership changed: {run}"),
+        RetryAdvice::Never,
+    )
 }
 fn conflict_for(run: RunId) -> AdminFailure {
     WorkbenchError::new(
         ErrorCode::Conflict,
         format!("restart recipe inventory changed: {run}; inspect again"),
-        RetryAdvice::Never,
+        RetryAdvice::AfterResync,
     )
 }
 fn unsupported(run: RunId, kind: &str) -> AdminFailure {
@@ -354,7 +453,7 @@ fn conflict() -> AdminFailure {
     WorkbenchError::new(
         ErrorCode::Conflict,
         "restart recipe inventory changed; inspect again",
-        RetryAdvice::Never,
+        RetryAdvice::AfterResync,
     )
 }
 

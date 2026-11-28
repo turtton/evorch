@@ -1121,6 +1121,30 @@ async fn lane_ledger_scope_and_snapshot_refusals_keep_the_cause_run() {
 }
 
 #[tokio::test]
+async fn archive_round_trip_invalidates_commit_ledger_even_when_root_is_unchanged() {
+    let mut f = Fixture::new().await;
+    let run = f.chat().await;
+    let observed = f.source.collect().await.unwrap();
+    for (archive_revision, archived) in [(1, true), (2, false)] {
+        f.boot
+            .storage_writer()
+            .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                thread_id: "plain".into(),
+                root_run_id: Some(run.to_string()),
+                archived: Some(archived),
+                archive_revision,
+                ..Default::default()
+            }])
+            .unwrap();
+    }
+    let error = f.source.verify_ledgers(observed.ledgers).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.message.contains("archive ledger changed"));
+    assert!(error.message.contains(&run.to_string()));
+    f.shutdown().await;
+}
+
+#[tokio::test]
 async fn lane_ledger_change_between_discovery_and_snapshot_validation_is_a_conflict() {
     use std::{future::Future, task::Poll};
     let mut f = Fixture::new().await;

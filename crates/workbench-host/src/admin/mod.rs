@@ -53,6 +53,11 @@ pub trait AdminFacade: Send + Sync + 'static {
         query: &'a AdminQuery,
         connection: &'a VerifiedConnection,
     ) -> AdminIo<'a, AdminView>;
+    /// Refresh read-only evidence, if needed, after audit acknowledgement and
+    /// before the final authorization and memory-only commit.
+    fn recheck_before_commit<'a>(&'a self, _intent: &'a AdminIntent) -> AdminIo<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
     fn commit(
         &self,
         intent: AdminIntent,

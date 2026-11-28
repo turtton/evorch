@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use runtime::{RunConfig, RunId};
 
 /// What the command sink knows of a thread's conversation, copied for the host.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ThreadBinding {
     pub root: RunId,
     pub project_root: Option<PathBuf>,
@@ -22,21 +22,33 @@ pub struct ThreadBinding {
 /// The sink's bindings as of its last change, shared with the host.
 #[derive(Clone, Default)]
 pub struct BindingTable(
-    Arc<Mutex<BTreeMap<String, ThreadBinding>>>,
+    Arc<Mutex<PublishedBindings>>,
     Arc<std::sync::atomic::AtomicU64>,
 );
+#[derive(Default, PartialEq, Eq)]
+struct PublishedBindings {
+    resolved: BTreeMap<String, ThreadBinding>,
+    chats: BTreeMap<String, RunId>,
+    goals: BTreeMap<String, RunId>,
+    projects: BTreeMap<String, String>,
+}
 /// Opaque non-authority observation. Commit checks it without the host mutex.
 #[derive(Clone)]
 pub struct BindingObservation {
     generation: Arc<std::sync::atomic::AtomicU64>,
     expected: u64,
-    bindings: Arc<Mutex<BTreeMap<String, ThreadBinding>>>,
+    bindings: Arc<Mutex<PublishedBindings>>,
 }
 impl BindingObservation {
     /// Hold the publication exclusion through a memory-only admission boundary.
     pub fn with_current<T>(&self, transition: impl FnOnce() -> T) -> Option<T> {
         let _guard = self.bindings.lock().ok()?;
         self.is_current().then(transition)
+    }
+    pub fn same_revision(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.generation, &other.generation)
+            && self.expected == other.expected
+            && self.is_current()
     }
     pub fn is_current(&self) -> bool {
         self.expected != u64::MAX
@@ -52,11 +64,36 @@ impl BindingTable {
             expected: self.1.load(std::sync::atomic::Ordering::Acquire),
         }
     }
-    pub fn replace(&self, bindings: BTreeMap<String, ThreadBinding>) {
+    pub fn replace(&self, resolved: BTreeMap<String, ThreadBinding>) {
+        self.publish(PublishedBindings {
+            resolved,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn publish_roles(
+        &self,
+        resolved: BTreeMap<String, ThreadBinding>,
+        chats: &BTreeMap<String, RunId>,
+        goals: &BTreeMap<String, RunId>,
+        projects: &BTreeMap<String, String>,
+    ) {
+        self.publish(PublishedBindings {
+            resolved,
+            chats: chats.clone(),
+            goals: goals.clone(),
+            projects: projects.clone(),
+        });
+    }
+
+    fn publish(&self, bindings: PublishedBindings) {
         let mut current = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current == bindings {
+            return;
+        }
         // Invalidate BEFORE publishing. Exhaustion is permanently unavailable;
         // never wrap or reuse a binding observation after A -> B -> A.
         let _ = self.1.try_update(
@@ -71,6 +108,7 @@ impl BindingTable {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resolved
             .get(thread)
             .cloned()
     }
@@ -242,11 +280,23 @@ pub(crate) fn current_thread_project(
 mod binding_observation_tests {
     use super::*;
     #[test]
-    fn equal_binding_aba_and_exhaustion_never_revalidate_an_observation() {
+    fn identical_publication_preserves_proof_but_aba_and_exhaustion_do_not() {
         let table = BindingTable::default();
         let proof = table.observe();
         assert!(proof.is_current());
         table.replace(Default::default());
+        assert!(proof.is_current());
+        let binding = || {
+            BTreeMap::from([(
+                "thread".into(),
+                ThreadBinding {
+                    root: RunId::new(1),
+                    project_root: None,
+                    goal_project: None,
+                },
+            )])
+        };
+        table.replace(binding());
         table.replace(Default::default());
         assert!(!proof.is_current());
         assert!(table.observe().is_current());
@@ -254,7 +304,7 @@ mod binding_observation_tests {
             .1
             .store(u64::MAX - 1, std::sync::atomic::Ordering::Release);
         let last = table.observe();
-        table.replace(Default::default());
+        table.replace(binding());
         assert!(!last.is_current());
         assert!(!table.observe().is_current());
         table.replace(Default::default());

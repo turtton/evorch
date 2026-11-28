@@ -252,7 +252,17 @@ impl AdminService {
         })?;
         let epoch=match &intent{LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Request(r))=>r.binding.expected_core_epoch,LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Cancel(r))=>r.expected_core_epoch,LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Interrupt(r))=>r.binding.core_epoch,LifecycleCommand::Quarantine(workbench_protocol::namespaces::lifecycle::quarantine::QuarantineCommand::Discard(r))=>r.binding.expected_core_epoch,LifecycleCommand::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsCommand::Release(r)|workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsCommand::Resume(r))=>r.binding.graph.expected_core_epoch};
         if epoch != self.epoch {
-            return Err(self.refusal(&context, intent.action(), conflict()));
+            let error = if intent.action() == AdminAction::Request {
+                failure(ErrorCode::Conflict, "restart refused: core epoch changed").with_details(
+                    workbench_protocol::errors::ErrorDetails::Epoch {
+                        expected: epoch,
+                        actual: self.epoch,
+                    },
+                )
+            } else {
+                conflict()
+            };
+            return Err(self.refusal(&context, intent.action(), error));
         }
         Ok(AuthorizedAdminRequest { intent, context })
     }
@@ -485,6 +495,29 @@ impl AdminService {
                 .await;
             let _ = reply.send(Err(self.refusal(&request.context, action, e)));
             return;
+        }
+        if action == AdminAction::Request {
+            let proof = tokio::time::timeout(
+                audit::ADMIN_IO_ACK_BUDGET,
+                facade.recheck_before_commit(&request.intent),
+            )
+            .await;
+            let failure = match proof {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some(failure(
+                    ErrorCode::Busy,
+                    "restart commit observation deadline exceeded",
+                )),
+            };
+            if let Some(error) = failure {
+                let _ = self
+                    .audit
+                    .finalize(&key, AuditOutcome::AbortedBeforeEffect)
+                    .await;
+                let _ = reply.send(Err(self.refusal(&request.context, action, error)));
+                return;
+            }
         }
         if let Err(e) = self.authorize(&request.context, action) {
             let _ = self
