@@ -1307,6 +1307,11 @@ fn apply_effect(
                     );
                 }
             }
+            shell::Effect::RefreshSkills(project) => {
+                if let Some(workspace) = shared.features.workspace_mut() {
+                    workspace.refresh_skills(&project);
+                }
+            }
             shell::Effect::Reveal(feature) => shared.features.reveal(feature),
             shell::Effect::Open(shell::CoreTab::Plan) => shell::focus_beside(
                 dock,

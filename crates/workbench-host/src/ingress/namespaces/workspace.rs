@@ -9,6 +9,8 @@ use workbench_protocol::queries::{Query, QueryReply};
 
 use crate::ingress::CommandHost;
 
+mod skills;
+
 impl CommandHost {
     pub(in crate::ingress) fn workspace_command(
         &mut self,
@@ -46,6 +48,7 @@ impl CommandHost {
                 .workspace
                 .query(namespace_query)
                 .map(QueryReply::Workspace),
+            WorkspaceQuery::ListSkills(target) => self.list_skills(target),
         }
     }
 }

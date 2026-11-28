@@ -564,3 +564,120 @@ async fn the_runtime_reports_what_it_recorded_for_each_accepted_submission() {
         .unwrap();
     skills.runtime().wait(run).await.unwrap();
 }
+
+fn write_repo_skill(project: &std::path::Path, name: &str, description: &str) {
+    let skill = project.join(".evorch/skills").join(name);
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\nRepo steps.\n"),
+    )
+    .unwrap();
+}
+
+fn listed(runtime: &AgentRuntime, project: &std::path::Path) -> Vec<crate::HostSkill> {
+    runtime.list_skills_for_host(project)
+}
+
+#[test]
+fn the_skill_list_is_the_registry_a_sent_mention_reads() {
+    let skills = Skills::new();
+    let project = tempfile::tempdir().unwrap();
+    // The repository's `demo` shadows the user's, and `repo-only` exists only there.
+    write_repo_skill(project.path(), "demo", "the repository copy");
+    write_repo_skill(project.path(), "repo-only", "only in the repository");
+
+    let all = listed(skills.runtime(), project.path());
+    let names: Vec<&str> = all.iter().map(|skill| skill.name.as_str()).collect();
+    assert!(names.is_sorted(), "name ascending: {names:?}");
+    for expected in ["demo", "other", "repo-only", "skill-a"] {
+        assert!(names.contains(&expected), "{expected} in {names:?}");
+    }
+    let demo = all.iter().find(|skill| skill.name == "demo").unwrap();
+    assert_eq!(demo.description, "the repository copy");
+    // Every listed name is one a message from that project can mention.
+    for skill in &all {
+        skills
+            .runtime()
+            .expand_host_prompt(
+                "x".into(),
+                std::slice::from_ref(&skill.name),
+                Some(project.path()),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", skill.name));
+    }
+    // Another project without those repository skills does not see them.
+    let other = tempfile::tempdir().unwrap();
+    let elsewhere = listed(skills.runtime(), other.path());
+    assert!(elsewhere.iter().all(|skill| skill.name != "repo-only"));
+    assert_eq!(
+        elsewhere
+            .iter()
+            .find(|skill| skill.name == "demo")
+            .unwrap()
+            .description,
+        "demo procedure"
+    );
+}
+
+#[test]
+fn an_untrusted_project_lists_no_repository_skills_and_cannot_mention_them() {
+    let skills = Skills::new();
+    let project = tempfile::tempdir().unwrap();
+    write_repo_skill(project.path(), "repo-only", "only in the repository");
+    skills.runtime().set_project_trust(
+        project.path().to_path_buf(),
+        crate::ProjectTrust::Unapproved,
+    );
+    let all = listed(skills.runtime(), project.path());
+    assert!(all.iter().all(|skill| skill.name != "repo-only"));
+    assert!(all.iter().any(|skill| skill.name == "demo"));
+    assert!(
+        skills
+            .runtime()
+            .expand_host_prompt("x".into(), &["repo-only".to_owned()], Some(project.path()))
+            .is_err()
+    );
+    skills
+        .runtime()
+        .set_project_trust(project.path().to_path_buf(), crate::ProjectTrust::Approved);
+    assert!(
+        listed(skills.runtime(), project.path())
+            .iter()
+            .any(|skill| skill.name == "repo-only")
+    );
+}
+
+#[test]
+fn listing_skills_emits_no_diagnostics_and_leaves_the_runs_registry_alone() {
+    let mut skills = Skills::new();
+    let project = tempfile::tempdir().unwrap();
+    write_repo_skill(project.path(), "demo", "the repository copy");
+    skills.events.drain_pending_snapshot();
+    let before = skills
+        .runtime()
+        .shared
+        .skill_source
+        .get()
+        .unwrap()
+        .registry_for(None, true);
+    let _ = listed(skills.runtime(), project.path());
+    // Shadowing `demo` would be a diagnostic for a run's snapshot; the list
+    // does not publish one and does not replace what runs start from.
+    let events = skills.events.drain_pending_snapshot();
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.kind,
+            event_bus::EventKind::Fault(event_bus::FaultEvent::SkillDiagnostic { .. })
+        )),
+        "{events:?}"
+    );
+    let after = skills
+        .runtime()
+        .shared
+        .skill_source
+        .get()
+        .unwrap()
+        .registry_for(None, true);
+    assert_eq!(before.available_skills(), after.available_skills());
+}

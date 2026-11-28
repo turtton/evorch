@@ -100,6 +100,9 @@ pub fn samples() -> AreaSamples {
                 thread: thread(),
             })),
             Query::Workspace(WorkspaceQuery::GetRetention(page_request())),
+            Query::Workspace(WorkspaceQuery::ListSkills(ProjectTarget {
+                project: project(),
+            })),
         ],
         ui_events: vec![UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
             revision: Revision(11),
@@ -179,6 +182,10 @@ pub fn samples() -> AreaSamples {
                 next_cursor: None,
                 snapshot_revision: Revision(5),
             })),
+            QueryReply::Workspace(WorkspaceReply::Skills(vec![SkillSummary {
+                name: "review".into(),
+                description: "Review a change".into(),
+            }])),
         ],
     }
 }

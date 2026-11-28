@@ -8,7 +8,9 @@ use workbench_protocol::{
     ids::{ProjectId, RunId, ThreadId},
     namespaces::{
         WorkspaceQuery, WorkspaceReply,
-        workspace::{FamilyView, LineageType, ProjectAccessView, ThreadDetail, TrustLevel},
+        workspace::{
+            FamilyView, LineageType, ProjectAccessView, SkillSummary, ThreadDetail, TrustLevel,
+        },
     },
     queries::{Query, QueryReply},
     views::{
@@ -228,6 +230,15 @@ fn answer(query: &WorkspaceQuery) -> WorkspaceReply {
                 revision: Revision(1),
             }))
         }
+        WorkspaceQuery::ListSkills(_) => WorkspaceReply::Skills(
+            [("review", "Review a change"), ("deploy", "Ship a release")]
+                .into_iter()
+                .map(|(name, description)| SkillSummary {
+                    name: name.into(),
+                    description: description.into(),
+                })
+                .collect(),
+        ),
         other => panic!("the shell test does not answer {other:?}"),
     }
 }
@@ -3123,6 +3134,7 @@ mod many_subagents;
 mod new_chat;
 mod pull_requests;
 mod read_panes;
+mod skills;
 mod thread_search;
 mod usage_cost;
 

@@ -151,6 +151,15 @@
     },
     "type": "workspace"
   },
+  "query/workspace/list_skills": {
+    "payload": {
+      "payload": {
+        "project": "proj-1"
+      },
+      "type": "list_skills"
+    },
+    "type": "workspace"
+  },
   "query_reply/workspace/families": {
     "payload": {
       "payload": {
@@ -237,6 +246,18 @@
         "snapshot_revision": "5"
       },
       "type": "retention"
+    },
+    "type": "workspace"
+  },
+  "query_reply/workspace/skills": {
+    "payload": {
+      "payload": [
+        {
+          "description": "Review a change",
+          "name": "review"
+        }
+      ],
+      "type": "skills"
     },
     "type": "workspace"
   },

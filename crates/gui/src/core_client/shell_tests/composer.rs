@@ -442,6 +442,10 @@ fn project_files() -> (tempfile::TempDir, Screen) {
         if let WorkspaceReply::ProjectAccess(access) = reply {
             access.root.clone_from(&path);
         }
+        // These tests are about files: the core lists no skills here.
+        if let WorkspaceReply::Skills(skills) = reply {
+            skills.clear();
+        }
     });
     (root, screen)
 }

@@ -37,6 +37,7 @@ mod recovery_graph;
 mod restart_handoff;
 mod restart_transaction;
 pub(crate) use host_prompt::HostPrompt;
+pub use host_prompt::HostSkill;
 #[cfg(feature = "recovery-test-support")]
 pub use recovery_activation::RecoveryActivationBoundary;
 pub use recovery_activation::{

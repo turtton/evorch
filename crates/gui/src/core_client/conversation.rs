@@ -19,6 +19,7 @@ use super::features::diagnostics::{cost_hint, cost_text};
 use super::features::execution::ExecutionBand;
 use super::features::lanes::{CardChoice, CardPlace, LaneCardAction, LaneCardView, lane_body};
 use super::features::pull_requests::{PullRequestBar, PullRequestChips};
+use super::features::workspace::ProjectSkills;
 use super::features::{FeatureId, Navigation, Selection};
 use super::run_tabs::RunTab;
 use super::shell::{CoreTab, Effect};
@@ -42,9 +43,20 @@ use crate::theme::widgets::{
 mod composer;
 mod mentions;
 mod new_chat;
+mod skills;
 mod slash;
 
 const MAX_ANSWER_BYTES: usize = 4096;
+
+/// The skills of the project the composer is drawn for, as the workspace feature holds them.
+#[derive(Debug, Default)]
+struct SkillsKnown {
+    project: Option<ProjectId>,
+    state: Option<ProjectSkills>,
+    fetching: bool,
+    /// A mention started in the composer: the list is to be asked for again.
+    refresh_wanted: bool,
+}
 
 pub struct ConversationPane {
     model_picker: crate::panes::core_model_picker::CoreModelPicker,
@@ -65,6 +77,8 @@ pub struct ConversationPane {
     /// Whether the composer held focus at the end of the last frame it was drawn in.
     was_focused: bool,
     mentions: mentions::MentionWork,
+    /// What the core listed as the selected project's skills, as of the last frame.
+    skills: SkillsKnown,
     /// Pasted and dropped files, captured before the frame, for the attachment worker.
     intakes: Vec<(ProjectId, ThreadId, Intake)>,
     /// What the slash commands answered, per thread: shown at the transcript's end
@@ -94,6 +108,7 @@ impl Default for ConversationPane {
             completion_thread: None,
             was_focused: false,
             mentions: mentions::MentionWork::default(),
+            skills: SkillsKnown::default(),
             intakes: Vec::new(),
             notices: BTreeMap::new(),
             navigation: None,
@@ -124,6 +139,27 @@ impl ConversationPane {
         if let Some(detail) = detail {
             self.draft_model_choices.remove(detail.thread.as_str());
         }
+    }
+
+    /// Follows the skills the core listed for the selected project, for the `@`
+    /// completion and for the skills a message names.
+    pub(super) fn sync_skills(
+        &mut self,
+        project: Option<&ProjectId>,
+        state: Option<&ProjectSkills>,
+        fetching: bool,
+    ) {
+        if self.skills.project.as_ref() != project {
+            self.skills.project = project.cloned();
+        }
+        if self.skills.state.as_ref() != state {
+            self.skills.state = state.cloned();
+        }
+        self.skills.fetching = fetching;
+        self.mentions.set_skills(match &self.skills.state {
+            Some(ProjectSkills::Ready(skills)) => Some(skills),
+            _ => None,
+        });
     }
 
     /// A new projection (a reconnect or resync) holds none of the bodies read before,

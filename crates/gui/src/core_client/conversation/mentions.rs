@@ -1,6 +1,8 @@
 //! The composer's `@` index of the selected project's files and folders, built off
-//! the UI thread as the embedded workbench builds its own, without skills: the core
-//! offers no list of them yet.
+//! the UI thread as the embedded workbench builds its own. Its skills are the ones
+//! the core lists for the project (`list_skills`), kept beside the files so a file
+//! index that lands late never drops them and a project without a local root still
+//! completes them.
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -8,6 +10,7 @@ use std::time::Duration;
 use crate::composer_input::MentionIndex;
 use crate::composer_input::mentions::MAX_INDEXED_PATHS;
 use crate::core_client::local::LocalRoots;
+use workbench_protocol::namespaces::workspace::SkillSummary;
 
 /// What an index covers: the project's root on this machine and its approved,
 /// live allowed directories.
@@ -26,6 +29,8 @@ struct Job {
 pub(super) struct MentionWork {
     pub index: MentionIndex,
     scope: Option<Scope>,
+    /// `(name, description)` of the skills the core listed for the selected project.
+    skills: Vec<(String, String)>,
     /// A mention was being typed last frame.
     active: bool,
     job: Option<Job>,
@@ -41,15 +46,36 @@ impl MentionWork {
         });
     }
 
+    /// Sets the skills the index completes; `None` when the core has not listed them.
+    pub fn set_skills(&mut self, skills: Option<&[SkillSummary]>) {
+        let skills = skills.unwrap_or_default();
+        let unchanged = skills.len() == self.skills.len()
+            && skills
+                .iter()
+                .zip(&self.skills)
+                .all(|(listed, (name, description))| {
+                    listed.name == *name && listed.description == *description
+                });
+        if !unchanged {
+            self.skills = skills
+                .iter()
+                .map(|skill| (skill.name.clone(), skill.description.clone()))
+                .collect();
+            self.index.set_skills(self.skills.clone());
+        }
+    }
+
     /// Rebuilds the index whenever a mention starts, so new files appear without a
     /// filesystem watcher, and keeps it within the current scope.
-    pub fn refresh(&mut self, ctx: &egui::Context, mention: bool) {
+    /// Returns whether a mention started this frame.
+    pub fn refresh(&mut self, ctx: &egui::Context, mention: bool) -> bool {
         let started = mention && !self.active;
         self.active = mention;
         self.poll();
         let root = self.scope.as_ref().map(|scope| scope.root.as_path());
         if self.index.root.is_some() && self.index.root.as_deref() != root {
             self.index = MentionIndex::default();
+            self.index.set_skills(self.skills.clone());
         }
         let allowed = self
             .scope
@@ -66,6 +92,7 @@ impl MentionWork {
         if self.job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
+        started
     }
 
     fn spawn(&mut self, scope: Scope) {
@@ -101,6 +128,7 @@ impl MentionWork {
             && self.scope.as_ref() == Some(&job.scope)
         {
             self.index = index;
+            self.index.set_skills(self.skills.clone());
         }
     }
 
