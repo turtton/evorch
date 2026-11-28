@@ -599,8 +599,15 @@ pub struct Features {
     selection: Option<Selection>,
     expanded: std::collections::HashMap<FeatureId, bool>,
     pins: Pins,
+    /// Pages a conversation card asked to preview, not yet handed to the browser feature. A
+    /// disconnect or a new snapshot drops them, and the next pass hands over only those of the
+    /// selected thread.
+    pending_pages: Vec<ArtifactRef>,
     pub(crate) data: DataInbox,
 }
+
+/// How many card-opened pages wait for the next pass.
+const MAX_PENDING_PAGES: usize = 8;
 
 impl Default for Features {
     fn default() -> Self {
@@ -609,6 +616,7 @@ impl Default for Features {
             selection: None,
             expanded: Default::default(),
             pins: Pins::default(),
+            pending_pages: Vec::new(),
             features: vec![
                 Box::<workspace::WorkspaceFeature>::default(),
                 Box::<mcp::McpFeature>::default(),
@@ -646,12 +654,14 @@ impl Features {
     /// events that arrived during the snapshot, then the replies that were held
     /// for it. In this order, so a reset never discards a held reply.
     pub fn begin_session(&mut self, delivered: &[UiEvent], held: Vec<HeldReply>) {
+        self.pending_pages.clear();
         self.clear_data();
         begin_session(&mut self.features, delivered, held);
     }
 
     /// Immediate invalidation, independent of the GUI composition/event loop.
     pub fn disconnected(&mut self) {
+        self.pending_pages.clear();
         self.clear_data();
         for feature in &mut self.features {
             feature.disconnected();
@@ -855,12 +865,18 @@ impl Features {
         self.features.iter_mut().find_map(|f| f.as_settings_mut())
     }
 
-    /// Routes an artifact a conversation card opens. A page becomes a browser preview. Anything
-    /// else is queued for the artifacts feature, whose section is brought forward: it opens
-    /// the artifact at its next pass, in its own scope. Nothing is read here.
+    /// Routes an artifact a conversation card opens. A page is held until the next pass, which
+    /// makes it a browser preview if the conversation it was opened in is still selected.
+    /// Anything else is queued for the artifacts feature, whose section is brought forward: it
+    /// opens the artifact at its next pass, in its own scope. Nothing is read here.
     pub fn open_card_artifact(&mut self, open: super::transcript::artifacts::OpenArtifact) {
         if open.is_page() {
-            self.open_preview(open.reference);
+            if !self.pending_pages.contains(&open.reference) {
+                if self.pending_pages.len() >= MAX_PENDING_PAGES {
+                    self.pending_pages.remove(0);
+                }
+                self.pending_pages.push(open.reference);
+            }
             return;
         }
         let queued = self
@@ -878,6 +894,15 @@ impl Features {
         let changed = self.selection.as_ref() != Some(selection);
         if changed {
             self.selection = Some(selection.clone());
+        }
+        // A card's page goes on only while its own conversation is the selected one; any other
+        // was asked for somewhere the user no longer is, and is dropped.
+        for page in std::mem::take(&mut self.pending_pages) {
+            let ours = selection.project.as_ref() == Some(&page.project)
+                && selection.thread.as_ref() == Some(&page.thread);
+            if ours && page.validate().is_ok() {
+                self.open_preview(page);
+            }
         }
         changed
     }

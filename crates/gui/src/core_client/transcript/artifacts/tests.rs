@@ -226,5 +226,22 @@ fn the_fingerprint_follows_what_changes_the_height_of_a_card() {
     );
     assert_ne!(hashed(&one), hashed(&captioned));
     assert_ne!(hashed(&one), hashed(&two));
+    let flat = card(
+        "r",
+        0,
+        "thr",
+        serde_json::json!([artifact(1, "A", "image/png", Some("ab cd"))]),
+    );
+    let broken = card(
+        "r",
+        0,
+        "thr",
+        serde_json::json!([artifact(1, "A", "image/png", Some("ab\ncd"))]),
+    );
+    assert_ne!(
+        hashed(&flat),
+        hashed(&broken),
+        "the same length, another shape"
+    );
     assert_eq!(hashed(&one), hashed(&one.clone()));
 }

@@ -2053,6 +2053,7 @@ impl Comp {
                 selection: None,
                 expanded: Default::default(),
                 pins: Default::default(),
+                pending_pages: Default::default(),
             },
             selection: Selection {
                 project: Some(ProjectId::new("p").unwrap()),

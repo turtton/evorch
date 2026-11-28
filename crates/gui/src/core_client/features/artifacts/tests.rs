@@ -1230,6 +1230,7 @@ fn composition() -> (
             selection: None,
             expanded: Default::default(),
             pins: Default::default(),
+            pending_pages: Default::default(),
         },
         ..crate::core_client::Shared::default()
     }));

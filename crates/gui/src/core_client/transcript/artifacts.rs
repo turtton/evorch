@@ -65,14 +65,16 @@ fn media_icon(media_type: &str) -> &'static str {
     }
 }
 
-/// What changes the height of a card, for the view that keeps the messages in place.
+/// What changes the look of a card, for the view that keeps the messages in place. The shown
+/// text itself is hashed: the same length with a line break elsewhere changes a card's height.
 pub(super) fn fingerprint(presentation: &ArtifactPresentationView, hasher: &mut impl Hasher) {
-    presentation.title.as_ref().map(String::len).hash(hasher);
-    presentation.caption.as_ref().map(String::len).hash(hasher);
+    presentation.title.hash(hasher);
+    presentation.caption.hash(hasher);
     presentation.artifacts.len().hash(hasher);
     for item in &presentation.artifacts {
-        item.title.len().hash(hasher);
-        item.caption.as_ref().map(String::len).hash(hasher);
+        item.title.hash(hasher);
+        item.caption.hash(hasher);
+        item.media_type.hash(hasher);
     }
 }
 
