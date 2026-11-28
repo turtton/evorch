@@ -25,8 +25,11 @@ pub struct Cache {
     pub history: BTreeMap<String, Vec<CommittedMessage>>,
     /// First pages requested in this projection (including failed reads).
     history_asked: std::collections::BTreeSet<String>,
-    /// A failed first page can be explicitly retried; a new projection forgets it.
+    /// A failed first page can be explicitly retried; a new projection forgets it. It
+    /// stays until a page arrives, so a retry in flight is still shown as one.
     history_failed: std::collections::BTreeSet<String>,
+    /// First pages sent and not answered yet.
+    history_loading: std::collections::BTreeSet<String>,
     pub older: BTreeMap<String, Option<PageCursor>>,
     /// The committed messages of each run a run tab shows, keyed by run. An entry
     /// exists only while a tab wants that run ([`Self::want_run`]).
@@ -53,13 +56,26 @@ impl Cache {
         !self.history_asked.contains(thread)
     }
 
+    /// The first page was sent. An earlier failure stays on record until a page arrives,
+    /// so the retry in flight is told from an empty conversation.
+    pub fn history_requested(&mut self, thread: &str) {
+        self.history_asked.insert(thread.into());
+        self.history_loading.insert(thread.into());
+    }
+
+    /// For a fixture whose first page is already read: asked, with no answer to wait for.
     pub fn history_asked(&mut self, thread: &str) {
         self.history_asked.insert(thread.into());
-        self.history_failed.remove(thread);
     }
     pub fn history_failed(&mut self, thread: &str) {
         self.history_asked.insert(thread.into());
+        self.history_loading.remove(thread);
         self.history_failed.insert(thread.into());
+    }
+
+    /// Whether the first page was sent and has no answer yet.
+    pub fn history_loading(&self, thread: &str) -> bool {
+        self.history_loading.contains(thread)
     }
 
     pub fn history_read_failed(&self, thread: &str) -> bool {
@@ -68,6 +84,7 @@ impl Cache {
 
     pub fn history_not_asked(&mut self, thread: &str) {
         self.history_asked.remove(thread);
+        self.history_loading.remove(thread);
     }
 
     pub fn snapshot(&mut self, item: SnapshotItem) {
@@ -298,7 +315,9 @@ impl Cache {
 
     pub fn history_page(&mut self, thread: &str, page: Page<CommittedMessage>, older: bool) {
         if !older {
-            self.history_asked(thread);
+            self.history_asked.insert(thread.into());
+            self.history_loading.remove(thread);
+            self.history_failed.remove(thread);
         }
         if older {
             self.older_loading.remove(thread);

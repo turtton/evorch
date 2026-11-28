@@ -603,11 +603,12 @@ fn thread_transcript(
     // The first page is read on its own (a selection, a reconnect, a resync); only a read
     // that failed needs the person, and the empty-conversation text would misreport it.
     let failed = io.cache.history_read_failed(thread.as_str());
+    let loading = io.cache.history_loading(thread.as_str());
     if failed {
         ui.horizontal(|ui| {
             ui.label(muted("Could not read this conversation's history"));
             if ui
-                .add_enabled(io.connected, ghost("Retry history"))
+                .add_enabled(io.connected && !loading, ghost("Retry history"))
                 .clicked()
             {
                 effects.push(Effect::send(Action::History(thread.clone(), None, false)));
@@ -625,7 +626,7 @@ fn thread_transcript(
             chips,
         },
         |ui| {
-            if !waiting && !older && !failed {
+            if !waiting && !older && !failed && !loading {
                 empty_state(
                     ui,
                     "Start the conversation",

@@ -1,5 +1,6 @@
 //! First history pages belong to a projection, not to a one-off selection event.
 use super::*;
+use egui_kittest::kittest::NodeT;
 
 fn first_pages(actions: &[Action], id: &str) -> usize {
     actions
@@ -146,18 +147,45 @@ fn a_failed_first_page_offers_retry_and_a_new_projection_retries_it_once() {
     screen.harness.get_by_label("Retry history").click();
     assert_eq!(first_pages(&screen.settle(), "thr-1"), 1);
     screen.harness.run_steps(2);
+    // The retry is out: it is still told from an empty conversation, and it cannot be
+    // sent twice.
+    {
+        let shared = screen.shared.lock().unwrap();
+        assert!(shared.cache.history_read_failed("thr-1"));
+        assert!(shared.cache.history_loading("thr-1"));
+    }
+    screen
+        .harness
+        .get_by_label("Could not read this conversation's history");
     assert!(
-        screen.harness.query_by_label("Retry history").is_none(),
-        "one click asks once, and the button is gone while the read is out"
+        screen
+            .harness
+            .query_by_label("Start the conversation")
+            .is_none()
     );
+    assert!(
+        screen
+            .harness
+            .get_by_label("Retry history")
+            .accesskit_node()
+            .is_disabled()
+    );
+    screen.harness.get_by_label("Retry history").click();
+    assert_eq!(first_pages(&screen.settle(), "thr-1"), 0);
+
+    // A retry that fails again can be tried once more.
+    screen.shared.lock().unwrap().cache.history_failed("thr-1");
+    screen.harness.run_steps(2);
     assert!(
         !screen
-            .shared
-            .lock()
-            .unwrap()
-            .cache
-            .history_read_failed("thr-1")
+            .harness
+            .get_by_label("Retry history")
+            .accesskit_node()
+            .is_disabled()
     );
+    screen.harness.get_by_label("Retry history").click();
+    assert_eq!(first_pages(&screen.settle(), "thr-1"), 1);
+
     screen.shared.lock().unwrap().cache.history_page(
         "thr-1",
         Page {
@@ -175,6 +203,12 @@ fn a_failed_first_page_offers_retry_and_a_new_projection_retries_it_once() {
     screen
         .harness
         .get_by_label("History recovered after a failed read");
+    assert!(screen.harness.query_by_label("Retry history").is_none());
+    {
+        let shared = screen.shared.lock().unwrap();
+        assert!(!shared.cache.history_read_failed("thr-1"));
+        assert!(!shared.cache.history_loading("thr-1"));
+    }
 
     screen.shared.lock().unwrap().cache.history_failed("thr-1");
     new_session(&screen);
