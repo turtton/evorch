@@ -176,3 +176,6 @@ pub fn compiled_standard_tool_catalog() -> Vec<providers::ToolSpec> {
         })
         .collect()
 }
+
+/// CI benchmark probe (DO NOT MERGE).
+pub const CI_M2_PROBE: u32 = 1;

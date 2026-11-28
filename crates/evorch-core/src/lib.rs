@@ -21,6 +21,3 @@ pub mod recovery_service;
 pub mod recovery_startup;
 pub(crate) mod renderer;
 pub mod unix;
-
-/// CI benchmark probe (DO NOT MERGE).
-pub const CI_M2_PROBE: u32 = 1;
