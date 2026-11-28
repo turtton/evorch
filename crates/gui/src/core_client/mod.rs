@@ -11,6 +11,7 @@ pub use attachments::ClientAttachmentDraft;
 pub mod connection;
 pub mod conversation;
 pub mod features;
+pub mod launch_progress;
 pub mod local;
 pub mod notifications;
 pub mod persistence;
@@ -71,6 +72,8 @@ pub struct Shared {
     /// Counts the projections [`Self::replace_projection`] installed, so what was
     /// asked of an earlier one (message bodies) is asked of the new one again.
     pub projection: u64,
+    /// What the window says until the first projection is in (see `launch_progress`).
+    pub launch: launch_progress::LaunchProgress,
 }
 
 impl Shared {
@@ -246,7 +249,10 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
         options,
         Box::new(move |cc| {
             crate::theme::style::install_preset(&cc.egui_ctx, theme_preset);
-            let shared = Arc::new(Mutex::new(Shared::default()));
+            let shared = Arc::new(Mutex::new(Shared {
+                launch: launch_progress::LaunchProgress::starting(),
+                ..Shared::default()
+            }));
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let task = runtime.spawn(connection::serve(
                 launcher,
@@ -1100,6 +1106,7 @@ impl CoreClientScreen {
         self.local.begin_frame(ui.ctx(), roots, projects);
         self.conversation.begin_frame();
         let link_base = self.local.workspace().map(std::path::Path::to_path_buf);
+        let workspace_rect = ui.available_rect_before_wrap();
         let mut frame = {
             let s = &mut *shared;
             let view = FeatureView {
@@ -1146,6 +1153,7 @@ impl CoreClientScreen {
             pass.finish(ui)
         };
         self.conversation.end_frame();
+        launch_progress::show(ui.ctx(), workspace_rect, &shared, &mut effects);
         self.window_rects.track(&self.dock, ui.ctx());
         effects.extend(frame.settings.iter().copied().map(shell::Effect::Settings));
         if !frame.lanes.is_empty() || !frame.pull_requests.is_empty() {
