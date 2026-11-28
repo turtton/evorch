@@ -305,6 +305,23 @@ fn efficiency(
     ))
 }
 
+const QUOTA_RETENTION_HINT: &str = "Older requests in this window may have been rolled up; profile totals and efficiency are lower bounds.";
+
+fn quota_value(ui: &mut Ui, text: String, incomplete: bool, partial_cost: bool) {
+    let lower_bound = incomplete || partial_cost;
+    let response = ui.label(format!("{text}{}", if lower_bound { "*" } else { "" }));
+    if lower_bound {
+        let mut hints = Vec::new();
+        if incomplete {
+            hints.push(QUOTA_RETENTION_HINT);
+        }
+        if partial_cost {
+            hints.push(PARTIAL_COST_HINT);
+        }
+        response.on_hover_text(hints.join("\n"));
+    }
+}
+
 fn quota_table(ui: &mut Ui, live: &LiveUsage, quotas: &[ProviderQuota]) {
     egui::Grid::new("usage-quota-windows")
         .striped(true)
@@ -325,18 +342,16 @@ fn quota_table(ui: &mut Ui, live: &LiveUsage, quotas: &[ProviderQuota]) {
                 let used = cells(&window.totals);
                 ui.label(&window.profile);
                 ui.label(&window.window);
-                ui.label(compact_tokens(used.total_tokens()));
-                ui.label(used.cost_label());
+                quota_value(
+                    ui,
+                    compact_tokens(used.total_tokens()),
+                    window.incomplete,
+                    false,
+                );
+                quota_value(ui, usd(used.cost), window.incomplete, used.lower_bound);
                 if let Some((tokens, cost)) = efficiency(window, live.as_of_ms, quotas) {
-                    ui.label(compact_tokens(tokens as u64));
-                    let response = ui.label(format!(
-                        "{}{}",
-                        usd(cost),
-                        if used.lower_bound { "*" } else { "" }
-                    ));
-                    if used.lower_bound {
-                        response.on_hover_text(PARTIAL_COST_HINT);
-                    }
+                    quota_value(ui, compact_tokens(tokens as u64), window.incomplete, false);
+                    quota_value(ui, usd(cost), window.incomplete, used.lower_bound);
                 } else {
                     ui.label("—");
                     ui.label("—");
@@ -423,6 +438,7 @@ mod tests {
         live.quota_windows.push(QuotaWindowUsage {
             profile: "work".into(),
             window: "primary".into(),
+            incomplete: false,
             totals: UsageTotals {
                 input_tokens: 100_000,
                 recorded_cost_micro_usd: 2_500_000,
@@ -510,33 +526,53 @@ mod tests {
     }
 
     #[test]
-    fn efficiency_table_marks_lower_bound_cost_with_the_existing_hint() {
+    fn quota_table_marks_retention_and_partial_price_lower_bounds() {
         use egui_kittest::{Harness, kittest::Queryable};
-        let (mut live, quotas) = quota_fixture();
-        live.quota_windows[0].totals.unpriced_tokens = 100;
-        let mut screen = Harness::builder()
-            .with_size(egui::vec2(1000.0, 220.0))
-            .build_ui_state(
-                |ui, (live, quotas)| {
-                    ui.ctx().global_style_mut(|style| {
-                        style.interaction.tooltip_delay = 0.0;
-                        style.interaction.show_tooltips_only_when_still = false;
-                    });
-                    quota_table(ui, live, quotas);
-                },
-                (live, quotas),
-            );
-        screen.run_steps(2);
-        screen.get_by_label("Tokens / 1%");
-        screen.get_by_label("Cost / 1%");
-        screen.get_by_label("4.0K");
-        screen.get_by_label("$0.10*").hover();
-        screen.run_steps(2);
-        screen.get_by_label(PARTIAL_COST_HINT);
-        screen.state_mut().1[0].windows[0].remaining_basis_points = None;
-        screen.run_steps(2);
-        assert!(screen.query_by_label("4.0K").is_none());
-        assert!(screen.query_by_label("$0.10*").is_none());
+        for incomplete in [false, true] {
+            let (mut live, quotas) = quota_fixture();
+            if incomplete {
+                // The month includes rolled-up rows plus details, while the profile
+                // window only has surviving details (all with known prices).
+                live.month = spent(3, 7_500_000);
+                live.quota_windows[0].incomplete = true;
+            } else {
+                live.quota_windows[0].totals.unpriced_tokens = 100;
+            }
+            let mut screen = Harness::builder()
+                .with_size(egui::vec2(1000.0, 1200.0))
+                .build_ui_state(
+                    |ui, (live, quotas)| {
+                        ui.ctx().global_style_mut(|style| {
+                            style.interaction.tooltip_delay = 0.0;
+                            style.interaction.show_tooltips_only_when_still = false;
+                        });
+                        let mut window = DEFAULT_WINDOW;
+                        render(ui, live, &mut window, quotas);
+                    },
+                    (live, quotas),
+                );
+            screen.run_steps(2);
+            if incomplete {
+                screen.get_by_label("$7.50"); // month still includes the rolled-up cost
+            }
+            screen.get_by_label("Tokens / 1%");
+            screen.get_by_label("Cost / 1%");
+            let tokens = if incomplete { "4.0K*" } else { "4.0K" };
+            screen.get_by_label(tokens);
+            screen.get_by_label(if incomplete { "100.0K*" } else { "100.0K" });
+            screen.get_by_label("$2.50*");
+            screen.get_by_label("$0.10*").hover();
+            screen.run_steps(2);
+            screen.get_by_label(if incomplete {
+                QUOTA_RETENTION_HINT
+            } else {
+                PARTIAL_COST_HINT
+            });
+            screen.state_mut().1[0].windows[0].remaining_basis_points = None;
+            screen.run_steps(2);
+            assert!(screen.query_by_label(tokens).is_none());
+            assert!(screen.query_by_label("$0.10*").is_none());
+        }
     }
 
     fn tile<'a>(tiles: &'a [Tile], title: &str) -> &'a Tile {

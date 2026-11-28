@@ -22,7 +22,11 @@ const DAY_NS: i64 = 86_400 * 1_000_000_000;
 /// unknown) may have been rolled up into days by now. A rolled-up request keeps
 /// neither its run nor its thread, so the rows that are left are a lower bound.
 /// A retention of 0 days turns the roll-up off: nothing leaves the ledger.
-fn may_be_rolled_up(created_at_ns: Option<i64>, now_ns: i64, retention_days: u32) -> bool {
+pub(super) fn may_be_rolled_up(
+    created_at_ns: Option<i64>,
+    now_ns: i64,
+    retention_days: u32,
+) -> bool {
     if retention_days == 0 {
         return false;
     }

@@ -54,6 +54,7 @@ fn a_live_usage_names_a_day_that_has_a_length_and_bounded_quota_windows() {
         profile: format!("profile-{index}"),
         window: "5h".into(),
         totals: UsageTotals::default(),
+        incomplete: false,
     };
     let mut usage = live();
     usage.quota_windows = (0..MAX_QUOTA_WINDOW_USAGES).map(window).collect();

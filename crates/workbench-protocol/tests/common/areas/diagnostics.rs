@@ -115,7 +115,7 @@ pub fn samples() -> AreaSamples {
                     "local_day": "2026-01-07",
                     "day_start_ms": 1699999000000u64, "day_end_ms": 1700085400000u64,
                     "today": totals(), "month": totals(),
-                    "quota_windows": [{"profile": "codex", "window": "5h", "totals": totals()}]}}),
+                    "quota_windows": [{"profile": "codex", "window": "5h", "totals": totals(), "incomplete": true}]}}),
             ),
         ],
     }

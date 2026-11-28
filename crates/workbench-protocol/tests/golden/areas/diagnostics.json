@@ -163,6 +163,7 @@
           },
           "quota_windows": [
             {
+              "incomplete": true,
               "profile": "codex",
               "totals": {
                 "cache_read_tokens": 800,

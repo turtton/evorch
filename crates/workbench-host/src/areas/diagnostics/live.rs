@@ -23,6 +23,7 @@ pub(super) fn live_usage_with_quotas(
     database: &Database,
     now_ns: i64,
     quotas: &ProviderQuotas,
+    retention_days: u32,
 ) -> Result<LiveUsage, WorkbenchError> {
     let ranges = quota_ranges(quotas, now_ns);
     let clock = database.usage_local_clock().map_err(storage_error)?;
@@ -42,7 +43,7 @@ pub(super) fn live_usage_with_quotas(
         || database.usage_requests_in_days(&from, &clock.today),
     )?;
     let mut live = reduce_live(&requests, &daily, &clock, &month_start, now_ns);
-    live.quota_windows = sum_quota_windows(&requests, &ranges);
+    live.quota_windows = sum_quota_windows(&requests, &ranges, now_ns, retention_days);
     Ok(live)
 }
 
@@ -81,7 +82,12 @@ fn quota_ranges(quotas: &ProviderQuotas, now_ns: i64) -> Vec<QuotaRange> {
         .take(MAX_QUOTA_WINDOW_USAGES)
         .collect()
 }
-fn sum_quota_windows(requests: &[UsageRequestRow], ranges: &[QuotaRange]) -> Vec<QuotaWindowUsage> {
+fn sum_quota_windows(
+    requests: &[UsageRequestRow],
+    ranges: &[QuotaRange],
+    now_ns: i64,
+    retention_days: u32,
+) -> Vec<QuotaWindowUsage> {
     ranges
         .iter()
         .map(|range| {
@@ -98,6 +104,11 @@ fn sum_quota_windows(requests: &[UsageRequestRow], ranges: &[QuotaRange]) -> Vec
                 profile: range.profile.clone(),
                 window: range.window.clone(),
                 totals,
+                incomplete: super::usage::may_be_rolled_up(
+                    Some(range.from_ns),
+                    now_ns,
+                    retention_days,
+                ),
             }
         })
         .collect()
@@ -268,12 +279,73 @@ mod tests {
                 issue: None,
             }],
         };
-        let live = live_usage_with_quotas(&database, now, &quotas).unwrap();
+        let live = live_usage_with_quotas(&database, now, &quotas, 90).unwrap();
         assert_eq!(live.month.requests, 0);
         assert_eq!(
             live.quota_windows[0].totals.recorded_cost_micro_usd,
             2_000_000
         );
+    }
+
+    #[test]
+    fn retention_marks_mixed_window_totals_without_attributing_daily_rows() {
+        use workbench_protocol::namespaces::diagnostics::*;
+        for retention in [0, 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("usage.db");
+            let store = storage::Storage::open(storage::StorageConfig {
+                db_path: path.clone(),
+                usage_retention_days: retention,
+                ..Default::default()
+            })
+            .unwrap();
+            let database = Database::open_read_only(&path).unwrap();
+            let clock = database.usage_local_clock().unwrap();
+            // Dates follow the ledger clock, not elapsed execution time. Yesterday's
+            // predecessor is always expired at retention=1, today's row never is.
+            let now = clock.day_start_ns + HOUR_NS;
+            let mut old = request("unused", clock.day_start_ns - 2 * 24 * HOUR_NS, 2.0).record;
+            old.profile = Some("work".into());
+            let mut recent = request("unused", now - 1, 3.0).record;
+            recent.profile = Some("work".into());
+            let writer = store.handle();
+            writer.record_usage_requests(vec![old, recent]).unwrap();
+            writer.checkpoint_now().unwrap();
+            let daily = database
+                .usage_daily_between("0000-01-01", "9999-12-31")
+                .unwrap();
+            assert_eq!(daily.len(), usize::from(retention != 0));
+            let remaining = database.usage_requests_between(0, i64::MAX).unwrap();
+            assert_eq!(remaining.len(), if retention == 0 { 2 } else { 1 });
+            let quotas = ProviderQuotas {
+                profiles: vec![ProviderQuota {
+                    profile: "work".into(),
+                    provider: QuotaProvider::Codex,
+                    state: QuotaState::Ready,
+                    fetched_at_ms: Some(at_ms(now)),
+                    windows: vec![QuotaWindow {
+                        id: "primary".into(),
+                        label: "7d".into(),
+                        remaining_basis_points: Some(7500),
+                        resets_at_ms: Some(at_ms(clock.day_end_ns)),
+                        duration_seconds: Some(7 * 86400),
+                        usage_label: None,
+                    }],
+                    issue: None,
+                }],
+            };
+            let live = live_usage_with_quotas(&database, now, &quotas, retention).unwrap();
+            let window = &live.quota_windows[0];
+            assert_eq!(window.totals.requests, if retention == 0 { 2 } else { 1 });
+            assert_eq!(
+                window.totals.recorded_cost_micro_usd,
+                if retention == 0 { 5_000_000 } else { 3_000_000 }
+            );
+            assert_eq!(window.incomplete, retention != 0);
+            // Missing rows are retention loss, not unknown prices or unreported usage.
+            assert_eq!(window.totals.unpriced_tokens, 0);
+            assert_eq!(window.totals.unreported_requests, 0);
+        }
     }
 
     #[test]
@@ -309,10 +381,15 @@ mod tests {
             row.record.profile = Some("work".into());
         }
         rows[2].record.profile = Some("other".into());
-        let summed = sum_quota_windows(&rows, &ranges);
+        let summed = sum_quota_windows(&rows, &ranges, now, 90);
         assert_eq!(summed[0].totals.requests, 2);
         assert_eq!(summed[0].totals.recorded_cost_micro_usd, 5_000_000);
         assert_eq!(summed[0].window, "primary");
+        assert!(!summed[0].incomplete);
+        let boundary = ranges[0].from_ns + 24 * HOUR_NS;
+        assert!(!sum_quota_windows(&rows, &ranges, boundary, 1)[0].incomplete);
+        assert!(sum_quota_windows(&rows, &ranges, boundary + 1, 1)[0].incomplete);
+        assert!(!sum_quota_windows(&rows, &ranges, boundary + 1, 0)[0].incomplete);
         let mut quotas = quotas;
         quotas.profiles[0].provider = QuotaProvider::Claude;
         assert!(quota_ranges(&quotas, now).is_empty());

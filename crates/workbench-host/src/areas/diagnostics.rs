@@ -294,7 +294,7 @@ impl DiagnosticsArea {
                 .submit(&request.operation_id, digest_of(&"live_usage"), move || {
                     let database =
                         Database::open_read_only(&wired.database).map_err(storage_error)?;
-                    live::live_usage_with_quotas(&database, now_ns(), &quotas)
+                    live::live_usage_with_quotas(&database, now_ns(), &quotas, wired.retention_days)
                         .map(|usage| DiagnosticsRead::LiveUsage(Box::new(usage)))
                 })?;
         Ok(ReadOutcome {
