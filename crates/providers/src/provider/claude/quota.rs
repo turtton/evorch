@@ -233,18 +233,31 @@ fn window(label: &str, raw: &Value, percentage: &str) -> Option<ClaudeQuotaWindo
     let used = raw[percentage]
         .as_f64()
         .or_else(|| raw[percentage].as_str()?.parse().ok())?;
-    if !used.is_finite() {
-        return None;
-    }
-    let used_percent = used.clamp(0.0, 100.0);
+    // Retain non-finite percentages as unknown for diagnostics, not missing windows.
+    let remaining_percent = if used.is_finite() {
+        100.0 - used.clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
     let resets_at = raw["resets_at"]
         .as_str()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc));
     Some(ClaudeQuotaWindow {
         label: label.into(),
-        used_percent,
-        remaining_percent: 100.0 - used_percent,
+        // Preserve the source value so diagnostics can mark out-of-range as unknown.
+        used_percent: used,
+        remaining_percent,
         resets_at,
     })
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    #[test]
+    fn quota_keeps_out_of_range_source_percent_for_unknown_diagnostics() {
+        let window = super::window("5h", &serde_json::json!({"percent":120}), "percent").unwrap();
+        assert_eq!(window.used_percent, 120.0);
+        assert_eq!(window.remaining_percent, 0.0); // Legacy display contract stays bounded.
+    }
 }

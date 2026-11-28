@@ -44,6 +44,7 @@ use workbench_protocol::{
 };
 
 mod live;
+pub mod quota;
 pub mod read_ops;
 mod usage;
 mod usage_notice;
@@ -67,6 +68,7 @@ pub enum DiagnosticsRead {
 pub struct DiagnosticsArea {
     reads: ReadOps<DiagnosticsRead>,
     pager: Pager,
+    quotas: quota::Quotas,
     wired: Option<Wired>,
     /// Keeps the ledger's commit notices flowing to the task that announces them.
     _usage_commits: Option<Arc<UsageCommitObserver>>,
@@ -138,6 +140,7 @@ impl DiagnosticsArea {
                 ));
             }),
             pager: Pager::default(),
+            quotas: quota::Quotas::default(),
             wired: Some(Wired {
                 runtime,
                 database,
@@ -145,6 +148,41 @@ impl DiagnosticsArea {
             }),
             _usage_commits: Some(observer),
         }
+    }
+
+    pub(super) fn bind_quotas(
+        &mut self,
+        handles: &AreaHandles,
+        settings: &super::settings::SettingsArea,
+    ) -> Result<(), BootstrapError> {
+        if let Some((changed, load)) = settings.quota_updates() {
+            let source = handles
+                .source("diagnostics")
+                .map_err(|e| BootstrapError::from(e.message))?;
+            self.quotas = quota::Quotas::new(quota::Parts {
+                tasks: handles.tasks.clone(),
+                announce: Arc::new(move || {
+                    let _ = source.publish(UiEvent::Diagnostics(
+                        DiagnosticsEvent::ProviderQuotasChanged {},
+                    ));
+                }),
+                initial: quota::profiles(&handles.config),
+                changed,
+                load: Arc::new(move || load().map(|config| quota::profiles(&config))),
+                fetch: quota::production(handles.credentials.clone()),
+                gate: handles.restart_gate.clone(),
+            })
+            .map_err(|error| BootstrapError::from(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Begin polling once, returning only the current memory snapshot.
+    pub fn provider_quotas(
+        &self,
+    ) -> Result<workbench_protocol::namespaces::diagnostics::ProviderQuotas, WorkbenchError> {
+        self.wired()?;
+        Ok(self.quotas.get())
     }
 
     fn wired(&self) -> Result<&Wired, WorkbenchError> {
@@ -250,12 +288,13 @@ impl DiagnosticsArea {
         request: &GetLiveUsage,
     ) -> Result<ReadOutcome<LiveUsage>, WorkbenchError> {
         let wired = self.wired()?.clone();
+        let quotas = self.quotas.snapshot();
         let snapshot =
             self.reads
                 .submit(&request.operation_id, digest_of(&"live_usage"), move || {
                     let database =
                         Database::open_read_only(&wired.database).map_err(storage_error)?;
-                    live::live_usage(&database, now_ns())
+                    live::live_usage_with_quotas(&database, now_ns(), &quotas, wired.retention_days)
                         .map(|usage| DiagnosticsRead::LiveUsage(Box::new(usage)))
                 })?;
         Ok(ReadOutcome {

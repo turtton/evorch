@@ -29,8 +29,9 @@ enum Source {
 #[derive(Debug)]
 enum Quality {
     Missing,
-    // Keep the unclamped percentage so conflicting over-limit counts stay distinguishable.
-    Valid(f64),
+    // A parsed number may be out of range/non-finite: keep that window unknown
+    // instead of failing the profile. Also retain over-limit conflict evidence.
+    Parsed(f64),
     Invalid(QuotaError),
 }
 
@@ -61,18 +62,14 @@ fn candidate(
         };
     };
     let reset = reset_time(entry);
-    let usage = read_usage(entry).and_then(|used| {
-        if !used.is_finite() || used < 0.0 {
-            return Err(QuotaError::Protocol("invalid Kimi quota usage"));
-        }
-        reset.as_ref().map(|_| used).map_err(Clone::clone)
-    });
+    let usage =
+        read_usage(entry).and_then(|used| reset.as_ref().map(|_| used).map_err(Clone::clone));
     Candidate {
         id,
         source,
         label,
         quality: match usage {
-            Ok(used) => Quality::Valid(used),
+            Ok(used) => Quality::Parsed(used),
             Err(error) => Quality::Invalid(error),
         },
         resets_at: reset.ok().flatten(),
@@ -128,24 +125,25 @@ fn extract_legacy(raw: &Value) -> Vec<Candidate> {
     candidates
 }
 
+fn raw_number(value: &Value) -> Option<f64> {
+    value.as_f64().or_else(|| value.as_str()?.parse().ok())
+}
+
 fn number(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str()?.parse().ok())
-        .filter(|value| value.is_finite())
+    raw_number(value).filter(|value| value.is_finite())
 }
 
 fn named_usage(entry: &Value) -> Result<f64, QuotaError> {
     // The current API uses 0–100 percentages, unchanged by the official client.
     // Fractional-ratio compatibility is intentionally no longer supported.
-    number(&entry["used_ratio"]).ok_or(QuotaError::Protocol("invalid Kimi quota ratio"))
+    raw_number(&entry["used_ratio"]).ok_or(QuotaError::Protocol("invalid Kimi quota ratio"))
 }
 
 fn legacy_count(entry: &Value, key: &str) -> Result<Option<f64>, QuotaError> {
     entry
         .get(key)
         .filter(|value| !value.is_null())
-        .map(|value| number(value).ok_or(QuotaError::Protocol("invalid Kimi quota usage")))
+        .map(|value| raw_number(value).ok_or(QuotaError::Protocol("invalid Kimi quota usage")))
         .transpose()
 }
 
@@ -162,7 +160,6 @@ fn legacy_usage(entry: &Value) -> Result<f64, QuotaError> {
     }
     let used = used
         .or_else(|| remaining.map(|remaining| limit - remaining))
-        .filter(|used| used.is_finite() && *used >= 0.0)
         .ok_or(QuotaError::Protocol("Kimi quota usage unavailable"))?;
     Ok(used / limit * 100.0)
 }
@@ -237,10 +234,10 @@ fn legacy_choice(id: WindowId, legacy: &[Candidate]) -> LegacyChoice<'_> {
     let mut selected = LegacyChoice::Missing;
     for candidate in legacy.iter().filter(|candidate| candidate.id == id) {
         match &candidate.quality {
-            Quality::Valid(used) => {
+            Quality::Parsed(used) => {
                 if let LegacyChoice::Valid(previous) = &selected {
-                    let Quality::Valid(previous_used) = previous.quality else {
-                        unreachable!("only valid legacy candidates are selected");
+                    let Quality::Parsed(previous_used) = previous.quality else {
+                        unreachable!("only parsed legacy candidates are selected");
                     };
                     let resets_agree = same_reset(previous, candidate)
                         || (previous.resets_at.is_none() && candidate.resets_at.is_none());
@@ -267,7 +264,7 @@ fn select<'a>(
 ) -> Result<Option<&'a Candidate>, QuotaError> {
     // A nonzero, valid named window is authoritative, regardless of legacy quality.
     if let Some(candidate) = named
-        && matches!(candidate.quality, Quality::Valid(used) if used > 0.0)
+        && matches!(candidate.quality, Quality::Parsed(used) if used.is_finite() && used > 0.0)
     {
         return Ok(Some(candidate));
     }
@@ -275,11 +272,11 @@ fn select<'a>(
         LegacyChoice::Conflict => Err(QuotaError::Protocol("conflicting Kimi quota windows")),
         LegacyChoice::Valid(legacy) => {
             if let Some(named) = named
-                && matches!(named.quality, Quality::Valid(0.0))
+                && matches!(named.quality, Quality::Parsed(0.0))
             {
                 // Correct a zero only with positive usage from the same reset period.
                 return Ok(Some(
-                    if matches!(legacy.quality, Quality::Valid(used) if used > 0.0)
+                    if matches!(legacy.quality, Quality::Parsed(used) if used.is_finite() && used > 0.0)
                         && same_reset(named, legacy)
                     {
                         legacy
@@ -292,7 +289,7 @@ fn select<'a>(
             Ok(Some(legacy))
         }
         legacy => match named.map(|candidate| &candidate.quality) {
-            Some(Quality::Valid(_)) => Ok(named),
+            Some(Quality::Parsed(_)) => Ok(named),
             Some(Quality::Invalid(error)) => Err(error.clone()),
             _ => match legacy {
                 LegacyChoice::Invalid(error) => Err(error),
@@ -304,13 +301,18 @@ fn select<'a>(
 
 impl Candidate {
     fn to_window(&self) -> KimiQuotaWindow {
-        let Quality::Valid(used) = self.quality else {
-            unreachable!("only valid candidates can become quota windows");
+        let Quality::Parsed(used) = self.quality else {
+            unreachable!("only parsed candidates can become quota windows");
         };
         KimiQuotaWindow {
             label: self.label.clone(),
-            used_percent: used.clamp(0.0, 100.0),
-            remaining_percent: (100.0 - used).clamp(0.0, 100.0),
+            // Preserve validity information for diagnostics; legacy remaining stays bounded.
+            used_percent: used,
+            remaining_percent: if used.is_finite() && (0.0..=100.0).contains(&used) {
+                100.0 - used
+            } else {
+                0.0
+            },
             resets_at: self.resets_at,
         }
     }
@@ -362,6 +364,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn quota_keeps_out_of_range_source_percent_for_unknown_diagnostics() {
+        let candidate = candidate(
+            WindowId::Week,
+            Source::Named,
+            "week".into(),
+            Some(&json!({"used_ratio":120})),
+            named_usage,
+        );
+        let window = candidate.to_window();
+        assert_eq!(window.used_percent, 120.0);
+        assert_eq!(window.remaining_percent, 0.0);
+    }
+
+    #[test]
     fn periods_are_identified_only_by_known_duration_and_unit_pairs() {
         for (duration, unit, expected) in [
             (json!(300), "TIME_UNIT_MINUTE", Some(WindowId::FiveHours)),
@@ -411,10 +427,16 @@ mod tests {
             legacy_usage(&json!({"limit": 100, "used": 120, "remaining": -20})).unwrap(),
             120.0
         );
+        assert_eq!(
+            legacy_usage(&json!({"limit": 100, "used": -1})).unwrap(),
+            -1.0
+        );
+        assert_eq!(
+            legacy_usage(&json!({"limit": 100, "remaining": 101})).unwrap(),
+            -1.0
+        );
         for entry in [
             json!({"limit": 100, "used": 120, "remaining": 0}),
-            json!({"limit": 100, "used": -1}),
-            json!({"limit": 100, "remaining": 101}),
             json!({"limit": 100, "used": "NaN", "remaining": 50}),
             json!({"limit": "inf", "used": 1}),
             json!({"limit": 0, "used": 0}),

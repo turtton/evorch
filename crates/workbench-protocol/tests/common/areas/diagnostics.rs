@@ -52,14 +52,22 @@ pub fn samples() -> AreaSamples {
                 json!({"operation_id": "op-4", "run": "run-1"}),
             ),
             query("get_live_usage", json!({"operation_id": "op-5"})),
+            query("get_provider_quotas", json!({})),
         ],
         ui_events: vec![
+            de::<UiEvent>(
+                json!({"type": "diagnostics", "payload": {"type": "provider_quotas_changed", "payload": {}}}),
+            ),
             de::<UiEvent>(json!({"type": "diagnostics", "payload": {
             "type": "diagnostics_operation_changed", "payload": {"view": view(json!({"type": "ready"}))}}})),
             de::<UiEvent>(json!({"type": "diagnostics", "payload": {
                 "type": "usage_changed", "payload": {"change": {"runs": ["run-1", "run-2"], "all_runs": false}}}})),
         ],
         query_replies: vec![
+            reply(
+                "provider_quotas",
+                json!({"profiles": [{"profile": "work", "provider": "codex", "state": "stale", "fetched_at_ms": 1700000000000u64, "windows": [{"id": "primary", "label": "5h", "remaining_basis_points": 7500, "resets_at_ms": 1700010000000u64, "duration_seconds": 18000, "usage_label": null}], "issue": {"code": "http", "http_status": 503}}]}),
+            ),
             reply(
                 "usage",
                 json!({"operation": view(json!({"type": "ready"})), "data": {
@@ -107,7 +115,7 @@ pub fn samples() -> AreaSamples {
                     "local_day": "2026-01-07",
                     "day_start_ms": 1699999000000u64, "day_end_ms": 1700085400000u64,
                     "today": totals(), "month": totals(),
-                    "quota_windows": [{"profile": "codex", "window": "5h", "totals": totals()}]}}),
+                    "quota_windows": [{"profile": "codex", "window": "5h", "totals": totals(), "incomplete": true}]}}),
             ),
         ],
     }

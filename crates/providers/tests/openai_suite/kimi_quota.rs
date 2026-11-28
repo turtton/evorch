@@ -378,7 +378,7 @@ async fn missing_or_invalid_weekly_ratios_can_use_reset_matched_legacy_usage() {
 }
 
 #[tokio::test]
-async fn missing_or_invalid_named_ratios_without_fallback_are_protocol_errors() {
+async fn numeric_ratio_anomalies_keep_unknown_windows_but_malformed_ratios_are_errors() {
     for entry in missing_or_invalid_named_entries() {
         for key in [
             "limit_5h",
@@ -387,10 +387,21 @@ async fn missing_or_invalid_named_ratios_without_fallback_are_protocol_errors() 
             "limit_month_code",
         ] {
             let result = fetch_fixture(json!({"usages": {key: entry}})).await;
-            assert!(
-                matches!(result, Err(QuotaError::Protocol(_))),
-                "{key}: {entry}: {result:?}"
-            );
+            let numeric = entry["used_ratio"]
+                .as_f64()
+                .or_else(|| entry["used_ratio"].as_str()?.parse::<f64>().ok());
+            if numeric.is_some() {
+                let snapshot = result.unwrap();
+                assert_eq!(snapshot.windows.len(), 1);
+                let window = &snapshot.windows[0];
+                assert!(!window.used_percent.is_finite() || window.used_percent < 0.0);
+                assert_eq!(window.remaining_percent, 0.0);
+            } else {
+                assert!(
+                    matches!(result, Err(QuotaError::Protocol(_))),
+                    "{key}: {entry}: {result:?}"
+                );
+            }
         }
     }
 }
@@ -623,7 +634,7 @@ async fn legacy_plan_parses_string_counts_and_remaining_with_nanosecond_reset() 
 async fn malformed_or_absent_usage_never_fabricates_full_remaining_quota() {
     for body in [
         json!({}),
-        json!({"usages":{"limit_5h":{"used_ratio":"NaN"}}}),
+        json!({"usages":{"limit_5h":{"used_ratio":true}}}),
         json!({"usage":{"limit":"0","used":"0"}}),
         json!({"usage":{"limit":"100"}}),
     ] {

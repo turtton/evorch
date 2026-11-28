@@ -8595,6 +8595,7 @@ dependencies = [
  "tools",
  "tracing",
  "uuid",
+ "wiremock",
  "workbench-authority",
  "workbench-host",
  "workbench-protocol",

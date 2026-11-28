@@ -65,6 +65,8 @@ pub struct QuotaWindowUsage {
     pub profile: String,
     pub window: String,
     pub totals: UsageTotals,
+    /// The window reaches beyond detailed ledger retention; these totals are a lower bound.
+    pub incomplete: bool,
 }
 
 /// The usage a live view shows, as of one moment. Averages, burn rates and

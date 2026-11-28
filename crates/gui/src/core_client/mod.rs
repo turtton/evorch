@@ -982,6 +982,10 @@ impl CoreClientScreen {
             .then(|| shared.features.diagnostics())
             .flatten();
         let today_cost = diagnostics.and_then(|diagnostics| diagnostics.today_cost());
+        let quotas = diagnostics.map_or(&[][..], |diagnostics| diagnostics.quotas.profiles());
+        if let Some(wait) = diagnostics.and_then(|d| d.quotas.refresh_in(now)) {
+            ui.ctx().request_repaint_after(wait);
+        }
         if let Some(wait) = diagnostics.and_then(|diagnostics| diagnostics.today_refresh_in(now)) {
             ui.ctx().request_repaint_after(wait);
         }
@@ -997,6 +1001,7 @@ impl CoreClientScreen {
                 shell::footer(
                     ui,
                     shell::FooterState {
+                        quotas,
                         stats: stats.as_ref(),
                         today_cost,
                         status: &shared.status,

@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RpcWindow {
+    #[serde(deserialize_with = "percentage")]
     used_percent: f64,
     window_duration_mins: Option<i64>,
     resets_at: Option<i64>,
@@ -28,13 +29,28 @@ impl RpcWindow {
     }
 }
 
+// Percentage anomalies are not structural window failures. Preserve the source
+// value for diagnostics to mark unknown without changing the public f64 model.
+fn percentage<'de, D: serde::Deserializer<'de>>(input: D) -> Result<f64, D::Error> {
+    let value = serde_json::Value::deserialize(input)?;
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .ok_or_else(|| serde::de::Error::custom("invalid quota percentage"))
+}
+
 fn window(used: f64, seconds: u64, reset: i64) -> Result<QuotaWindow, QuotaError> {
-    if !used.is_finite() || used < 0.0 || seconds == 0 {
+    if seconds == 0 {
         return Err(QuotaError::Protocol("invalid quota window"));
     }
     Ok(QuotaWindow {
         used_percent: used,
-        remaining_percent: (100.0 - used).clamp(0.0, 100.0),
+        // Legacy callers require a bounded number; diagnostics reads used_percent.
+        remaining_percent: if used.is_finite() && (0.0..=100.0).contains(&used) {
+            100.0 - used
+        } else {
+            0.0
+        },
         window_duration: Duration::from_secs(seconds),
         resets_at: DateTime::from_timestamp(reset, 0)
             .ok_or(QuotaError::Protocol("invalid reset timestamp"))?,
@@ -66,6 +82,7 @@ impl RpcLimits {
 
 #[derive(Deserialize)]
 struct WhamWindow {
+    #[serde(deserialize_with = "percentage")]
     used_percent: f64,
     limit_window_seconds: u64,
     reset_at: Option<i64>,

@@ -485,39 +485,44 @@ fn the_live_usage_is_not_asked_while_its_view_is_not_drawn() {
 // Then: one read follows after the gap, and the open view reads again every refresh period
 #[test]
 fn a_notice_during_the_live_read_is_asked_once_after_it_settled() {
-    let mut feature = DiagnosticsFeature::default();
-    let t0 = Instant::now();
-    let first = keep_live_at(&mut feature, t0);
-    assert_eq!(first.len(), 1);
-    let get = live_query(&first[0]).unwrap().clone();
+    for notice in [
+        changed(&["any"]),
+        UiEvent::Diagnostics(DiagnosticsEvent::ProviderQuotasChanged {}),
+    ] {
+        let mut feature = DiagnosticsFeature::default();
+        let t0 = Instant::now();
+        let first = keep_live_at(&mut feature, t0);
+        assert_eq!(first.len(), 1);
+        let get = live_query(&first[0]).unwrap().clone();
 
-    feature.event(&changed(&["any"]));
-    assert!(
-        keep_live_at(&mut feature, t0 + 10 * SECOND).is_empty(),
-        "the read waits"
-    );
-    feature.event(&settled(&get.operation_id));
-    feature.reply(first[0].tag, live_reply(&get, OperationState::Pending));
-    let again = keep_live_at(&mut feature, t0 + 10 * SECOND);
-    assert_eq!(live_query(&again[0]), Some(&get));
-    feature.reply(again[0].tag, live_reply(&get, OperationState::Ready));
-    assert!(feature.live.is_some());
+        feature.event(&notice);
+        assert!(
+            keep_live_at(&mut feature, t0 + 10 * SECOND).is_empty(),
+            "the read waits"
+        );
+        feature.event(&settled(&get.operation_id));
+        feature.reply(first[0].tag, live_reply(&get, OperationState::Pending));
+        let again = keep_live_at(&mut feature, t0 + 10 * SECOND);
+        assert_eq!(live_query(&again[0]), Some(&get));
+        feature.reply(again[0].tag, live_reply(&get, OperationState::Ready));
+        assert!(feature.live.is_some());
 
-    let followed = keep_live_at(&mut feature, t0 + 10 * SECOND);
-    assert_eq!(
-        followed.len(),
-        1,
-        "the notice is asked once the read settled"
-    );
-    let next = live_query(&followed[0]).unwrap().clone();
-    assert_ne!(next.operation_id, get.operation_id);
-    feature.reply(followed[0].tag, live_reply(&next, OperationState::Ready));
-    assert!(keep_live_at(&mut feature, t0 + 11 * SECOND).is_empty());
-    assert_eq!(
-        keep_live_at(&mut feature, t0 + 10 * SECOND + LIVE_REFRESH).len(),
-        1,
-        "the open view reads again by itself"
-    );
+        let followed = keep_live_at(&mut feature, t0 + 10 * SECOND);
+        assert_eq!(
+            followed.len(),
+            1,
+            "the notice is asked once the read settled"
+        );
+        let next = live_query(&followed[0]).unwrap().clone();
+        assert_ne!(next.operation_id, get.operation_id);
+        feature.reply(followed[0].tag, live_reply(&next, OperationState::Ready));
+        assert!(keep_live_at(&mut feature, t0 + 11 * SECOND).is_empty());
+        assert_eq!(
+            keep_live_at(&mut feature, t0 + 10 * SECOND + LIVE_REFRESH).len(),
+            1,
+            "the open view reads again by itself"
+        );
+    }
 }
 
 // Given: a notice right after a read / When: the gap has not passed

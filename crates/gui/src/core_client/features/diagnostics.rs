@@ -33,6 +33,7 @@ use workbench_protocol::{
 
 mod context;
 mod live;
+pub mod quota;
 pub(crate) mod read;
 mod thread_usage;
 mod usage;
@@ -84,6 +85,7 @@ impl View {
 
 #[derive(Debug, Clone, Copy)]
 enum Pending {
+    Quota,
     Usage { generation: u64 },
     Today { generation: u64 },
     Thread { generation: u64 },
@@ -92,6 +94,7 @@ enum Pending {
 }
 
 pub struct DiagnosticsFeature {
+    pub quotas: quota::Quotas,
     next_tag: u64,
     pending: BTreeMap<u64, Pending>,
     view: View,
@@ -131,6 +134,7 @@ pub struct DiagnosticsFeature {
 impl Default for DiagnosticsFeature {
     fn default() -> Self {
         Self {
+            quotas: quota::Quotas::default(),
             next_tag: 0,
             pending: BTreeMap::new(),
             view: View::default(),
@@ -509,7 +513,9 @@ impl DiagnosticsFeature {
         egui::ScrollArea::vertical()
             .id_salt("usage-live")
             .auto_shrink([false, true])
-            .show(ui, |ui| live::render(ui, live, &mut self.live_window));
+            .show(ui, |ui| {
+                live::render(ui, live, &mut self.live_window, self.quotas.profiles());
+            });
     }
 
     fn context_view(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, refresh: bool) {
@@ -613,6 +619,8 @@ impl Feature for DiagnosticsFeature {
         let now = Instant::now();
         self.keep_today(ctx, visibility, now);
         self.keep_thread_usage(ctx, visibility, now);
+        self.quotas
+            .maintain(ctx, visibility, &mut self.next_tag, &mut self.pending);
     }
 
     fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
@@ -631,6 +639,7 @@ impl Feature for DiagnosticsFeature {
     }
 
     fn reset(&mut self) {
+        self.quotas = quota::Quotas::default();
         self.pending.clear();
         self.today_read.forget();
         self.today = None;
@@ -650,6 +659,7 @@ impl Feature for DiagnosticsFeature {
     }
 
     fn event(&mut self, event: &UiEvent) {
+        self.quotas.event(event);
         let UiEvent::Diagnostics(event) = event else {
             return;
         };
@@ -667,6 +677,7 @@ impl Feature for DiagnosticsFeature {
                 self.live_due = true;
                 self.thread_usage.notice(change);
             }
+            DiagnosticsEvent::ProviderQuotasChanged {} => self.live_due = true,
         }
     }
 
@@ -674,6 +685,10 @@ impl Feature for DiagnosticsFeature {
         let Some(pending) = self.pending.remove(&tag) else {
             return;
         };
+        if matches!(pending, Pending::Quota) {
+            self.quotas.reply(reply);
+            return;
+        }
         let FeatureReply::Query(result) = reply else {
             return;
         };
@@ -682,6 +697,7 @@ impl Feature for DiagnosticsFeature {
             Ok(_) => return,
             Err(error) => {
                 match pending {
+                    Pending::Quota => {}
                     Pending::Usage { generation } => {
                         self.usage_read.fail(generation, error.message);
                     }

@@ -3,7 +3,7 @@
 //! price, and the Context view reads a run of the selected thread.
 use super::*;
 use crate::core_client::cache::Cache;
-use crate::core_client::features::execution::tests::{Screen, answer, asked, query_of, screen};
+use crate::core_client::features::execution::tests::{Screen, answer, query_of, screen};
 use crate::core_client::features::{
     FeatureAction, FeatureError, FeatureFrame, FeatureView, Selection,
 };
@@ -22,6 +22,19 @@ use workbench_protocol::{
     views::Page,
     wire::Revision,
 };
+
+/// Usage/context assertions are independent of the footer's automatic quota read.
+fn asked(screen: &mut Harness<'_, Screen>) -> Vec<FeatureAction> {
+    crate::core_client::features::execution::tests::asked(screen)
+        .into_iter()
+        .filter(|action| {
+            !matches!(
+                query_of(action),
+                Query::Diagnostics(DiagnosticsQuery::GetProviderQuotas(_))
+            )
+        })
+        .collect()
+}
 
 fn view(id: &OperationId, state: OperationState) -> OperationView {
     OperationView {

@@ -8,7 +8,10 @@
 //! own data.
 use egui::{Ui, vec2};
 use egui_plot::{Bar, BarChart, Legend, Plot};
-use workbench_protocol::namespaces::diagnostics::{LIVE_USAGE_MINUTES, LiveUsage, UsageTotals};
+use workbench_protocol::namespaces::diagnostics::{
+    LIVE_USAGE_MINUTES, LiveUsage, ProviderQuota, QuotaProvider, QuotaState, QuotaWindowUsage,
+    UsageTotals,
+};
 
 use super::usage::{add, cells};
 use crate::format::compact_count as compact_tokens;
@@ -121,7 +124,7 @@ fn window_label(minutes: usize) -> String {
     }
 }
 
-pub(super) fn render(ui: &mut Ui, live: &LiveUsage, window: &mut usize) {
+pub(super) fn render(ui: &mut Ui, live: &LiveUsage, window: &mut usize, quotas: &[ProviderQuota]) {
     ui.horizontal(|ui| {
         ui.label(muted("Window"));
         for minutes in WINDOWS {
@@ -155,7 +158,7 @@ pub(super) fn render(ui: &mut Ui, live: &LiveUsage, window: &mut usize) {
             "Subscription windows",
             "What each profile used inside its current quota window",
         );
-        quota_table(ui, live);
+        quota_table(ui, live, quotas);
     }
 }
 
@@ -275,12 +278,63 @@ fn token_bars(ui: &mut Ui, minutes: &[UsageCells], window: usize) {
         });
 }
 
-fn quota_table(ui: &mut Ui, live: &LiveUsage) {
+/// Scale only a matching Codex window. Below 1% the ratio is not meaningful,
+/// as in the legacy Live view. Never combine a new reset period with old totals.
+fn efficiency(
+    usage: &QuotaWindowUsage,
+    as_of_ms: u64,
+    quotas: &[ProviderQuota],
+) -> Option<(f64, f64)> {
+    let quota = quotas.iter().find(|q| {
+        q.profile == usage.profile
+            && q.provider == QuotaProvider::Codex
+            && matches!(q.state, QuotaState::Ready | QuotaState::Stale)
+    })?;
+    let window = quota.windows.iter().find(|w| w.id == usage.window)?;
+    let used = 10_000_u16.checked_sub(window.remaining_basis_points?)?;
+    let end = window.resets_at_ms?;
+    let start = end.checked_sub(window.duration_seconds?.checked_mul(1000)?)?;
+    let totals = cells(&usage.totals);
+    if used < 100 || totals.total_tokens() == 0 || !(start..end).contains(&as_of_ms) {
+        return None;
+    }
+    let percent = f64::from(used) / 100.0;
+    Some((
+        totals.total_tokens() as f64 / percent,
+        totals.cost / percent,
+    ))
+}
+
+const QUOTA_RETENTION_HINT: &str = "Older requests in this window may have been rolled up; profile totals and efficiency are lower bounds.";
+
+fn quota_value(ui: &mut Ui, text: String, incomplete: bool, partial_cost: bool) {
+    let lower_bound = incomplete || partial_cost;
+    let response = ui.label(format!("{text}{}", if lower_bound { "*" } else { "" }));
+    if lower_bound {
+        let mut hints = Vec::new();
+        if incomplete {
+            hints.push(QUOTA_RETENTION_HINT);
+        }
+        if partial_cost {
+            hints.push(PARTIAL_COST_HINT);
+        }
+        response.on_hover_text(hints.join("\n"));
+    }
+}
+
+fn quota_table(ui: &mut Ui, live: &LiveUsage, quotas: &[ProviderQuota]) {
     egui::Grid::new("usage-quota-windows")
         .striped(true)
         .spacing(vec2(16.0, 4.0))
         .show(ui, |ui| {
-            for title in ["Subscription", "Window", "Tokens", "Cost"] {
+            for title in [
+                "Subscription",
+                "Window",
+                "Tokens",
+                "Cost",
+                "Tokens / 1%",
+                "Cost / 1%",
+            ] {
                 ui.label(muted(title));
             }
             ui.end_row();
@@ -288,8 +342,20 @@ fn quota_table(ui: &mut Ui, live: &LiveUsage) {
                 let used = cells(&window.totals);
                 ui.label(&window.profile);
                 ui.label(&window.window);
-                ui.label(compact_tokens(used.total_tokens()));
-                ui.label(used.cost_label());
+                quota_value(
+                    ui,
+                    compact_tokens(used.total_tokens()),
+                    window.incomplete,
+                    false,
+                );
+                quota_value(ui, usd(used.cost), window.incomplete, used.lower_bound);
+                if let Some((tokens, cost)) = efficiency(window, live.as_of_ms, quotas) {
+                    quota_value(ui, compact_tokens(tokens as u64), window.incomplete, false);
+                    quota_value(ui, usd(cost), window.incomplete, used.lower_bound);
+                } else {
+                    ui.label("—");
+                    ui.label("—");
+                }
                 ui.end_row();
             }
         });
@@ -364,6 +430,149 @@ mod tests {
         assert_eq!(forecast.burn_per_hour, 0.0);
         assert_eq!(forecast.end_of_day, 0.0);
         assert_eq!(forecast.end_of_month, 0.0);
+    }
+
+    fn quota_fixture() -> (LiveUsage, Vec<ProviderQuota>) {
+        use workbench_protocol::namespaces::diagnostics::QuotaWindow;
+        let mut live = live();
+        live.quota_windows.push(QuotaWindowUsage {
+            profile: "work".into(),
+            window: "primary".into(),
+            incomplete: false,
+            totals: UsageTotals {
+                input_tokens: 100_000,
+                recorded_cost_micro_usd: 2_500_000,
+                ..Default::default()
+            },
+        });
+        let quotas = vec![ProviderQuota {
+            profile: "work".into(),
+            provider: QuotaProvider::Codex,
+            state: QuotaState::Ready,
+            fetched_at_ms: Some(live.as_of_ms),
+            windows: vec![QuotaWindow {
+                id: "primary".into(),
+                label: "5h".into(),
+                remaining_basis_points: Some(7500),
+                resets_at_ms: Some(live.as_of_ms + 60 * MINUTE_MS),
+                duration_seconds: Some(18000),
+                usage_label: None,
+            }],
+            issue: None,
+        }];
+        (live, quotas)
+    }
+
+    #[test]
+    fn quota_efficiency_scales_tokens_and_recorded_cost_at_one_percent_or_more() {
+        let (mut live, mut quotas) = quota_fixture();
+        let usage = &live.quota_windows[0];
+        assert_eq!(
+            efficiency(usage, live.as_of_ms, &quotas),
+            Some((4000.0, 0.1))
+        );
+        for remaining in [Some(10_000), Some(9901), None] {
+            quotas[0].windows[0].remaining_basis_points = remaining;
+            assert_eq!(efficiency(usage, live.as_of_ms, &quotas), None);
+        }
+        quotas[0].windows[0].remaining_basis_points = Some(9900);
+        assert_eq!(
+            efficiency(usage, live.as_of_ms, &quotas),
+            Some((100_000.0, 2.5))
+        );
+        quotas[0].windows[0].remaining_basis_points = Some(0);
+        assert_eq!(
+            efficiency(usage, live.as_of_ms, &quotas),
+            Some((1000.0, 0.025))
+        );
+        live.quota_windows[0].totals.input_tokens = 0;
+        assert_eq!(
+            efficiency(&live.quota_windows[0], live.as_of_ms, &quotas),
+            None
+        );
+    }
+
+    #[test]
+    fn efficiency_never_mixes_profiles_windows_or_reset_periods() {
+        let (live, quotas) = quota_fixture();
+        let usage = &live.quota_windows[0];
+        for (profile, window, provider, state) in [
+            (
+                "personal",
+                "primary",
+                QuotaProvider::Codex,
+                QuotaState::Ready,
+            ),
+            ("work", "secondary", QuotaProvider::Codex, QuotaState::Ready),
+            ("work", "primary", QuotaProvider::Claude, QuotaState::Ready),
+            ("work", "primary", QuotaProvider::Codex, QuotaState::Loading),
+        ] {
+            let mut wrong = quotas.clone();
+            wrong[0].profile = profile.into();
+            wrong[0].windows[0].id = window.into();
+            wrong[0].provider = provider;
+            wrong[0].state = state;
+            assert_eq!(efficiency(usage, live.as_of_ms, &wrong), None);
+        }
+        let end = quotas[0].windows[0].resets_at_ms.unwrap();
+        assert_eq!(efficiency(usage, end, &quotas), None);
+        assert_eq!(efficiency(usage, end - 18000 * 1000 - 1, &quotas), None);
+        let mut stale = quotas;
+        stale[0].state = QuotaState::Stale;
+        assert_eq!(
+            efficiency(usage, live.as_of_ms, &stale),
+            Some((4000.0, 0.1))
+        );
+    }
+
+    #[test]
+    fn quota_table_marks_retention_and_partial_price_lower_bounds() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        for incomplete in [false, true] {
+            let (mut live, quotas) = quota_fixture();
+            if incomplete {
+                // The month includes rolled-up rows plus details, while the profile
+                // window only has surviving details (all with known prices).
+                live.month = spent(3, 7_500_000);
+                live.quota_windows[0].incomplete = true;
+            } else {
+                live.quota_windows[0].totals.unpriced_tokens = 100;
+            }
+            let mut screen = Harness::builder()
+                .with_size(egui::vec2(1000.0, 1200.0))
+                .build_ui_state(
+                    |ui, (live, quotas)| {
+                        ui.ctx().global_style_mut(|style| {
+                            style.interaction.tooltip_delay = 0.0;
+                            style.interaction.show_tooltips_only_when_still = false;
+                        });
+                        let mut window = DEFAULT_WINDOW;
+                        render(ui, live, &mut window, quotas);
+                    },
+                    (live, quotas),
+                );
+            screen.run_steps(2);
+            if incomplete {
+                screen.get_by_label("$7.50"); // month still includes the rolled-up cost
+            }
+            screen.get_by_label("Tokens / 1%");
+            screen.get_by_label("Cost / 1%");
+            let tokens = if incomplete { "4.0K*" } else { "4.0K" };
+            screen.get_by_label(tokens);
+            screen.get_by_label(if incomplete { "100.0K*" } else { "100.0K" });
+            screen.get_by_label("$2.50*");
+            screen.get_by_label("$0.10*").hover();
+            screen.run_steps(2);
+            screen.get_by_label(if incomplete {
+                QUOTA_RETENTION_HINT
+            } else {
+                PARTIAL_COST_HINT
+            });
+            screen.state_mut().1[0].windows[0].remaining_basis_points = None;
+            screen.run_steps(2);
+            assert!(screen.query_by_label(tokens).is_none());
+            assert!(screen.query_by_label("$0.10*").is_none());
+        }
     }
 
     fn tile<'a>(tiles: &'a [Tile], title: &str) -> &'a Tile {

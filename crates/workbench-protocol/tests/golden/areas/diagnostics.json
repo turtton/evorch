@@ -17,6 +17,13 @@
     },
     "type": "diagnostics"
   },
+  "query/diagnostics/get_provider_quotas": {
+    "payload": {
+      "payload": {},
+      "type": "get_provider_quotas"
+    },
+    "type": "diagnostics"
+  },
   "query/diagnostics/get_run_context": {
     "payload": {
       "payload": {
@@ -156,6 +163,7 @@
           },
           "quota_windows": [
             {
+              "incomplete": true,
               "profile": "codex",
               "totals": {
                 "cache_read_tokens": 800,
@@ -207,6 +215,36 @@
         }
       },
       "type": "operation"
+    },
+    "type": "diagnostics"
+  },
+  "query_reply/diagnostics/provider_quotas": {
+    "payload": {
+      "payload": {
+        "profiles": [
+          {
+            "fetched_at_ms": 1700000000000,
+            "issue": {
+              "code": "http",
+              "http_status": 503
+            },
+            "profile": "work",
+            "provider": "codex",
+            "state": "stale",
+            "windows": [
+              {
+                "duration_seconds": 18000,
+                "id": "primary",
+                "label": "5h",
+                "remaining_basis_points": 7500,
+                "resets_at_ms": 1700010000000,
+                "usage_label": null
+              }
+            ]
+          }
+        ]
+      },
+      "type": "provider_quotas"
     },
     "type": "diagnostics"
   },
@@ -372,6 +410,13 @@
         }
       },
       "type": "diagnostics_operation_changed"
+    },
+    "type": "diagnostics"
+  },
+  "ui_event/diagnostics/provider_quotas_changed": {
+    "payload": {
+      "payload": {},
+      "type": "provider_quotas_changed"
     },
     "type": "diagnostics"
   },
