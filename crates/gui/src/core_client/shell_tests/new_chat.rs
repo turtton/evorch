@@ -280,3 +280,22 @@ fn an_acceptance_after_leaving_neither_moves_the_selection_nor_takes_the_focus()
     assert_eq!(screen.draft_of("thr-2"), "");
     assert_eq!(screen.draft_of(&thread), "");
 }
+
+// Given: a new conversation and the core's list of the project's skills
+// When: its first message mentions a listed skill and an unlisted name
+// Then: the creation names only the listed skill, as a message to an existing thread does
+#[test]
+fn the_first_message_names_the_listed_skills_it_mentions() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.open_new_conversation("evorch");
+    screen.type_in_composer("start with @review, not @nothing");
+    screen.harness.key_press(Key::Enter);
+    let sent = commands_of(screen.settle());
+    let [Command::Conversation(ConversationCommand::CreateExecution(chat))] = sent.as_slice()
+    else {
+        panic!("one creation expected, got {sent:?}");
+    };
+    assert_eq!(chat.skills, ["review"]);
+    assert_eq!(chat.text, "start with @review, not @nothing");
+}

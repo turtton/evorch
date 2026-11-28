@@ -7,7 +7,9 @@
 pub mod mentions;
 pub mod slash;
 
-pub use mentions::{CompletionItem, CompletionKind, MentionIndex, MentionQuery, mention_at};
+pub use mentions::{
+    CompletionItem, CompletionKind, MentionIndex, MentionQuery, mention_at, mentioned_names,
+};
 
 /// The `@token` under `cursor`, a char index into `input`; without a cursor
 /// (or one past the end) the end of the input.

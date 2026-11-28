@@ -302,6 +302,7 @@ fn answer(query: &WorkspaceQuery, attention: bool) -> Result<WorkspaceReply, Str
                 revision: Revision(1),
             }))
         }
+        WorkspaceQuery::ListSkills(_) => WorkspaceReply::Skills(Vec::new()),
         other => {
             return Err(format!(
                 "the fixture does not answer the workspace query {other:?}"

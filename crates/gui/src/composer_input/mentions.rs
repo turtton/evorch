@@ -229,6 +229,21 @@ impl MentionIndex {
         });
     }
 
+    /// Replaces the skills the index completes with `skills`, `(name, description)`
+    /// pairs the core listed. Files and folders are left as they are.
+    pub fn set_skills(&mut self, skills: impl IntoIterator<Item = (String, String)>) {
+        self.entries
+            .retain(|entry| entry.kind != CompletionKind::Skill);
+        self.entries
+            .extend(skills.into_iter().map(|(name, description)| {
+                MentionEntry::new(
+                    CompletionKind::Skill,
+                    name,
+                    format!("skill · {description}"),
+                )
+            }));
+    }
+
     /// Drops every skill once the project no longer admits its repository
     /// skills, so none of them completes before the rebuild lands. Which
     /// skills came from the repository is not recorded, and a user skill one
@@ -367,6 +382,23 @@ pub fn mention_at(input: &str, cursor: usize) -> Option<MentionQuery<'_>> {
         query,
         range: start..end,
     })
+}
+
+/// Names written as `@name` at word boundaries, deduplicated in first-seen order.
+/// A trailing sentence mark is not part of the name. Runtime-free, so the core
+/// client and the embedded workbench read a message the same way.
+pub fn mentioned_names(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    for token in text.split_whitespace() {
+        let Some(name) = token.strip_prefix('@') else {
+            continue;
+        };
+        let name = name.trim_end_matches(|c: char| ".,;:!?)]}\"'".contains(c));
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Whether `needle`'s characters appear in `haystack` in order.

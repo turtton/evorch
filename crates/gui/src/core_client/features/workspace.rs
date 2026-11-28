@@ -10,7 +10,10 @@
 //! client state (`Selection`, drafts).
 mod dialogs;
 mod sidebar;
+mod skills;
 mod tree;
+
+pub use self::skills::ProjectSkills;
 
 use self::tree::RunState;
 use super::{
@@ -63,6 +66,7 @@ enum Inflight {
     Models(String, u64),
     Projects,
     Detail(String),
+    Skills(String, u64),
     Command(String),
     Access(String),
     TrustCommand(String),
@@ -199,6 +203,8 @@ pub struct WorkspaceFeature {
     model: SidebarModel,
     model_catalogs: BTreeMap<String, workbench_protocol::namespaces::settings::ProjectModelChoices>,
     model_catalog_generation: u64,
+    skills: BTreeMap<String, ProjectSkills>,
+    skills_generation: u64,
     detail_generation: u64,
     detail_generations: BTreeMap<u64, u64>,
     next_tag: u64,
@@ -474,6 +480,7 @@ impl WorkspaceFeature {
         if let Some(project) = &selection.project {
             self.want_access(project.as_str());
             self.want_model_catalog(project);
+            self.want_skills(project);
         }
         if let Some(thread) = &selection.thread
             && cache.threads.contains_key(thread.as_str())
@@ -668,6 +675,10 @@ impl WorkspaceFeature {
             {
                 self.want_detail(thread);
             }
+            return;
+        }
+        if let Inflight::Skills(project, generation) = what {
+            self.skills_answered(project, generation, reply);
             return;
         }
         match (what, reply) {
@@ -916,6 +927,7 @@ impl Feature for WorkspaceFeature {
         self.detail_generation += 1;
         self.model_catalogs.clear();
         self.model_catalog_generation += 1;
+        self.forget_skills();
         self.refetch_details.clear();
         self.refetch_access.clear();
         // Replies can queue reads between frames. Keep those not-yet-sent
@@ -2360,5 +2372,137 @@ mod tests {
             )))),
         );
         assert!(feature.model_catalog("p").is_none());
+    }
+}
+
+#[cfg(test)]
+mod skills_tests {
+    use super::*;
+    use workbench_protocol::ids::ProjectId;
+    use workbench_protocol::namespaces::workspace::SkillSummary;
+
+    fn project(id: &str) -> ProjectId {
+        ProjectId::new(id).unwrap()
+    }
+
+    fn skills(names: &[&str]) -> FeatureReply {
+        FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::Skills(
+            names
+                .iter()
+                .map(|name| SkillSummary {
+                    name: (*name).into(),
+                    description: String::new(),
+                })
+                .collect(),
+        ))))
+    }
+
+    fn asked(feature: &mut WorkspaceFeature) -> Vec<(u64, String)> {
+        feature
+            .take_outbox()
+            .into_iter()
+            .filter_map(|outgoing| match outgoing {
+                Outgoing::Query(tag, Query::Workspace(WorkspaceQuery::ListSkills(target))) => {
+                    Some((tag, target.project.to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn names(feature: &WorkspaceFeature, project: &str) -> Option<Vec<String>> {
+        match feature.skills(project)? {
+            ProjectSkills::Ready(list) => Some(list.iter().map(|s| s.name.clone()).collect()),
+            ProjectSkills::Failed => None,
+        }
+    }
+
+    // Given: two projects, each with its own list
+    // Then: each list is kept per project, and a project asked for twice is asked once
+    #[test]
+    fn skills_are_kept_per_project_and_asked_once_while_on_their_way() {
+        let mut feature = WorkspaceFeature::default();
+        feature.want_skills(&project("a"));
+        feature.want_skills(&project("a"));
+        feature.want_skills(&project("b"));
+        let asked = asked(&mut feature);
+        assert_eq!(
+            asked.iter().map(|(_, p)| p.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(feature.skills_fetching("a"));
+        feature.on_reply(asked[0].0, skills(&["x"]));
+        feature.on_reply(asked[1].0, skills(&["y", "z"]));
+        assert_eq!(names(&feature, "a"), Some(vec!["x".into()]));
+        assert_eq!(names(&feature, "b"), Some(vec!["y".into(), "z".into()]));
+        assert!(!feature.skills_fetching("a"));
+        // A known list is not asked for again by the selection, only by a refresh.
+        feature.want_skills(&project("a"));
+        assert!(asked_none(&mut feature));
+    }
+
+    fn asked_none(feature: &mut WorkspaceFeature) -> bool {
+        asked(feature).is_empty()
+    }
+
+    // Given: a held list
+    // When: it is refreshed
+    // Then: the held list stays in use until the answer replaces it, and a second
+    //       refresh while one is on its way asks nothing
+    #[test]
+    fn a_refresh_keeps_the_held_list_until_it_is_answered() {
+        let mut feature = WorkspaceFeature::default();
+        feature.want_skills(&project("a"));
+        let first = asked(&mut feature)[0].0;
+        feature.on_reply(first, skills(&["old"]));
+        feature.refresh_skills(&project("a"));
+        feature.refresh_skills(&project("a"));
+        let refresh = asked(&mut feature);
+        assert_eq!(refresh.len(), 1);
+        assert_eq!(names(&feature, "a"), Some(vec!["old".into()]));
+        assert!(feature.skills_fetching("a"));
+        feature.on_reply(refresh[0].0, skills(&["new"]));
+        assert_eq!(names(&feature, "a"), Some(vec!["new".into()]));
+    }
+
+    // Given: an error and a reply of another kind
+    // Then: the project is marked failed without a sidebar notice, replacing the list held
+    #[test]
+    fn a_failed_answer_marks_the_project_failed_quietly() {
+        let mut feature = WorkspaceFeature::default();
+        feature.want_skills(&project("a"));
+        let first = asked(&mut feature)[0].0;
+        feature.on_reply(first, skills(&["old"]));
+        feature.refresh_skills(&project("a"));
+        let refresh = asked(&mut feature)[0].0;
+        feature.on_reply(
+            refresh,
+            FeatureReply::Query(Err(FeatureError::new("unsupported"))),
+        );
+        assert_eq!(feature.skills("a"), Some(&ProjectSkills::Failed));
+        assert_eq!(feature.notice(), None);
+    }
+
+    // Given: a list and a request on its way
+    // When: the connection is replaced
+    // Then: the list is gone and the late answer of the old connection is dropped
+    #[test]
+    fn a_new_connection_forgets_the_lists_and_drops_late_answers() {
+        let mut feature = WorkspaceFeature::default();
+        feature.want_skills(&project("a"));
+        let first = asked(&mut feature)[0].0;
+        feature.on_reply(first, skills(&["old"]));
+        feature.refresh_skills(&project("a"));
+        let late = asked(&mut feature)[0].0;
+        feature.reset();
+        assert_eq!(feature.skills("a"), None);
+        assert!(!feature.skills_fetching("a"));
+        feature.on_reply(late, skills(&["stale"]));
+        assert_eq!(feature.skills("a"), None);
+        // The new connection asks again, and its answer is kept.
+        feature.want_skills(&project("a"));
+        let fresh = asked(&mut feature)[0].0;
+        feature.on_reply(fresh, skills(&["fresh"]));
+        assert_eq!(names(&feature, "a"), Some(vec!["fresh".into()]));
     }
 }

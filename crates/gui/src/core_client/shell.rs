@@ -49,6 +49,9 @@ pub enum CoreTab {
 pub enum Effect {
     Send(Box<Action>),
     ModelChoice(ThreadId, workbench_protocol::commands::ModelChoice),
+    /// A mention started, or a send waits for the skill list: ask the core for the
+    /// project's skills again.
+    RefreshSkills(ProjectId),
     Reveal(FeatureId),
     Open(CoreTab),
     /// Open pane pressed on an Execution row.
@@ -475,6 +478,14 @@ impl TabViewer for Viewer<'_, '_> {
                         thread.is_some_and(|t| w.model_choice_pending(t.as_str()))
                     }),
                 );
+                {
+                    let skills = workspace.zip(self.selection.project.as_ref());
+                    self.conversation.sync_skills(
+                        self.selection.project.as_ref(),
+                        skills.and_then(|(w, p)| w.skills(p.as_str())),
+                        skills.is_some_and(|(w, p)| w.skills_fetching(p.as_str())),
+                    );
+                }
                 let root = self.selected_root();
                 let band = self.pass.execution().and_then(|e| e.band());
                 let lane = self.pass.lanes().and_then(|lanes| lanes.card());

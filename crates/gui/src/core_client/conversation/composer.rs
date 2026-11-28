@@ -6,6 +6,7 @@ use egui::Ui;
 use workbench_protocol::namespaces::{ConversationCommand, ExecutionCommand};
 use workbench_protocol::{commands::*, ids::*};
 
+use super::skills::{self, SkillSend};
 use super::slash::{self, Ctx, OFFERED, Outcome};
 use super::{Activity, ConversationIo, ConversationPane, stop};
 use crate::attachments::Intake;
@@ -24,6 +25,11 @@ use crate::theme::tokens::*;
 use crate::theme::widgets::{ghost, primary_icon_button, surface_frame};
 
 const MAX_NOTICES: usize = 20;
+const WAITING_FOR_SKILLS: &str =
+    "Reading the project's skills for the @mentions. Send again in a moment.";
+const TOO_MANY_SKILLS: &str = "A message can name at most 32 skills.";
+const SKILLS_UNLISTED: &str =
+    "The skill list could not be read, so the @mentions were sent as plain text.";
 
 impl ConversationPane {
     /// Before egui reads the input of a frame, while the composer has focus: Tab and
@@ -197,7 +203,7 @@ pub(super) fn composer(
                 // against the focus the editor held at the end of the last one.
                 let was_focused = pane.was_focused;
                 let focused = ui.memory(|memory| memory.has_focus(input_id));
-                let items = completions(ui, pane, io, thread, ime, focused);
+                let items = completions(ui, pane, io, project, thread, ime, focused, effects);
                 // As in the embedded workbench, open completions hide the working
                 // root's Stop and Queue; Stop subagents stays.
                 let completing = !items.is_empty();
@@ -363,16 +369,22 @@ fn completions(
     ui: &mut Ui,
     pane: &mut ConversationPane,
     io: &mut ConversationIo<'_>,
+    project: &ProjectId,
     thread: &ThreadId,
     ime: bool,
     focused: bool,
+    effects: &mut Vec<Effect>,
 ) -> Vec<CompletionItem> {
     let text = io
         .drafts
         .get(thread.as_str())
         .map_or("", |draft| draft.text.as_str());
     let mention = mention_query(text, pane.completion.cursor).is_some();
-    pane.mentions.refresh(ui.ctx(), mention);
+    if pane.mentions.refresh(ui.ctx(), mention) {
+        // The skills offered are read again each time a mention starts, so a skill
+        // added meanwhile completes without a watcher.
+        effects.push(Effect::RefreshSkills(project.clone()));
+    }
     let items = pane.completion.items(text, OFFERED, &pane.mentions.index);
     let state = &mut pane.completion;
     state.selected = state.selected.min(items.len().saturating_sub(1));
@@ -570,6 +582,30 @@ fn submit(
         ));
         return;
     }
+    let mut unlisted = false;
+    let skills = if pane.team {
+        Vec::new()
+    } else {
+        let known = pane.skills.project.as_ref() == Some(project);
+        let state = pane.skills.state.as_ref().filter(|_| known);
+        let fetching = known && pane.skills.fetching;
+        match skills::resolve(&draft.text, state, fetching) {
+            SkillSend::Send(names) => names,
+            SkillSend::Unlisted => {
+                unlisted = true;
+                Vec::new()
+            }
+            SkillSend::Wait => {
+                effects.push(Effect::RefreshSkills(project.clone()));
+                pane.notice(thread, WAITING_FOR_SKILLS.into());
+                return;
+            }
+            SkillSend::TooMany => {
+                pane.notice(thread, TOO_MANY_SKILLS.into());
+                return;
+            }
+        }
+    };
     let command = if pane.team {
         let goal = SubmitGoal {
             project: project.clone(),
@@ -593,7 +629,7 @@ fn submit(
             submission_id: SubmissionId::new(uuid::Uuid::new_v4().to_string()).unwrap(),
             composer_role: pane.composer_role,
             text: draft.text.clone(),
-            skills: vec![],
+            skills,
             attachments,
             model_preference: if exists {
                 None
@@ -616,6 +652,9 @@ fn submit(
         draft: Some((thread.to_string(), draft.revision)),
     }));
     pane.notices.remove(thread.as_str());
+    if unlisted {
+        pane.notice(thread, SKILLS_UNLISTED.into());
+    }
 }
 
 #[cfg(test)]

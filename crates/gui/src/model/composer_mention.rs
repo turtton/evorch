@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 
 use runtime::skill::SkillRegistry;
 
-use crate::composer_input::mentions::MAX_INDEXED_PATHS;
 pub use crate::composer_input::mentions::{
     CompletionItem, CompletionKind, MentionIndex, MentionQuery, mention_at,
 };
 #[cfg(test)]
 use crate::composer_input::mentions::{GIT_LOCAL_ENV, MAX_COMPLETIONS, slash_path};
+use crate::composer_input::mentions::{MAX_INDEXED_PATHS, mentioned_names};
 
 impl MentionIndex {
     /// Indexes `root`, then each of `allowed` within the remaining path budget.
@@ -43,21 +43,6 @@ impl MentionIndex {
             .map(|skill| (skill.name, skill.description));
         Self::index_within(root, allowed, skills, repo_skills, limit)
     }
-}
-
-/// Names written as `@name` at word boundaries, deduplicated in first-seen order.
-fn mentioned_names(text: &str) -> Vec<&str> {
-    let mut names = Vec::new();
-    for token in text.split_whitespace() {
-        let Some(name) = token.strip_prefix('@') else {
-            continue;
-        };
-        let name = name.trim_end_matches(|c: char| ".,;:!?)]}\"'".contains(c));
-        if !name.is_empty() && !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    names
 }
 
 /// The skills an `@name` mention in `root` reaches: those the runtime gives
