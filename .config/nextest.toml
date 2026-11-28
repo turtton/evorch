@@ -26,3 +26,7 @@ slow-timeout = { period = "420s", terminate-after = 1, grace-period = "30s" }
 [profile.measure]
 inherits = "default"
 slow-timeout = { period = "1800s", terminate-after = 3, grace-period = "60s" }
+
+# CI benchmark (DO NOT MERGE): per-test timings of the CI shards.
+[profile.ci-m2.junit]
+path = "junit.xml"

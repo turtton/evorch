@@ -1,9 +1,6 @@
 name: ci
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
 
 # 同一 PR への連続 push / 更新では古い実行を中断し、runner を無駄遣いしないようにする。
@@ -12,199 +9,9 @@ on:
 # 残る (すべての main push が実行される保証ではない)。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
-  # Aggregate gate, usable as a required check: it succeeds only when every job
-  # it needs succeeded and the per-group test inventories add up to the whole
-  # workspace test set (scripts/verify-test-inventory.sh). main has no required
-  # checks configured today.
-  ci:
-    if: always()
-    needs: [quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests, release-expiry]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Require every job to succeed
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: |
-          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success") | .key' | tr '\n' ' ')
-          if [ -n "$bad" ]; then
-            echo "::error::jobs that did not succeed: $bad"
-            exit 1
-          fi
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: test-inventory-*
-          path: inventories
-      - name: Merge the test inventories of every group and shard
-        run: scripts/verify-test-inventory.sh --expected-sha "$GITHUB_SHA" inventories
-
-  # A feature PR of the single-core migration changes only the files of its scope;
-  # only an integration PR changes the central files (scripts/central-files.txt).
-  # The scope is the head branch name, see scripts/ci-scope-gate.sh. The full
-  # history is fetched so that the merge base with the target branch exists.
-  scope-gate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-      - name: Files of the PR against its scope
-        if: github.event_name == 'pull_request'
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-          BASE_REF: ${{ github.base_ref }}
-        run: scripts/ci-scope-gate.sh --head-ref "$HEAD_REF" --base "origin/$BASE_REF"
-
-  # Cheap checks that need no compilation of the workspace.
-  quick-checks:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Claude compatibility skill offline tools
-        run: node --test .agents/skills/claude-code-compatibility/scripts/inspect-client-hello.test.mjs
-      # The DOM-free half of the web workbench unit tests; the browser-e2e job
-      # runs all of them in Chromium. The assets are plain .js ES modules, which
-      # Node before 22.7 only detects as modules with this flag.
-      - name: Web workbench JavaScript unit tests
-        run: node --experimental-detect-module crates/workbench-web/tests/web/run-node.mjs
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: 1.99.0
-          components: rustfmt
-      - run: cargo fmt --all --check
-      # scripts/setup-cef.sh (CI) and flake.nix (Nix) must fetch the CEF build
-      # that Cargo.lock binds.
-      - name: CEF pin consistency
-        run: scripts/tests/test_setup_cef_pin.sh
-      # The cached CEF extraction is only used when it matches the pinned digest.
-      - name: CEF cache digest
-        run: scripts/tests/test_cef_tree_digest.sh
-      # ADR 0045 §11: workbench-protocol stays free of workspace crates and
-      # workbench-client depends only on it. gui and evorch may not gain
-      # workspace dependencies beyond scripts/workbench-boundary-allowlist.txt.
-      # Reads `cargo metadata`; needs jq, which the ubuntu-latest image provides.
-      - name: Workbench crate boundaries
-        run: |
-          scripts/tests/test_check_workbench_boundaries.sh
-          scripts/check-workbench-boundaries.sh
-      # Central files of the single-core migration (scripts/central-files.txt)
-      # change only in integration PRs; feature PRs are checked against their
-      # scope with `scripts/check-central-files.sh --scope <pr>`. The core-client
-      # desktop gains no reference to internal crates beyond its baseline.
-      - name: Central files and core-client references
-        run: |
-          scripts/tests/test_check_central_files.sh
-          scripts/check-central-files.sh --check-data
-          bash scripts/tests/test_check_admin_publish_boundary.sh
-          bash scripts/check-admin-publish-boundary.sh
-          bash scripts/tests/test_check_q2_boundaries.sh
-          bash scripts/check-q2-boundaries.sh
-          scripts/check-core-client-refs.sh
-      # The sealed product artifact (scripts/product-artifact.sh) accepts only the
-      # distribution's build and refuses a changed, featured or unsealed copy.
-      - name: Product artifact sealing
-        run: scripts/tests/test_product_artifact.sh
-      # The helper's dependency graph (cargo tree --locked, normal and build edges,
-      # every target) must equal the receipt in crates/process-guard/Cargo.toml: a
-      # dependency change otherwise leaves the compat identity of the delivered
-      # helper unchanged.
-      - name: Process guard dependency receipt
-        run: scripts/guard-artifact.sh check-dependencies
-      # Every workspace member is in exactly one test group, and the merge gate
-      # of the group inventories rejects what it should.
-      - name: Test group definition and inventory merge gate
-        run: |
-          scripts/tests/test_verify_test_inventory.sh
-          scripts/verify-test-inventory.sh --check-config
-      # The suites (cache, io, remaining) are listed and run with one filter and
-      # one partition, and no suite is left to a main push.
-      - name: Test suite selection
-        run: scripts/tests/test_run_contract_tests.sh
-      - name: Harness runner and doctest coverage
-        run: python3 scripts/tests/test_check_harness.py
-      # The consumer side of the product artifact: the wait for the producer job
-      # (mock GitHub API, virtual clock, no network) and how the consumer jobs and
-      # the tests matrix are wired to it and to scripts/ci-test-groups.json; the
-      # release-expiry job's cell groups, evidence and CEF environment rule
-      # (mock cargo and guard-cargo).
-      - name: Product artifact wait and CI workflow configuration
-        run: |
-          scripts/tests/test_wait_product_artifact.sh
-          scripts/tests/test_ci_workflow_config.sh
-          scripts/tests/test_release_expiry.sh
-      # The flaky/hang reproduction wrapper, against mock systemd-run/systemctl
-      # (no load, no systemd needed): argument passthrough, --repeat, start
-      # failures, name collisions, timeout and interruption.
-      - name: Reproduction wrapper regression tests
-        run: scripts/tests/test_reproduce_under_limits.sh
-      # The cached .debs of apt-install are only installed after they verify against
-      # the runner's Ubuntu archive keyring, and its failure paths (dpkg, apt-get,
-      # an unverified cache, what may be saved) behave as documented.
-      - name: apt-install cache verification and install paths
-        run: |
-          scripts/tests/test_apt_verify_cache.sh
-          scripts/tests/test_apt_install.sh
-
-  # Whole-workspace lint. `gui` enables CEF by default, so the build links
-  # libcef.so (setup-cef); nothing here starts CEF.
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: 1.99.0
-          components: clippy
-      - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 30
-        uses: ./.github/actions/apt-install
-        with:
-          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
-      - uses: ./.github/actions/setup-cef
-      # One dependency cache serves lint, docs-schema, otel and every test group:
-      # only the cache-save job writes it (main pushes), this job restores it.
-      # The cache action caches target/ recursively, which includes
-      # CARGO_TARGET_DIR below; keep that variable scoped to Cargo steps.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
-          save-if: false
-      - name: Clippy (workspace)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy (core handoff fixtures)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: cargo clippy -p core-instance -p core-launcher --all-targets --features core-instance/recovery-test-support,core-launcher/handoff-test-support --locked -- -D warnings
-      - name: Clippy (event-bus with otel-exporter)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: cargo clippy -p event-bus --all-targets --features otel-exporter --locked -- -D warnings
-      # gui has no non-CEF build any more.
-      - name: GUI refuses to build without CEF
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/tests/test_gui_requires_cef.sh
-      - name: Non-Linux sandbox adapter compiles (aarch64-apple-darwin)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          rustup target add aarch64-apple-darwin
-          cargo check --target aarch64-apple-darwin -p sandbox --lib --locked
-
   # Doctests and the generated config schema artifact: both build the library
   # crates of the whole workspace.
   docs-schema:
@@ -225,6 +32,8 @@ jobs:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
@@ -239,6 +48,25 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
+      # --- CI benchmark (DO NOT MERGE) ---
+      - name: m2 setup (mode, link-time shim, env record)
+        id: m2
+        run: bash .github/ci-m2/setup.sh docs false
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        if: steps.m2.outputs.sccache == 'true'
+        with:
+          tool: sccache
+      - name: m2 sccache restore
+        id: m2-restore
+        if: steps.m2.outputs.sccache == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/sccache
+          key: ci-m2-sccache-docs-${{ steps.m2.outputs.gen }}
+      - name: m2 sccache start
+        if: steps.m2.outputs.sccache == 'true'
+        run: bash .github/ci-m2/sccache-start.sh
+      # --- end CI benchmark ---
       # The doctests start owned children through the library policy: the helper
       # bundle of the sealed product reaches them as EVORCH_PROCESS_GUARD_BUNDLE.
       # `needs: product-artifact` makes the producer's success a precondition, so
@@ -267,7 +95,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         timeout-minutes: 15
-        run: cargo test --workspace --exclude workbench-authority --doc --locked
+        run: cargo test --workspace --exclude workbench-authority --doc --locked --timings
       # 5a-I: the compile-fail doctests of the authority (no literal, serde or public
       # constructor of a verified proof). One invocation of this package alone, so no
       # dev-dependency feature of another package is unified into it. Every
@@ -285,41 +113,24 @@ jobs:
         run: |
           cargo run -q --locked -p config --example dump_schema -- docs/config/evorch-config-v3.schema.json
           git diff --exit-code docs/config/evorch-config-v3.schema.json
-
-  # ADR 0023: retain the opt-in OTLP end-to-end coverage.
-  otel:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      # --- CI benchmark (DO NOT MERGE) ---
+      - name: m2 collect
+        if: always()
+        run: bash .github/ci-m2/collect.sh
+      - name: m2 sccache save
+        if: success() && steps.m2.outputs.sccache == 'true' && steps.m2.outputs.mode == 'save' && steps.m2-restore.outputs.cache-hit != 'true' && false
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          toolchain: 1.99.0
-      - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 30
-        uses: ./.github/actions/apt-install
+          path: ~/.cache/sccache
+          key: ci-m2-sccache-docs-${{ steps.m2.outputs.gen }}
+      - name: m2 upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
-          save-if: false
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: cargo-nextest
-      - name: Event bus otel-exporter tests
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: cargo nextest run -p event-bus --features otel-exporter --locked --no-tests fail
-      - name: Event bus otel-exporter doctests
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        timeout-minutes: 10
-        run: cargo test -p event-bus --features otel-exporter --doc --locked
+          name: ci-m2-docs
+          path: ${{ runner.temp }}/m2-out
+          if-no-files-found: warn
+      # --- end CI benchmark ---
 
   # The shipped evorch-core and the process-guard helper, built together apart from
   # every test build with the arguments of the distribution (flake.nix
@@ -337,6 +148,8 @@ jobs:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
@@ -349,6 +162,29 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-product
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # --- CI benchmark (DO NOT MERGE) ---
+      - name: m2 setup (mode, link-time shim, env record)
+        id: m2
+        run: bash .github/ci-m2/setup.sh product true
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        if: steps.m2.outputs.sccache == 'true'
+        with:
+          tool: sccache
+      - name: m2 sccache restore
+        id: m2-restore
+        if: steps.m2.outputs.sccache == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/sccache
+          key: ci-m2-sccache-product-${{ steps.m2.outputs.gen }}
+      - name: m2 sccache start
+        if: steps.m2.outputs.sccache == 'true'
+        run: bash .github/ci-m2/sccache-start.sh
+      # --- end CI benchmark ---
+      - name: m2 timed product build (same arguments as scripts/product-artifact.sh build)
+        run: |
+          cargo build --locked --release -p evorch-core -p process-guard --bin evorch-core --bin evorch-process-guard --timings
+          bash .github/ci-m2/snap.sh product-build
       - name: Build and seal the product artifact
         run: |
           started=$SECONDS
@@ -379,6 +215,24 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: ${{ runner.temp }}/evorch-product
+      # --- CI benchmark (DO NOT MERGE) ---
+      - name: m2 collect
+        if: always()
+        run: bash .github/ci-m2/collect.sh
+      - name: m2 sccache save
+        if: success() && steps.m2.outputs.sccache == 'true' && steps.m2.outputs.mode == 'save' && steps.m2-restore.outputs.cache-hit != 'true' && true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/sccache
+          key: ci-m2-sccache-product-${{ steps.m2.outputs.gen }}
+      - name: m2 upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-m2-product
+          path: ${{ runner.temp }}/m2-out
+          if-no-files-found: warn
+      # --- end CI benchmark ---
 
   # The workspace test suite, one job per crate group (scripts/ci-test-groups.json
   # is the single definition; the matrix below repeats its group names and shard
@@ -390,7 +244,6 @@ jobs:
   # left to a main push.
   tests:
     name: tests (${{ matrix.group }} ${{ matrix.shard }}/${{ matrix.shards }})
-    needs: scope-gate
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
     permissions:
@@ -417,8 +270,11 @@ jobs:
       # gui/wgpu 系の linking が重いため mold で短縮する。
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
       EVORCH_TEST_INVENTORY_DIR: test-inventory
+      NEXTEST_PROFILE: ci-m2
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       # 2026-10-09 時点の runner は root の空きが約 86G あり、削除 (android だけで
       # 71s) は不要になった。空きが少ない runner でだけ従来どおり削除する。
       - name: Free runner disk space
@@ -453,6 +309,25 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
+      # --- CI benchmark (DO NOT MERGE) ---
+      - name: m2 setup (mode, link-time shim, env record)
+        id: m2
+        run: bash .github/ci-m2/setup.sh runtime ${{ matrix.group == 'runtime' }}
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        if: steps.m2.outputs.sccache == 'true'
+        with:
+          tool: sccache
+      - name: m2 sccache restore
+        id: m2-restore
+        if: steps.m2.outputs.sccache == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/sccache
+          key: ci-m2-sccache-runtime-${{ steps.m2.outputs.gen }}
+      - name: m2 sccache start
+        if: steps.m2.outputs.sccache == 'true'
+        run: bash .github/ci-m2/sccache-start.sh
+      # --- end CI benchmark ---
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
@@ -465,13 +340,24 @@ jobs:
           timeout -k 5s 20s strace -f -qq -e trace=process -o "$RUNNER_TEMP/ptrace-check" true
           test -s "$RUNNER_TEMP/ptrace-check"
           test -c /dev/ptmx
-          cargo build --locked -p evorch --bin evorch
+          cargo build --locked -p evorch --bin evorch --timings
+          bash .github/ci-m2/snap.sh cli-build
           echo "EVORCH_B3_CLI_EXE=$PWD/target/ci-shared/debug/evorch" >> "$GITHUB_ENV"
           echo "EVORCH_B3_BWRAP_EXE=$(command -v bwrap)" >> "$GITHUB_ENV"
           echo "EVORCH_B3_EVIDENCE_DIR=$RUNNER_TEMP/core-sigkill" >> "$GITHUB_ENV"
       # Builds the group's test binaries once and lists every test set; the
       # `ci` job merges these listings. The runs below reuse the binaries. Listing
       # starts no product, so it comes before the product artifact is awaited.
+      - name: m2 timed test build (same selection as the inventory build)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+          M2_GROUP: ${{ matrix.group }}
+        run: |
+          sel=(--locked)
+          while read -r p; do sel+=(-p "$p"); done < <(jq -r --arg g "$M2_GROUP" '.groups[$g].packages[]' scripts/ci-test-groups.json)
+          while read -r f; do sel+=(-F "$f"); done < <(jq -r --arg g "$M2_GROUP" '.groups[$g].features[]?' scripts/ci-test-groups.json)
+          cargo test --no-run --timings "${sel[@]}"
+          bash .github/ci-m2/snap.sh test-build
       - name: Build and list the test inventory
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -513,11 +399,23 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" cache "$EVORCH_TEST_INVENTORY_DIR"
+      - name: m2 keep junit (cache)
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/m2-out/junit"
+          f=$(find target -path '*nextest/ci-m2/junit.xml' | head -1)
+          if [ -n "$f" ]; then cp "$f" "$RUNNER_TEMP/m2-out/junit/cache.xml"; else echo "no junit for cache"; fi
       # scripts/check-io-contracts.sh, again through run-test-group.sh.
       - name: Storage I/O contracts (offline)
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" io "$EVORCH_TEST_INVENTORY_DIR"
+      - name: m2 keep junit (io)
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/m2-out/junit"
+          f=$(find target -path '*nextest/ci-m2/junit.xml' | head -1)
+          if [ -n "$f" ]; then cp "$f" "$RUNNER_TEMP/m2-out/junit/io.xml"; else echo "no junit for io"; fi
       # nextest owns parallelism and the per-test hang watchdog. Every default
       # non-ignored test belongs to exactly one of cache, io and remaining.
       # Opt-in process harness: Linux only, not part of the default inventory.
@@ -535,6 +433,12 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" remaining "$EVORCH_TEST_INVENTORY_DIR"
+      - name: m2 keep junit (remaining)
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/m2-out/junit"
+          f=$(find target -path '*nextest/ci-m2/junit.xml' | head -1)
+          if [ -n "$f" ]; then cp "$f" "$RUNNER_TEMP/m2-out/junit/remaining.xml"; else echo "no junit for remaining"; fi
       # The real ten-second planned-shutdown expiry cells (release test binaries,
       # ignored tests) run in the release-expiry job, not in a shard.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -553,615 +457,24 @@ jobs:
       - name: Report disk usage
         if: always()
         run: df -h /
-
-  # The only writer of the shared dependency cache (key *-ci-workspace-v2) that
-  # every cargo job restores: lint, docs-schema, otel, the test groups,
-  # browser-e2e, cef-e2e and release-expiry. It runs on
-  # main pushes only, so it is never on a PR's critical path and PRs never
-  # crowd the repository's 10GB cache budget. It compiles every dependency
-  # artifact the other jobs need, with each of their own package and feature
-  # selections: the workspace check, the handoff fixtures and the non-Linux
-  # sandbox check (lint), the doctests and the schema example (docs-schema),
-  # the otel-exporter build
-  # (otel), the test binaries of every group in scripts/ci-test-groups.json
-  # (the test jobs share the gui group's selection) and the browser-e2e, cef-e2e and release-expiry
-  # selections, which resolve features differently. It does not run the normal nextest suite (the
-  # doctests above do run). A failing recipe fails the job, and rust-cache does
-  # not save after a failure, so a partial cache is never written. The browser,
-  # CEF and release expiry selections must match the readers' `prepare` and `cargo build`
-  # lines (scripts/tests/test_ci_workflow_config.sh compares them).
-  cache-save:
-    if: github.ref == 'refs/heads/main'
-    needs: product-artifact
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: 1.99.0
-          components: clippy
-      - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 30
-        uses: ./.github/actions/apt-install
-        with:
-          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
-      - uses: ./.github/actions/setup-cef
-      # An exact hit means the cache already holds this lockfile's dependency
-      # artifacts, so the recipe below would only rebuild them and the action ends
-      # with "Cache up-to-date" without saving: the steps that exist for the recipe
-      # are skipped then. Any other output (a partial restore, a miss, no value)
-      # runs every recipe step, as before.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        id: workspace-cache
-        with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
-          save-if: true
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        if: steps.workspace-cache.outputs.cache-hit != 'true'
-        with:
-          tool: cargo-nextest
-      # The doctests run (they start owned children through the library policy), so
-      # they need the same sealed helper bundle as docs-schema.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: steps.workspace-cache.outputs.cache-hit != 'true'
-        with:
-          name: product-core
-          path: ${{ runner.temp }}/product-download
-      - name: Install the sealed product artifact
-        if: steps.workspace-cache.outputs.cache-hit != 'true'
-        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
-      - name: Build the dependencies of every other job
-        if: steps.workspace-cache.outputs.cache-hit != 'true'
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          cargo clippy --workspace --all-targets --locked
-          cargo clippy -p event-bus --all-targets --features otel-exporter --locked
-          cargo clippy -p core-instance -p core-launcher --all-targets --features core-instance/recovery-test-support,core-launcher/handoff-test-support --locked
-          rustup target add aarch64-apple-darwin
-          cargo check --target aarch64-apple-darwin -p sandbox --lib --locked
-          cargo test --workspace --exclude workbench-authority --doc --locked
-          cargo test --locked -p workbench-authority --doc --no-default-features
-          cargo build --locked -p config --example dump_schema
-          cargo nextest list -p event-bus --features otel-exporter --locked > /dev/null
-          for group in $(jq -r '.groups | keys[]' scripts/ci-test-groups.json); do
-            echo "::group::build the test binaries of $group"
-            scripts/run-contract-tests.sh --group "$group" --list default > /dev/null
-            echo "::endgroup::"
-          done
-      # The tests job's support fixtures and the browser-e2e and cef-e2e jobs
-      # resolve features per invocation, differently from the group builds above,
-      # so each is its own invocation (never one workspace-wide feature union).
-      # `prepare` builds and lists the test binaries and runs none of them; its
-      # metadata goes to a directory that is dropped.
-      - name: Build the dependencies of the fixture, browser and CEF test selections
-        if: steps.workspace-cache.outputs.cache-hit != 'true'
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
-          trap 'rm -rf "$warm"' EXIT
-          # One definition of the test name: the env of browser-e2e.
-          HOST_LIFECYCLE_TEST=$(sed -n 's/^ *HOST_LIFECYCLE_TEST: *//p' .github/workflows/ci.yml)
-          test -n "$HOST_LIFECYCLE_TEST"
-          scripts/guard-cargo.sh prepare "$warm/support-1" -p core-instance --features recovery-test-support --locked
-          scripts/guard-cargo.sh prepare "$warm/support-2" -p core-launcher --test handoff --test preflight_regression --features handoff-test-support,core-instance/recovery-test-support --locked
-          scripts/guard-cargo.sh prepare "$warm/browser-1" -p browser --test agent_chromium --test agent_observation
-          scripts/guard-cargo.sh prepare "$warm/browser-2" -p workbench-host --test "$HOST_LIFECYCLE_TEST"
-          scripts/guard-cargo.sh prepare "$warm/browser-3" -p evorch-core --test agent_observation_chromium
-          scripts/guard-cargo.sh prepare "$warm/browser-4" -p workbench-web --test web_ui_chromium
-          scripts/guard-cargo.sh prepare "$warm/browser-5" -p workbench-web --test public_restart_chromium
-          scripts/guard-cargo.sh prepare "$warm/cef-1" -p browser-cef --features cef
-          cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          scripts/guard-cargo.sh prepare "$warm/cef-2" -p evorch-renderer
-          cargo build -p evorch-renderer
-          scripts/guard-cargo.sh prepare "$warm/cef-3" -p evorch-core --features renderer-test-helper --test renderer_owner_cef
-          scripts/guard-cargo.sh prepare "$warm/cef-4" -p core-client-e2e --features gui/cef --test preview_cef
-          scripts/guard-cargo.sh prepare "$warm/cef-5" -p evorch-core --test f4_product_cef --test agent_observation_restart
-          scripts/guard-cargo.sh prepare "$warm/cef-6" -p core-client-e2e --features gui/cef --test agent_observation_gui
-          scripts/guard-cargo.sh prepare "$warm/expiry" -p evorch-core --release --features bootstrap-test-support --test core_expiry --test core_browser_expiry --locked
-      - name: Report disk usage
+      # --- CI benchmark (DO NOT MERGE) ---
+      - name: m2 collect
         if: always()
-        run: |
-          df -h /
-          if [ -d target/ci-shared ]; then
-            du -sh target/ci-shared
-          else
-            echo "target/ci-shared is absent"
-          fi
-
-  # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
-  # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
-  #
-  # フルビルド (Nix package build) は main への push と、Nix に影響する変更を含む
-  # PR だけで走らせる。判定は scripts/nix-build-scope.sh (対象パスと根拠はその
-  # 冒頭コメント)。それ以外の PR は、Nix の cargoArgs と同じ -p/--bin 指定の
-  # 非テスト構成 cargo check で代替する。ci job は workspace 全体を --all-targets
-  # で見るため、dev-dependency が有効化する feature (test-support 等) が混ざり、
-  # -p 単位のビルドでだけ出る不具合 (2026-11-09 の TestSeams 事象) を見逃す。
-  #
-  # Nix のジョブは 4 つに分かれる。check 名 `nix-build` は集約 job が引き継ぐ。
-  #   nix-scope-check   scope 判定と、非 full 時 (と main) の cargo check
-  #   nix-full-default  .#default (CLI と CEF GUI) とその依存、attic client
-  #   nix-full-core     .#evorch-core (default の closure に入らない配布物)
-  #   nix-build         上の 3 つの結果を scripts/nix-build-verdict.sh で判定
-  # full の 2 job は nix-scope-check の結果 (success かつ full=true) だけで始まり、
-  # quick-checks や otel の成否には結合しない (`!cancelled()`): それらが失敗しても
-  # main の Nix build と attic への保存が skip されないようにする。
-  nix-scope-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    outputs:
-      full: ${{ steps.scope.outputs.full }}
-      reason: ${{ steps.scope.outputs.reason }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        run: bash .github/ci-m2/collect.sh
+      - name: m2 sccache save
+        if: success() && steps.m2.outputs.sccache == 'true' && steps.m2.outputs.mode == 'save' && steps.m2-restore.outputs.cache-hit != 'true' && matrix.group == 'runtime' && matrix.shard == 1
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          # The scope check diffs the PR's test merge commit against its first parent.
-          fetch-depth: 2
-      - name: Decide whether the Nix package build is needed
-        id: scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        # A script failure fails the step, and a missing output leaves `full`
-        # empty: the nix-build aggregate treats both as a failure, never as the
-        # cargo-check-only case.
-        run: |
-          set -o pipefail
-          scripts/tests/test_nix_build_scope.sh
-          scripts/tests/test_nix_build_verdict.sh
-          scripts/nix-build-scope.sh | tee -a "$GITHUB_OUTPUT"
-      # Pull requests without Nix-affecting changes run this instead of the
-      # package build. The toolchain comes from the rust-toolchain action (the
-      # nix dev shell would need tailscale, nix and an attic fetch first) and
-      # the dependencies from a rust-cache that pushes to main save. main runs
-      # it too, to keep that cache current; this job is its only writer.
-      - name: Install linker and Claude transport build dependencies
-        if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
-        timeout-minutes: 30
-        uses: ./.github/actions/apt-install
-        with:
-          packages: mold cmake clang libclang-dev ninja-build perl git
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
-        with:
-          toolchain: 1.99.0
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
-        with:
-          shared-key: ${{ runner.os }}-nix-check
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The packages and binaries of shippedCargoArgs in flake.nix (x86_64-linux),
-      # release profile, no tests: the Nix package's build minus code generation.
-      # Keep the two in step.
-      - name: Check the shipped binaries without test configuration
-        if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
-        timeout-minutes: 30
-        env:
-          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-        run: cargo check --locked --release -p evorch -p evorch-core -p process-guard --bin evorch --bin evorch-core --bin evorch-process-guard
-
-  # The CLI and CEF GUI path: the patched attic client, the dependency builds
-  # and the default package. Runs beside nix-full-core.
-  nix-full-default:
-    if: ${{ !cancelled() && needs.nix-scope-check.result == 'success' && needs.nix-scope-check.outputs.full == 'true' }}
-    needs: nix-scope-check
-    runs-on: ubuntu-latest
-    # A cold deps build takes ~35-45 min and the attic push step is capped at 60.
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:nix
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      - name: Setup attic client
-        run: |
-          nix run --inputs-from . nixpkgs#attic-client -- login --set-default home https://attic.taile2777.ts.net "$ATTIC_TOKEN"
-          nix run --inputs-from . nixpkgs#attic-client -- use home
-        env:
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-      - name: Build patched attic client
-        run: |
-          # Build on PRs too so changes to the upload timeout patch are checked.
-          nix build -L .#attic-client --out-link ./result-attic
-      - name: Build CLI dependencies
-        run: nix build -L .#evorch-deps --out-link ./result-deps
-      - name: Cache PR CLI dependencies in attic
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          # Cache completed deps before later builds can fail or be cancelled.
-          if ! ATTIC_PUSH_ATTEMPTS=1 ATTIC_PUSH_TIMEOUT=290s scripts/push-attic.sh ./result-deps; then
-            echo "::warning::PR CLI dependency upload failed or timed out; continuing the build"
-          fi
-      - name: Build CEF dependencies
-        run: nix build -L .#evorch-gui-cef-deps --out-link ./result-cef-deps
-      - name: Cache PR CEF dependencies in attic
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          if ! ATTIC_PUSH_ATTEMPTS=1 ATTIC_PUSH_TIMEOUT=290s scripts/push-attic.sh ./result-cef-deps; then
-            echo "::warning::PR CEF dependency upload failed or timed out; continuing the build"
-          fi
-      # The default package is the CLI from .#evorch plus the CEF GUI on
-      # x86_64-linux (ADR 0034), so one build runs both install checks (CLI
-      # startup, ELF linkage after runtime fixup, the CEF layout). .#evorch
-      # builds no non-CEF GUI there, and its closure is part of the default
-      # package's, so the attic push below covers it.
-      - name: Build and smoke-test flake package in the Nix sandbox
-        run: nix build -L .#default --out-link ./result-default
-      - name: Push to attic
-        if: success() && github.ref == 'refs/heads/main'
-        timeout-minutes: 60
-        run: |
-          # How the runner reaches attic (direct or DERP relay) bounds throughput.
-          timeout 60 sudo tailscale ping -c 3 attic.taile2777.ts.net || true
-          scripts/push-attic.sh ./result-attic ./result-default ./result-deps ./result-cef-deps
-
-  # evorch-core is not in the default package's closure (that one carries the
-  # core of `evorch`), but it is a distribution of its own with its own helper
-  # bundle; its install check (bundle verify and a child through the pinned
-  # helper image) runs only when it is built. It has its own runner, so it does
-  # not see what nix-full-default pushes to attic in the same run: the shared
-  # dependencies may build twice. main uploads the result it builds, with the
-  # patched attic client built here.
-  nix-full-core:
-    if: ${{ !cancelled() && needs.nix-scope-check.result == 'success' && needs.nix-scope-check.outputs.full == 'true' }}
-    needs: nix-scope-check
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:nix
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      - name: Setup attic client
-        run: |
-          nix run --inputs-from . nixpkgs#attic-client -- login --set-default home https://attic.taile2777.ts.net "$ATTIC_TOKEN"
-          nix run --inputs-from . nixpkgs#attic-client -- use home
-        env:
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-      - name: Build and smoke-test the evorch-core package in the Nix sandbox
-        run: nix build -L .#evorch-core --out-link ./result-core
-      # Only main uploads; scripts/push-attic.sh runs the client at
-      # ./result-attic/bin/attic of this runner.
-      - name: Build patched attic client
-        if: github.ref == 'refs/heads/main'
-        run: nix build -L .#attic-client --out-link ./result-attic
-      - name: Push to attic
-        if: success() && github.ref == 'refs/heads/main'
-        timeout-minutes: 60
-        run: |
-          timeout 60 sudo tailscale ping -c 3 attic.taile2777.ts.net || true
-          scripts/push-attic.sh ./result-core
-
-  # The check name that stays: the verdict over the three jobs above.
-  # scripts/nix-build-verdict.sh holds the truth table and its test.
-  nix-build:
-    if: always()
-    needs: [nix-scope-check, nix-full-default, nix-full-core]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Verdict over the Nix jobs
-        env:
-          SCOPE_RESULT: ${{ needs.nix-scope-check.result }}
-          SCOPE_FULL: ${{ needs.nix-scope-check.outputs.full }}
-          DEFAULT_RESULT: ${{ needs.nix-full-default.result }}
-          CORE_RESULT: ${{ needs.nix-full-core.result }}
-        run: scripts/nix-build-verdict.sh
-
-  browser-e2e:
-    # Behind quick-checks: it needs the product artifact for the tests it runs, and
-    # starting next to the producer made this runner wait for it. quick-checks ends
-    # well before the producer does.
-    needs: [scope-gate, quick-checks]
-    # The artifact wait reads this run's jobs (actions: read); nothing else is
-    # granted. The workflow has no top-level permissions.
-    permissions:
-      contents: read
-      actions: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
-    # into its key, so a different set restores nothing. CARGO_TARGET_DIR is set on
-    # the steps that run cargo only.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-      # The host source lifecycle test of O-V1 (crates/workbench-host/tests/<name>.rs,
-      # an ignored test that needs the Chromium found above through CHROME): the
-      # one place to change when O-V1 renames its binary.
-      HOST_LIFECYCLE_TEST: agent_observation_lifecycle
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: 1.99.0
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
-          save-if: false
-      - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 30
-        uses: ./.github/actions/apt-install
-        with:
-          packages: mold cmake clang libclang-dev ninja-build perl git
-      - name: Locate Chrome/Chromium executable
-        run: |
-          CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
-          echo "CHROME=$CHROME_PATH" >> "$GITHUB_ENV"
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: cargo-nextest
-      # The five test selections below are compiled while the product artifact job
-      # is still running (`prepare` compiles and lists, it runs no test). The
-      # listings are dropped: every run after the install prepares again, so what
-      # it executes is bound to the sealed helper bundle.
-      - name: Warm the target of the browser tests (no product needed)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
-          trap 'rm -rf "$warm"' EXIT
-          scripts/guard-cargo.sh prepare "$warm/1" -p browser --test agent_chromium --test agent_observation
-          scripts/guard-cargo.sh prepare "$warm/2" -p workbench-host --test "$HOST_LIFECYCLE_TEST"
-          scripts/guard-cargo.sh prepare "$warm/3" -p evorch-core --test agent_observation_chromium
-          scripts/guard-cargo.sh prepare "$warm/4" -p workbench-web --test web_ui_chromium
-          scripts/guard-cargo.sh prepare "$warm/5" -p workbench-web --test public_restart_chromium
-      # The sealed product closure comes before the first browser test: every run
-      # below is bound to its helper bundle by scripts/guard-cargo.sh. I0 registered
-      # the O-V1 and O-V2 targets; the placeholders only prove the targets are
-      # selected (--no-tests fail), and the second one checks the sealed product
-      # artifact the job downloaded.
-      # The product artifact job runs beside this job (no `needs`): wait for its
-      # success, take this run's artifact, check it was built from this commit,
-      # then verify and install it. Nothing that runs a product test or a product
-      # binary comes before this.
-      - name: Wait for the product artifact job
-        timeout-minutes: 31
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/wait-product-artifact.sh
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: product-core
-          path: ${{ runner.temp }}/product-download
-      - name: Check the product artifact was built from this commit
-        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
-      - name: Install the sealed product artifact
-        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
-      - name: Run agent browser test
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/guard-cargo.sh run -p browser --test agent_chromium --test agent_observation --run-ignored only --success-output immediate --no-tests fail
-      - name: Run the host observation source lifecycle against Chromium
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/guard-cargo.sh run -p workbench-host --test "$HOST_LIFECYCLE_TEST" --run-ignored only --success-output immediate --no-tests fail
-      - name: Run the core observation test against Chromium
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/guard-cargo.sh run -p evorch-core --test agent_observation_chromium --run-ignored only --success-output immediate --no-tests fail
-      - name: Run web workbench browser test
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-          WORKBENCH_WEB_SCREENSHOT_DIR: ${{ github.workspace }}/target/web-ui-screenshots
-        run: scripts/guard-cargo.sh run -p workbench-web --test web_ui_chromium --run-ignored only --success-output immediate --no-tests fail
-      # Registered by the 5a-I integration PR for CW: a placeholder target until the
-      # leaf adds the browser test of the public restart management (the contract
-      # tests over real HTTP are public_restart_contracts).
-      - name: Run the public restart web browser test
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/guard-cargo.sh run -p workbench-web --test public_restart_chromium --run-ignored only --success-output immediate --no-tests fail
-      # D-3a2 B3-08: the sealed product core navigates a real Chromium through
-      # browser_navigate, then only the core is SIGKILLed. Chromium trusts the
-      # cell's loopback CA only through an NSS database that the cell builds
-      # under its own temporary HOME with certutil (libnss3-tools).
-      - name: Install certutil for the Chromium core SIGKILL cell
-        timeout-minutes: 30
-        uses: ./.github/actions/apt-install
-        with:
-          packages: libnss3-tools
-      - name: Real Chromium core SIGKILL cell
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
-          scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=chromium_p) | test(=chromium_stopped_p) | test(=chromium_navigating_p) | test(=classify_control_t) | test(=harness_timeout_control_t) | test(=harness_panic_control_t)' --run-ignored only --success-output immediate --no-tests fail
-      # The real Chromium navigation then ten-second expiry cells (D-3a2 B3-08b,
-      # release test binary) run in the release-expiry job.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          path: ~/.cache/sccache
+          key: ci-m2-sccache-runtime-${{ steps.m2.outputs.gen }}
+      - name: m2 upload
         if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: core-browser-sigkill-chromium
+          name: ci-m2-runtime-${{ matrix.group }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/m2-out
           if-no-files-found: warn
-          path: ${{ runner.temp }}/core-browser-sigkill
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: web-ui-screenshots
-          if-no-files-found: warn
-          path: target/web-ui-screenshots
-
-  # ADR 0034 B: the real CEF HTML preview. setup-cef installs the pinned
-  # distribution (scripts/setup-cef.sh) that every job's build now links; this
-  # job also starts it. The lint of the CEF feature is the workspace clippy in
-  # the lint job, which builds gui with its default features.
-  cef-e2e:
-    needs: scope-gate
-    # The artifact wait reads this run's jobs (actions: read); nothing else is
-    # granted. The workflow has no top-level permissions.
-    permissions:
-      contents: read
-      actions: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    # One job runs all six real-CEF invocations: the browser-cef isolation and
-    # recovery tests, the renderer helper and the core renderer owner (the engine
-    # half), then the core-client page, the product tests and the GUI observation
-    # (the client half). It warms and builds both
-    # halves while the producer runs and writes no cache (cache-save does).
-    # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
-    # into its key. CARGO_TARGET_DIR is set on the steps that run cargo only.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: 1.99.0
-      # Restore only: the cache-save job writes the shared dependency cache.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
-          save-if: false
-      - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 30
-        uses: ./.github/actions/apt-install
-        with:
-          packages: mold cmake clang libclang-dev ninja-build perl git
-      # CEF reads its resources beside the libcef.so it was loaded from.
-      - uses: ./.github/actions/setup-cef
-        with:
-          runtime-path: full
-      # Chromium's sandbox needs unprivileged user namespaces; the SUID
-      # chrome-sandbox is never used (ADR 0034).
-      - name: Allow unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      # The GUI observation test uses the same browser as the Chromium job, so the
-      # runner's Chromium is located here as well as CEF.
-      - name: Locate Chrome/Chromium executable
-        run: |
-          CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
-          echo "CHROME=$CHROME_PATH" >> "$GITHUB_ENV"
-      # The real-CEF selections of this cell are compiled, in their own order and
-      # with their own helper/renderer builds, while the product artifact job is
-      # still running (`prepare` compiles and lists, it runs no test). The listings
-      # are dropped: every run after the install builds and prepares again, so what
-      # it executes is bound to the sealed helper bundle.
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: cargo-nextest
-      - name: Warm the target of the engine real-CEF tests (no product needed)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
-          trap 'rm -rf "$warm"' EXIT
-          scripts/guard-cargo.sh prepare "$warm/1" -p browser-cef --features cef
-          cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          scripts/guard-cargo.sh prepare "$warm/2" -p evorch-renderer
-          cargo build -p evorch-renderer
-          scripts/guard-cargo.sh prepare "$warm/3" -p evorch-core --features renderer-test-helper --test renderer_owner_cef
-      - name: Warm the target of the client real-CEF tests (no product needed)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
-          trap 'rm -rf "$warm"' EXIT
-          cargo build -p evorch-renderer
-          cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          scripts/guard-cargo.sh prepare "$warm/4" -p core-client-e2e --features gui/cef --test preview_cef
-          scripts/guard-cargo.sh prepare "$warm/5" -p evorch-core --test f4_product_cef --test agent_observation_restart
-          scripts/guard-cargo.sh prepare "$warm/6" -p core-client-e2e --features gui/cef --test agent_observation_gui
-      # The product artifact job runs beside this job (no `needs`): wait for its
-      # success, take this run's artifact, check it was built from this commit,
-      # then verify and install it. Nothing that runs a product test or a product
-      # binary comes before this.
-      - name: Wait for the product artifact job
-        timeout-minutes: 31
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/wait-product-artifact.sh
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: product-core
-          path: ${{ runner.temp }}/product-download
-      - name: Check the product artifact was built from this commit
-        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
-      - name: Install the sealed product artifact
-        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
-      - name: CEF offline isolation and crash recovery
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/guard-cargo.sh run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
-      # The real renderer binary beside the CEF helper it starts (16a-2). The
-      # ignored tests are the only ones that run real CEF in the renderer
-      # process; the ordinary matrix runs the fake helper instead.
-      - name: Out-of-process renderer helper through real CEF
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          scripts/guard-cargo.sh run -p evorch-renderer --run-ignored all --success-output immediate --no-tests fail
-      # Production core owner tests replace the installation placeholder in F1.
-      - name: Core renderer owner through real CEF
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          cargo build -p evorch-renderer
-          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
-          scripts/guard-cargo.sh run -p evorch-core --features renderer-test-helper --test renderer_owner_cef --run-ignored only --success-output immediate --no-tests fail
-      # Stage 16b PR V: the core-client page against a production core and the real
-      # helper (conversation -> artifact -> preview -> inspection; exit and kill).
-      - name: Core-client page through real CEF
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          cargo build -p evorch-renderer
-          cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
-          scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test preview_cef --run-ignored only --success-output immediate --no-tests fail
-      # Registered by I0 for F4-E, O-V3 and O-V2, and V0-reg for public restart.
-      # The placeholders prove only that
-      # the targets are selected (--no-tests fail) and that the sealed product
-      # artifact reached this job; the real tests replace them.
-      - name: Product tests through real CEF
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/guard-cargo.sh run -p evorch-core --test f4_product_cef --test agent_observation_restart --test public_restart_product --run-ignored only --success-output immediate --no-tests fail
-      - name: GUI observation through real CEF and Chromium
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only --success-output immediate --no-tests fail
-      # D-3a2 B3-08: the sealed product core opens an artifact through the real
-      # renderer and CEF (render_artifact, inspect_artifact), then only the core
-      # is SIGKILLed.
-      - name: Real CEF renderer core SIGKILL cell
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          cargo build -p evorch-renderer
-          cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
-          export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
-          scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=cef_p) | test(=cef_stopped_p) | test(=cef_navigating_p) | test(=renderer_launch_failure_p) | test(=cef_init_failure_p)' --run-ignored only --success-output immediate --no-tests fail
-      # The real CEF navigation then ten-second expiry cells (D-3a2 B3-08b,
-      # release test binary) run in the release-expiry job.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: core-browser-sigkill-cef
-          if-no-files-found: warn
-          path: ${{ runner.temp }}/core-browser-sigkill
+      # --- end CI benchmark ---
 
   # The real ten-second planned-shutdown expiry cells (B3-07, D-3a2 B3-08b):
   # six ignored tests of two RELEASE test binaries of evorch-core, `core_expiry`
@@ -1180,7 +493,6 @@ jobs:
   # worker and Chromium cells keep the loader path they had before. This job only
   # restores the shared dependency cache; cache-save builds the same selections.
   release-expiry:
-    needs: scope-gate
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
     permissions:
@@ -1197,6 +509,8 @@ jobs:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
@@ -1212,6 +526,25 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: mold cmake clang libclang-dev ninja-build perl git libnss3-tools
+      # --- CI benchmark (DO NOT MERGE) ---
+      - name: m2 setup (mode, link-time shim, env record)
+        id: m2
+        run: bash .github/ci-m2/setup.sh release true
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        if: steps.m2.outputs.sccache == 'true'
+        with:
+          tool: sccache
+      - name: m2 sccache restore
+        id: m2-restore
+        if: steps.m2.outputs.sccache == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/sccache
+          key: ci-m2-sccache-release-${{ steps.m2.outputs.gen }}
+      - name: m2 sccache start
+        if: steps.m2.outputs.sccache == 'true'
+        run: bash .github/ci-m2/sccache-start.sh
+      # --- end CI benchmark ---
       # CEF reads its resources beside the libcef.so it was loaded from. Nothing is
       # written to GITHUB_ENV: the paths are step outputs, used below.
       - uses: ./.github/actions/setup-cef
@@ -1236,6 +569,12 @@ jobs:
       # (`prepare` compiles and lists, it runs no cell): both release test binaries
       # in one invocation, whose listing must be exactly the cells the three groups
       # below select; then the debug helper and renderer the CEF cells start.
+      - name: m2 timed release build (same selection as prepare below)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          cargo test --no-run --timings --release --locked -p evorch-core --features bootstrap-test-support --test core_expiry --test core_browser_expiry
+          bash .github/ci-m2/snap.sh release-build
       - name: Build the release expiry test binaries and check their cells (no product needed)
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -1247,8 +586,10 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
           CEF_PATH: ${{ steps.cef.outputs.cef-path }}
         run: |
-          cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          cargo build -p evorch-renderer
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper --timings
+          bash .github/ci-m2/snap.sh cef-helper
+          cargo build -p evorch-renderer --timings
+          bash .github/ci-m2/snap.sh renderer
       # The product artifact job runs beside this job (no `needs`): wait for its
       # success, take this run's artifact, check it was built from this commit,
       # then verify and install it. Nothing that runs a cell comes before this, and
@@ -1295,3 +636,21 @@ jobs:
           name: release-expiry-evidence
           if-no-files-found: error
           path: ${{ runner.temp }}/release-expiry-evidence
+      # --- CI benchmark (DO NOT MERGE) ---
+      - name: m2 collect
+        if: always()
+        run: bash .github/ci-m2/collect.sh
+      - name: m2 sccache save
+        if: success() && steps.m2.outputs.sccache == 'true' && steps.m2.outputs.mode == 'save' && steps.m2-restore.outputs.cache-hit != 'true' && true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/sccache
+          key: ci-m2-sccache-release-${{ steps.m2.outputs.gen }}
+      - name: m2 upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-m2-release
+          path: ${{ runner.temp }}/m2-out
+          if-no-files-found: warn
+      # --- end CI benchmark ---
