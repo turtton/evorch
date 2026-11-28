@@ -107,6 +107,15 @@ rejects_with "a browser cell no group selects" "do not cover the ignored cells e
   env FAKE_CELLS="$all_cells core_browser_expiry:expiry_new_t" PATH="$work/bin:$PATH" "$tree_script" check-inventory "$work/meta"
 rejects_with "a binary without any cell" "no ignored cell" \
   env FAKE_CELLS="" PATH="$work/bin:$PATH" "$tree_script" check-inventory "$work/meta"
+for lost in core_expiry:expiry_capture_first core_expiry:expiry_signal_first core_browser_expiry:expiry_chromium_t \
+  core_browser_expiry:expiry_chromium_stopped_t core_browser_expiry:expiry_cef_t core_browser_expiry:expiry_cef_stopped_t; do
+  rejects_with "the cell $lost missing from the binaries" "the ignored cells are not the expected six" \
+    env FAKE_CELLS="${all_cells/$lost/}" PATH="$work/bin:$PATH" "$tree_script" check-inventory "$work/meta"
+done
+rejects_with "a seventh cell in core_expiry" "the ignored cells are not the expected six" \
+  env FAKE_CELLS="$all_cells core_expiry:expiry_extra" PATH="$work/bin:$PATH" "$tree_script" check-inventory "$work/meta"
+rejects_with "a renamed cell" "the ignored cells are not the expected six" \
+  env FAKE_CELLS="${all_cells/expiry_signal_first/expiry_signal_second}" PATH="$work/bin:$PATH" "$tree_script" check-inventory "$work/meta"
 rejects_with "a lost CEF cell pair" "group cef selects no cell" \
   env FAKE_CELLS='core_expiry:expiry_capture_first core_browser_expiry:expiry_chromium_t' PATH="$work/bin:$PATH" "$tree_script" check-inventory "$work/meta"
 rejects_with "a lost worker cell pair" "group core selects no cell" \

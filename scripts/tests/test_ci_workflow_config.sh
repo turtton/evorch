@@ -567,6 +567,13 @@ check_release_expiry_script() { # <release-expiry.sh>
     '--cargo-metadata "$dir/cargo.json" --binaries-metadata "$dir/default-binaries.json"'
     '--run-ignored only "${extra[@]}" --message-format json'
     '*-$cell-*-death.json'
+    'evorch-core::core_expiry expiry_capture_first \'
+    'evorch-core::core_expiry expiry_signal_first \'
+    'evorch-core::core_browser_expiry expiry_chromium_t \'
+    'evorch-core::core_browser_expiry expiry_chromium_stopped_t \'
+    'evorch-core::core_browser_expiry expiry_cef_t \'
+    'evorch-core::core_browser_expiry expiry_cef_stopped_t \'
+    '[[ "$all" != "$(expected_cells)" ]]'
   )
   for want in "${wants[@]}"; do
     grep -qF -- "$want" "$s" || { echo "release-expiry.sh lacks: $want" >&2; bad=1; }
@@ -838,6 +845,12 @@ mutate expiry-filter.sh 's/ | test(=expiry_cef_stopped_t)//' "$script"
 rejects "a CEF group that lost a cell" check_release_expiry_script "$work/expiry-filter.sh"
 mutate expiry-compile.sh 's/^  cargo nextest list /  cargo build --release\n  cargo nextest list /' "$script"
 rejects "an expiry script that compiles" check_release_expiry_script "$work/expiry-compile.sh"
+for cell in expiry_capture_first expiry_signal_first expiry_chromium_t expiry_chromium_stopped_t expiry_cef_t expiry_cef_stopped_t; do
+  mutate "expiry-expected-$cell.sh" "/^    evorch-core::core_[a-z_]* $cell \\\\$/d" "$script"
+  rejects "an expected-cell list without $cell" check_release_expiry_script "$work/expiry-expected-$cell.sh"
+done
+mutate expiry-no-expected.sh 's/\[\[ "\$all" != "\$(expected_cells)" \]\]/false/' "$script"
+rejects "an inventory check that does not compare the expected cells" check_release_expiry_script "$work/expiry-no-expected.sh"
 mutate expiry-evidence.sh 's/-death.json/-x.json/' "$script"
 rejects "an expiry script that does not need the death evidence" check_release_expiry_script "$work/expiry-evidence.sh"
 

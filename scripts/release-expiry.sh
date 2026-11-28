@@ -18,9 +18,11 @@
 #   cef       the two CEF cells of core_browser_expiry (the real renderer and
 #             helper, EVORCH_RENDERER_EXE, CEF on the loader path)
 #
-# check-inventory   Lists the ignored tests of both binaries and fails unless the
-#                   groups are non-empty, disjoint and together exactly that
-#                   list: a cell nobody selects, or selects twice, is an error.
+# check-inventory   Lists the ignored tests of both binaries and fails unless they
+#                   are exactly the six expected cells (expected_cells below) and
+#                   the groups are non-empty, disjoint and together exactly that
+#                   list: a cell that vanishes, one nobody selects and one selected
+#                   twice are all errors.
 #                   It writes <metadata-dir>/cells/<group> (one cell per line).
 # run               Runs one group with `--run-ignored only --test-threads 1
 #                   --no-tests fail` (the nextest timeout overrides of
@@ -33,6 +35,19 @@ cd "$(dirname "$0")/.."
 
 guard_cargo=${EVORCH_RELEASE_EXPIRY_GUARD_CARGO:-scripts/guard-cargo.sh}
 groups=(core chromium cef)
+
+# The ignored cells the binaries must list, `binary-id<TAB>test`: all six, by name.
+# A cell that vanishes (or appears) is a change to make here, not a silent pass.
+expected_cells() {
+  printf '%s\t%s\n' \
+    evorch-core::core_expiry expiry_capture_first \
+    evorch-core::core_expiry expiry_signal_first \
+    evorch-core::core_browser_expiry expiry_chromium_t \
+    evorch-core::core_browser_expiry expiry_chromium_stopped_t \
+    evorch-core::core_browser_expiry expiry_cef_t \
+    evorch-core::core_browser_expiry expiry_cef_stopped_t \
+    | LC_ALL=C sort
+}
 
 die() { echo "release-expiry: $*" >&2; exit 1; }
 
@@ -88,6 +103,13 @@ check_inventory() { # <metadata-dir>
     die 'the groups do not cover the ignored cells exactly'
   fi
   echo "the groups cover the $(wc -l <<< "$all" | tr -d ' ') ignored cells exactly once"
+  if [[ "$all" != "$(expected_cells)" ]]; then
+    echo "expected cells the binaries do not list:" >&2
+    comm -13 <(sort <<< "$all") <(expected_cells) | sed 's/^/  /' >&2
+    echo "cells the binaries list that are not expected:" >&2
+    comm -23 <(sort <<< "$all") <(expected_cells) | sed 's/^/  /' >&2
+    die 'the ignored cells are not the expected six'
+  fi
 }
 
 run_group() { # <metadata-dir> <group> <evidence-root>
