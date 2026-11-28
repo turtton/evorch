@@ -3180,6 +3180,7 @@ mod launch_splash;
 mod many_subagents;
 mod new_chat;
 mod pull_requests;
+mod queued_inputs;
 mod read_panes;
 mod side_commands;
 mod skills;

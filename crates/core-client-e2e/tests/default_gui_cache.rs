@@ -190,6 +190,9 @@ impl Core {
         .unwrap()
         .runtime
         .with_run_store(runtime::RunStore::open(&storage_config, bridge.handle()).unwrap());
+        runtime.set_thread_scratch(Arc::new(runtime::scratch::ThreadScratch::at(
+            dir.path().join("scratch"),
+        )));
         let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
             .with_event_bus(bus.clone())
             .with_team_writer(bridge.handle());
@@ -959,5 +962,379 @@ async fn a_side_question_held_at_the_provider_joins_conflicts_and_cancels() {
 
     actions.send(Action::Shutdown).await.unwrap();
     window.await.expect("the actor does not panic");
+    core.finish();
+}
+
+// Edit and Restore of queued follow-ups (ADR 0045 E7) over the real core, socket and client
+// actor. A follow-up is queued while the first turn is held at the provider; the window is
+// then rebuilt, and everything it needs to edit or restore the input comes from the core.
+
+/// An actor over a new connection, with the state it keeps. Dropped with `Action::Shutdown`.
+async fn window(
+    core: &Core,
+) -> (
+    tokio::sync::mpsc::Sender<Action>,
+    Arc<Mutex<Shared>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (actions, rx) = tokio::sync::mpsc::channel(64);
+    let shared = Arc::new(Mutex::new(Shared::default()));
+    let task = tokio::spawn(serve(
+        core.new_launcher(),
+        rx,
+        shared.clone(),
+        egui::Context::default(),
+    ));
+    connected(&shared).await;
+    (actions, shared, task)
+}
+
+/// Waits for the client's state to satisfy `ready`; the wait is for its change notices.
+async fn until(shared: &Arc<Mutex<Shared>>, what: &str, ready: impl Fn(&Shared) -> bool) {
+    let changed = shared.lock().unwrap().changed.clone();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let notification = changed.notified();
+            tokio::pin!(notification);
+            notification.as_mut().enable();
+            if ready(&shared.lock().unwrap()) {
+                return;
+            }
+            notification.await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the client's state never showed {what}"));
+}
+
+fn receipt_in(
+    shared: &Shared,
+    id: &str,
+    state: workbench_protocol::views::InputReceiptState,
+) -> Option<workbench_protocol::views::InputReceipt> {
+    shared
+        .cache
+        .receipts
+        .get(id)
+        .filter(|receipt| receipt.state == state)
+        .cloned()
+}
+
+async fn protocol_client(core: &Core, name: &str) -> WorkbenchClient {
+    let mut config = ClientConfig::new(
+        ClientId::new(name).unwrap(),
+        BuildInfo {
+            name: "test".into(),
+            version: "1".into(),
+            revision: None,
+        },
+    );
+    // Uploads are conversation commands, which a client asks for explicitly.
+    config
+        .optional_capabilities
+        .push(workbench_protocol::handshake::Capability::Conversation);
+    WorkbenchClient::connect(
+        UnixTransport::connect(&core.instance.socket).await.unwrap(),
+        config,
+    )
+    .await
+    .unwrap()
+}
+
+async fn read_draft(
+    client: &WorkbenchClient,
+    submission: &str,
+) -> workbench_protocol::namespaces::conversation::InputDraft {
+    let QueryReply::Conversation(workbench_protocol::namespaces::ConversationReply::InputDraft(
+        draft,
+    )) = client
+        .query(Query::Conversation(
+            workbench_protocol::namespaces::ConversationQuery::GetInputDraft(
+                workbench_protocol::namespaces::conversation::GetInputDraft {
+                    thread: ThreadId::new("thread").unwrap(),
+                    submission_id: SubmissionId::new(submission).unwrap(),
+                },
+            ),
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("the words of the input");
+    };
+    draft
+}
+
+/// Uploads a small file of `media_type` to the thread and returns its reference id.
+async fn upload(
+    client: &WorkbenchClient,
+    name: &str,
+    media_type: &str,
+) -> workbench_protocol::ids::AttachmentId {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let result = |reply: workbench_protocol::commands::CommandReply| match reply.result.map(|r| *r)
+    {
+        Some(CommandResult::Conversation(result)) => result,
+        other => panic!("expected a conversation result, got {other:?}"),
+    };
+    let begun = client
+        .command(Command::Conversation(
+            ConversationCommand::BeginAttachment {
+                project: ProjectId::new("project").unwrap(),
+                thread: ThreadId::new("thread").unwrap(),
+                client_upload_id: format!("upload-{name}"),
+                filename: name.into(),
+                media_type_hint: media_type.into(),
+                byte_length: 4,
+            },
+        ))
+        .await
+        .unwrap();
+    let workbench_protocol::conversation::ConversationResult::AttachmentBegun { upload_id, .. } =
+        result(begun)
+    else {
+        panic!("the upload begins");
+    };
+    client
+        .command(Command::Conversation(
+            ConversationCommand::AppendAttachment {
+                upload_id: upload_id.clone(),
+                offset: 0,
+                data_base64: STANDARD.encode(b"data"),
+            },
+        ))
+        .await
+        .unwrap();
+    let finished = client
+        .command(Command::Conversation(
+            ConversationCommand::FinishAttachment { upload_id },
+        ))
+        .await
+        .unwrap();
+    let workbench_protocol::conversation::ConversationResult::AttachmentFinished(reference) =
+        result(finished)
+    else {
+        panic!("the upload finishes");
+    };
+    reference.id
+}
+
+// Given: a follow-up queued behind a turn held at the provider
+// When: the window is rebuilt, the follow-up is read back, taken back and sent again edited
+//       under a new id
+// Then: the withdrawn text never reaches the model, and the next request extends the
+//       first one with only the edited text (an independent prefix check on the bodies the
+//       mock received, whose cache is derived from them)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edited_queued_input_adds_only_its_new_text_to_the_model_prefix() {
+    let (gate, arrived) = mock_openai::ResponseGate::new();
+    let release = ReleaseOnDrop(gate.clone());
+    let mut core = Core::start(
+        vec![
+            ScriptedResponse::text_stream("first", "mock-model", ["hello"]).with_gate(gate),
+            ScriptedResponse::text_stream("second", "mock-model", ["edited answer"]),
+        ],
+        &[],
+    )
+    .await;
+    let (actions, _shared, first_window) = window(&core).await;
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::CreateExecution(chat(
+                "one",
+                "first prompt",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+        .await
+        .unwrap();
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::SendChat(chat(
+                "queued",
+                "draft follow-up",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    actions.send(Action::Shutdown).await.unwrap();
+    tokio::time::timeout(WAIT, first_window)
+        .await
+        .expect("the actor ends when the window is closed")
+        .expect("the actor does not panic");
+
+    // A window built afterwards knows nothing of the input but what the core tells it.
+    let (actions, shared, window) = window(&core).await;
+    actions
+        .send(Action::History(
+            ThreadId::new("thread").unwrap(),
+            None,
+            false,
+        ))
+        .await
+        .unwrap();
+    use workbench_protocol::views::InputReceiptState::{Accepted, Withdrawn};
+    until(&shared, "the queued follow-up with its preview", |s| {
+        receipt_in(s, "queued", Accepted).is_some_and(|r| r.preview.is_some())
+    })
+    .await;
+    let queued = receipt_in(&shared.lock().unwrap(), "queued", Accepted).unwrap();
+    assert_eq!(queued.preview.as_ref().unwrap().text, "draft follow-up");
+
+    let client = protocol_client(&core, "e7-edit").await;
+    let draft = read_draft(&client, "queued").await;
+    assert_eq!(
+        (
+            draft.text.as_str(),
+            draft.image_count,
+            draft.attachment_count
+        ),
+        ("draft follow-up", 0, 0)
+    );
+    client
+        .command(Command::Conversation(
+            ConversationCommand::WithdrawFollowUp(workbench_protocol::commands::WithdrawFollowUp {
+                thread: ThreadId::new("thread").unwrap(),
+                run: queued.run.clone().unwrap(),
+                submission_id: SubmissionId::new("queued").unwrap(),
+            }),
+        ))
+        .await
+        .unwrap();
+    until(&shared, "the follow-up taken back", |s| {
+        receipt_in(s, "queued", Withdrawn).is_some_and(|r| r.preview.is_none())
+    })
+    .await;
+
+    release.0.release();
+    turn_completed(&mut core.turns).await;
+    // The edited text is a new input under a new id.
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::SendChat(chat(
+                "queued-edited",
+                "edited follow-up",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    turn_completed(&mut core.turns).await;
+
+    let requests: Vec<_> = core
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.path.contains("completions"))
+        .collect();
+    assert_eq!(requests.len(), 2, "the taken-back input made no turn");
+    assert_append_only(CacheProtocol::OpenAi, &requests[0].body, &requests[1].body).unwrap();
+    let texts = |request: &mock_openai::RecordedRequest| user_texts(&request.body).join("\n");
+    assert!(!texts(&requests[0]).contains("follow-up"));
+    assert!(
+        !texts(&requests[1]).contains("draft follow-up"),
+        "the taken-back text was never sent"
+    );
+    assert!(texts(&requests[1]).contains("edited follow-up"));
+
+    actions.send(Action::Shutdown).await.unwrap();
+    tokio::time::timeout(WAIT, window)
+        .await
+        .expect("the actor ends when the window is closed")
+        .expect("the actor does not panic");
+    core.finish();
+}
+
+// Given: a follow-up with an image and a file, queued behind a held turn, which the core then
+//        marks `Unknown` as it does for a run that no live incarnation can read
+// When: a new window reads the receipts and asks for the words
+// Then: the receipt shows its preview and counts, and the words come back whole with the
+//       number of images to attach again; no attachment is returned
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_input_is_restorable_by_a_new_window_with_its_attachment_counts() {
+    let (gate, arrived) = mock_openai::ResponseGate::new();
+    let release = ReleaseOnDrop(gate.clone());
+    let core = Core::start(
+        vec![ScriptedResponse::text_stream("first", "mock-model", ["hello"]).with_gate(gate)],
+        &[],
+    )
+    .await;
+    let (actions, _shared, first_window) = window(&core).await;
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::CreateExecution(chat(
+                "one",
+                "first prompt",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+        .await
+        .unwrap();
+    let client = protocol_client(&core, "e7-restore").await;
+    let image = upload(&client, "shot.png", "image/png").await;
+    let notes = upload(&client, "notes.txt", "text/plain").await;
+    let mut follow_up = chat("queued", "look at the screenshot");
+    follow_up.attachments = vec![image, notes];
+    let accepted = client
+        .command(Command::Conversation(ConversationCommand::SendChat(
+            follow_up,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(accepted.disposition, CommandDisposition::Accepted);
+    let run = accepted.run_id.unwrap();
+    actions.send(Action::Shutdown).await.unwrap();
+    tokio::time::timeout(WAIT, first_window)
+        .await
+        .expect("the actor ends when the window is closed")
+        .expect("the actor does not panic");
+    core._bridge
+        .handle()
+        .mark_host_inputs_unknown(run.as_str(), "the core restarted")
+        .unwrap();
+
+    let (actions, shared, window) = window(&core).await;
+    actions
+        .send(Action::History(
+            ThreadId::new("thread").unwrap(),
+            None,
+            false,
+        ))
+        .await
+        .unwrap();
+    use workbench_protocol::views::InputReceiptState::Unknown;
+    until(&shared, "the unknown input with its preview", |s| {
+        receipt_in(s, "queued", Unknown).is_some_and(|r| r.preview.is_some())
+    })
+    .await;
+    let preview = receipt_in(&shared.lock().unwrap(), "queued", Unknown)
+        .unwrap()
+        .preview
+        .unwrap();
+    assert_eq!(
+        (
+            preview.text.as_str(),
+            preview.image_count,
+            preview.attachment_count
+        ),
+        ("look at the screenshot", 1, 2)
+    );
+    let draft = read_draft(&protocol_client(&core, "e7-restore-2").await, "queued").await;
+    assert_eq!(draft.text, "look at the screenshot");
+    assert_eq!(draft.state, Unknown);
+    assert!(!draft.text.contains('/'), "no attachment path in the words");
+
+    drop(release);
+    actions.send(Action::Shutdown).await.unwrap();
+    tokio::time::timeout(WAIT, window)
+        .await
+        .expect("the actor ends when the window is closed")
+        .expect("the actor does not panic");
     core.finish();
 }

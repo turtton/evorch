@@ -21,6 +21,7 @@ mod public_restart_product;
 use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
 use product_exec::artifact::ProductArtifact;
 use serde_json::Value;
+use workbench_protocol::views::InputReceiptState;
 
 fn messages(request: &Value) -> &Vec<Value> {
     request["messages"].as_array().expect("chat messages")
@@ -82,4 +83,37 @@ fn an_unopened_lane_graph_survives_public_restart_with_its_cache_and_report_clos
 #[ignore = "role: the reaper of one supervised family (product_exec::reaper)"]
 fn f4p_family_reaper() {
     product_exec::reaper::run();
+}
+
+// A person's follow-up that the run ended without reading is dropped, and the person can
+// restore its words. That must still hold on the successor of a planned restart, which is
+// told nothing by the test: the receipt, its preview and the words come from the successor's
+// own storage and wire.
+#[test]
+fn a_dropped_follow_up_is_restorable_on_the_successor_of_a_public_restart() {
+    let artifact = ProductArtifact::require();
+    let evidence = public_restart_product::drive_queued_input(&artifact);
+    assert!(
+        evidence.epoch_after > evidence.epoch_before,
+        "the follow-up was read from the successor"
+    );
+    let queued = evidence.queued.expect("the scenario read the follow-up");
+
+    let receipt = queued.receipt.expect("the successor lists the follow-up");
+    assert_eq!(receipt.state, InputReceiptState::Dropped);
+    let preview = receipt.preview.expect("a dropped input shows its preview");
+    assert_eq!(
+        (
+            preview.text.as_str(),
+            preview.truncated,
+            preview.image_count,
+            preview.attachment_count
+        ),
+        ("words to edit later", false, 0, 0)
+    );
+    // Restore: the words come back whole, for the same input and run.
+    let draft = queued.draft.expect("the successor gives the words back");
+    assert_eq!(draft.text, "words to edit later");
+    assert_eq!(draft.state, InputReceiptState::Dropped);
+    assert_eq!(Some(&draft.run), receipt.run.as_ref());
 }

@@ -203,6 +203,7 @@ fn epoch_replacement_keeps_human_input_and_deduplicates_thread_events() {
         Draft {
             text: "unsent".into(),
             revision: 5,
+            ..Default::default()
         },
     );
     shared.attachment_drafts.insert(

@@ -467,6 +467,7 @@ fn action_name(action: &Action) -> String {
         Action::Upload { .. } => "upload".into(),
         Action::Feature(action) => format!("{:?} request", action.feature),
         Action::Data(_) => "data".into(),
+        Action::Receipts(_) => "receipts".into(),
         Action::Reconnect => "reconnect".into(),
         Action::Shutdown => "shutdown".into(),
     }

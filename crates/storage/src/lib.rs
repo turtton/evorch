@@ -113,8 +113,10 @@ pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, Diagnost
 pub use entity::CatalogUpdateRecord;
 pub use error::{FailureClass, ReplaySecretFinding, StorageError};
 pub use host_input::{
-    HostChatSubmission, HostChatSubmissionState, HostInputOrigin, HostInputProvenance,
-    HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
+    HOST_INPUT_EDIT_TEXT_BYTES, HOST_INPUT_PREVIEW_BYTES, HostChatSubmission,
+    HostChatSubmissionEdit, HostChatSubmissionState, HostInputDraft, HostInputOrigin,
+    HostInputPreview, HostInputProvenance, HostInputReceipt, HostInputStatus, HostInputTransition,
+    HostInputWrite,
 };
 pub use maintenance::offline::{
     ExclusiveLeases, RecoveryStartupComplete, SharedLeases, improvement_lease, reclaim_lease,

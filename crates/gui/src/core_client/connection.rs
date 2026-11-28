@@ -2,6 +2,7 @@
 //! schedules a stop. Only explicit human actions can issue state-changing wire
 //! commands, and a command with a lost reply is reconciled, never replayed.
 mod data;
+mod queue;
 use super::auto_reconnect::{self, AutoReconnect, LiveCoreBackoff};
 use super::disconnect_log::{Episode, SessionEnd};
 use super::features::data::DataAction;
@@ -56,6 +57,8 @@ pub enum Action {
     /// `Shared::features`. The feature gets no connection of its own.
     Feature(FeatureAction),
     Data(DataAction),
+    /// Read a thread's input receipts again (the retry of a read that failed).
+    Receipts(ThreadId),
     Reconnect,
     Shutdown,
 }
@@ -514,13 +517,9 @@ pub async fn serve(
                                     }),
                                 }
                                 // Receipts belong to the thread, not to one run of it.
-                                let mut cursor = None;
-                                while run.is_none() && let Ok(QueryReply::Conversation(ConversationReply::InputReceipts(page))) = client.query(Query::Conversation(ConversationQuery::GetInputReceipts(workbench_protocol::queries::ThreadQuery { thread: thread.clone(), page: PageRequest { cursor, ..Default::default() } }))).await {
-                                    cursor = page.next_cursor;
-                                    update(&shared, &ctx, |s| { for receipt in page.items { s.cache.receipts.insert(receipt.submission_id.to_string(), receipt); } });
-                                    if cursor.is_none() { break; }
-                                }
+                                if run.is_none() && !older { queue::read_receipts(&client, &shared, &ctx, thread).await; }
                             }
+                            Action::Receipts(thread) => queue::read_receipts(&client, &shared, &ctx, thread).await,
                             Action::Body(id) => {
                                 match body(&client, id.clone()).await {
                                     Ok(text) => update(&shared, &ctx, |s| { s.cache.bodies.insert(id.to_string(), text); }),
@@ -1141,8 +1140,7 @@ async fn accepted(
             && let Some(draft) = s.drafts.get_mut(&thread)
             && draft.revision == revision
         {
-            draft.text.clear();
-            draft.revision += 1;
+            draft.clear();
         }
         s.status = reply_error.unwrap_or_else(|| {
             match reply.disposition {
@@ -1477,6 +1475,7 @@ mod tests {
             super::super::Draft {
                 text: "not written".into(),
                 revision: 3,
+                ..Default::default()
             },
         );
         shared.lock().unwrap().sending.insert("t".into());
@@ -1534,6 +1533,7 @@ mod tests {
                 super::super::Draft {
                     text: "/compaction".into(),
                     revision: 2,
+                    ..Default::default()
                 },
             );
             state.sending.insert("t".into());
@@ -1590,6 +1590,7 @@ mod tests {
                 super::super::Draft {
                     text: "/goal ship it, and more".into(),
                     revision: 3,
+                    ..Default::default()
                 },
             );
             state.sending.insert("t".into());
@@ -1655,6 +1656,7 @@ mod tests {
                 super::super::Draft {
                     text: "/run fix it".into(),
                     revision: 2,
+                    ..Default::default()
                 },
             );
             state.sending.insert("t".into());

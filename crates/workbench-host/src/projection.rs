@@ -907,6 +907,9 @@ impl Projection {
             ConversationQuery::ReadCommittedHistory(q) => Ok(ConversationReply::CommittedHistory(
                 self.bodies.history(&self.runtime, &self.pager, q)?,
             )),
+            ConversationQuery::GetInputDraft(q) => Ok(ConversationReply::InputDraft(
+                queries::input_draft::read(&self.runtime, q)?,
+            )),
             ConversationQuery::GetInputReceipts(q) => self.with_models(|m| {
                 Ok(ConversationReply::InputReceipts(
                     self.page_of(

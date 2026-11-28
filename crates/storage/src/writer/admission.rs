@@ -8,7 +8,7 @@ pub(super) fn scope(command: &Command) -> Option<Option<String>> {
         Command::AppendHostInputAccepted(_, _, _, receipt, _) => {
             Some(Some(format!("r:{}", receipt.run_id)))
         }
-        Command::RecordHostChatSubmission(submission, _) => {
+        Command::RecordHostChatSubmission(submission, _, _) => {
             Some(Some(format!("r:{}", submission.run_id)))
         }
         // G3/G4: the destination of an uncommitted binding is not yet

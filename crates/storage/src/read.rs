@@ -346,6 +346,30 @@ impl Database {
         crate::repo::host_chat_submission::for_ids(&self.conn, submission_ids)
     }
 
+    /// Previews of the submissions among `submission_ids` that have edit data. Selects the
+    /// preview columns only; call it for the inputs a client can still edit or restore.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn host_input_previews(
+        &self,
+        submission_ids: &[String],
+    ) -> Result<Vec<crate::HostInputPreview>, StorageError> {
+        crate::repo::host_chat_submission::previews(&self.conn, submission_ids)
+    }
+
+    /// The words of one human submission for editing, with its receipt state. `None` when
+    /// there is no such submission with edit data or its run was deleted.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn host_input_draft(
+        &self,
+        submission_id: &str,
+    ) -> Result<Option<crate::HostInputDraft>, StorageError> {
+        crate::repo::host_chat_submission::draft(&self.conn, submission_id)
+    }
+
     /// The runs among `run_ids` whose thread was deleted; a deleted run stays listed after
     /// its rows are reclaimed.
     ///

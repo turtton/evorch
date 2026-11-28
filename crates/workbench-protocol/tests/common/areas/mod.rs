@@ -14,6 +14,7 @@ use workbench_protocol::queries::{Query, QueryReply};
 pub mod artifacts;
 pub mod auth;
 pub mod browser;
+pub mod conversation;
 pub mod diagnostics;
 pub mod evaluation;
 pub mod execution;
@@ -52,6 +53,7 @@ impl AreaSamples {
 pub fn all() -> Vec<AreaSamples> {
     vec![
         workspace::samples(),
+        conversation::samples(),
         mcp::samples(),
         execution::samples(),
         teams::samples(),

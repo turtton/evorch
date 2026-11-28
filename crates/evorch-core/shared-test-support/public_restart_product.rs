@@ -34,11 +34,21 @@ use workbench_protocol::{
     handshake::{BuildInfo, LocalSurface},
     ids::*,
     namespaces::{
-        ConversationCommand, ExecutionEvent,
+        ConversationCommand, ConversationQuery, ConversationReply, ExecutionCommand,
+        ExecutionEvent,
+        conversation::{GetInputDraft, InputDraft},
         lifecycle::{AdminId, AdminOperationState},
     },
-    views::RunPhase,
+    queries::{PageRequest, Query, QueryReply, ThreadQuery},
+    views::{InputReceipt, InputReceiptState, RunPhase},
 };
+
+/// What the successor says of a follow-up the run left unread before the restart.
+pub struct QueuedAfter {
+    pub receipt: Option<InputReceipt>,
+    /// The words read by id, or the refusal's code.
+    pub draft: Result<InputDraft, workbench_protocol::errors::ErrorCode>,
+}
 
 pub struct Evidence {
     pub pid_before: i32,
@@ -55,6 +65,8 @@ pub struct Evidence {
     pub extra_artifact_processes: usize,
     pub lifetime_free_while_running: bool,
     pub receipt_state: AdminOperationState,
+    /// Set by [`drive_queued_input`]: the follow-up as the successor shows it.
+    pub queued: Option<QueuedAfter>,
 }
 
 /// The mock joins its workers on drop, so a held response must be let go on every exit path.
@@ -160,6 +172,17 @@ fn ready_line(line: &str) -> Option<Value> {
 
 /// Starts the product, runs the whole scenario and takes the product back.
 pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
+    drive(artifact, in_flight, false)
+}
+
+/// [`drive_with`] for a run held at the provider with a follow-up queued behind it and then
+/// stopped, so the core drops the follow-up unread. The restart has to carry that over: the
+/// follow-up is read from the successor, over its own wire, after the restart.
+pub fn drive_queued_input(artifact: &ProductArtifact) -> Evidence {
+    drive(artifact, true, true)
+}
+
+fn drive(artifact: &ProductArtifact, in_flight: bool, queued: bool) -> Evidence {
     let env = IsolatedEnv::new();
     let (gate, arrivals) = ResponseGate::new();
     let first = ScriptedResponse::text_stream("turn-1", "mock-model", ["first"]);
@@ -217,6 +240,36 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
         } else {
             until_waiting(&desktop, &mut events, &run).await;
         }
+        if queued {
+            let queued = desktop
+                .command(chat("queued", "words to edit later"))
+                .await
+                .expect("the core accepts the follow-up");
+            assert_eq!(queued.disposition, CommandDisposition::Accepted);
+            // The run ends with the follow-up unread: the core drops it, which is the state
+            // a person restores it from. The wait is for the core's own events.
+            desktop
+                .command(Command::Execution(ExecutionCommand::StopChat(
+                    ThreadTarget {
+                        thread: ThreadId::new("restart-thread").unwrap(),
+                    },
+                )))
+                .await
+                .expect("the core stops the run");
+            let (thread, id) = (
+                ThreadId::new("restart-thread").unwrap(),
+                SubmissionId::new("queued").unwrap(),
+            );
+            while receipt_of(&desktop, &thread, &id)
+                .await
+                .is_none_or(|r| r.state != InputReceiptState::Dropped)
+            {
+                events
+                    .next()
+                    .await
+                    .expect("the subscription lasts until the follow-up is dropped");
+            }
+        }
 
         let admin_client = connect(&ready.socket, "scenario-cli", LocalSurface::Cli).await;
         let admin = RestartAdmin::new(&admin_client);
@@ -238,7 +291,7 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
         // waiting for the safe point instead of cutting the turn.
         let status = admin.status().await.unwrap();
         assert!(
-            workbench_client::restart::intent::cancellable(status.status.phase),
+            queued || workbench_client::restart::intent::cancellable(status.status.phase),
             "restart phase {:?}",
             status.status.phase
         );
@@ -289,7 +342,7 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
         .and_then(|guard| guard.lifetime_available())
         .unwrap_or(false);
 
-    let epoch_after = runtime.block_on(async {
+    let (epoch_after, queued_after) = runtime.block_on(async {
         let desktop = connect(&socket, "scenario-desktop-2", LocalSurface::Desktop).await;
         let epoch_after = desktop.server_hello().instance_epoch.0;
         let mut events = desktop
@@ -299,6 +352,9 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
             })
             .await
             .unwrap();
+        if queued {
+            return (epoch_after, Some(observe_queued(&desktop).await));
+        }
         // The successor reports Ready before it has finished restoring the run, so a
         // client may meet the run in the snapshot or by its event, never not at all.
         if !waiting_in_snapshot(&events, &run) {
@@ -316,7 +372,7 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
             );
             until_waiting(&desktop, &mut events, &run).await;
         }
-        epoch_after
+        (epoch_after, None)
     });
     let requests: Vec<Value> = provider
         .chat_requests()
@@ -341,6 +397,63 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
         extra_artifact_processes,
         lifetime_free_while_running,
         receipt_state,
+        queued: queued_after,
+    }
+}
+
+/// The follow-up dropped before the restart, as the successor lists it and gives its words
+/// back, asked over the successor's wire only.
+async fn observe_queued(client: &WorkbenchClient) -> QueuedAfter {
+    let thread = ThreadId::new("restart-thread").unwrap();
+    let submission = SubmissionId::new("queued").unwrap();
+    let receipt = receipt_of(client, &thread, &submission).await;
+    let draft = match client
+        .query(Query::Conversation(ConversationQuery::GetInputDraft(
+            GetInputDraft {
+                thread: thread.clone(),
+                submission_id: submission.clone(),
+            },
+        )))
+        .await
+    {
+        Ok(QueryReply::Conversation(ConversationReply::InputDraft(draft))) => Ok(draft),
+        Err(workbench_client::ClientError::Server(error)) => Err(error.code),
+        other => panic!("unexpected answer to the words of the input: {other:?}"),
+    };
+    QueuedAfter { receipt, draft }
+}
+
+/// The receipt of `submission` among the thread's, read page by page.
+async fn receipt_of(
+    client: &WorkbenchClient,
+    thread: &ThreadId,
+    submission: &SubmissionId,
+) -> Option<InputReceipt> {
+    let mut cursor = None;
+    loop {
+        let Ok(QueryReply::Conversation(ConversationReply::InputReceipts(page))) = client
+            .query(Query::Conversation(ConversationQuery::GetInputReceipts(
+                ThreadQuery {
+                    thread: thread.clone(),
+                    page: PageRequest {
+                        cursor: cursor.take(),
+                        ..Default::default()
+                    },
+                },
+            )))
+            .await
+        else {
+            panic!("the successor lists the thread's input receipts");
+        };
+        if let Some(found) = page
+            .items
+            .into_iter()
+            .find(|r| &r.submission_id == submission)
+        {
+            return Some(found);
+        }
+        cursor = page.next_cursor;
+        cursor.as_ref()?;
     }
 }
 

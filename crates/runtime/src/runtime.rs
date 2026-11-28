@@ -3092,7 +3092,8 @@ impl AgentRuntime {
     }
 
     /// Keep a fingerprint of an accepted chat message so a resend under the same
-    /// submission id can be recognised after a restart. The first record for an id stays;
+    /// submission id can be recognised after a restart, with the `edit` data a client needs
+    /// to edit or restore it. The first record for an id stays;
     /// returns whether this call stored it. Without storage nothing is kept.
     ///
     /// # Errors
@@ -3100,10 +3101,11 @@ impl AgentRuntime {
     pub fn record_host_chat_submission(
         &self,
         submission: &storage::HostChatSubmission,
+        edit: Option<&storage::HostChatSubmissionEdit>,
     ) -> Result<bool, storage::StorageError> {
         let _retention_admission = self.retention_admission();
         match self.shared.run_store.get() {
-            Some(store) => store.handle.record_host_chat_submission(submission),
+            Some(store) => store.handle.record_host_chat_submission(submission, edit),
             None => Ok(false),
         }
     }

@@ -132,6 +132,14 @@ pub(crate) fn collect(
                         let receipts = db.host_input_receipt_headers(&run.run_id)?;
                         let ids: Vec<_> = receipts.iter().map(|r| r.prompt_id.clone()).collect();
                         let submissions = db.host_chat_submissions(&ids)?;
+                        // Only inputs a person can still edit or restore show a preview;
+                        // no other state, and no word of any input, is selected here.
+                        let queued: Vec<_> = receipts
+                            .iter()
+                            .filter(|r| super::input_draft::is_queued(r.status))
+                            .map(|r| r.prompt_id.clone())
+                            .collect();
+                        let previews = db.host_input_previews(&queued)?;
                         for receipt in receipts {
                             let Some(sent_by) = submissions.iter().find_map(|s| match s {
                                 storage::HostChatSubmissionState::Live(s)
@@ -172,6 +180,10 @@ pub(crate) fn collect(
                                     },
                                     revision: Revision(0),
                                     sent_by,
+                                    preview: previews
+                                        .iter()
+                                        .find(|p| p.submission_id == receipt.prompt_id)
+                                        .map(super::input_draft::preview_view),
                                 };
                                 view.revision = revision(&view);
                                 m.receipts.insert(receipt.prompt_id, view);

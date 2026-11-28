@@ -75,6 +75,9 @@ pub enum Effect {
     /// "Link PR" or "Ignore" pressed on a suggestion shown on a tool card, for the pull
     /// requests feature.
     PullRequestChip(super::features::pull_requests::PullRequestChipAction),
+    /// Edit or Restore pressed on a queued follow-up, or the failure of one dismissed, for the
+    /// execution feature.
+    Queue(super::features::execution::queued_input::Intent),
     ResetLayout,
     ThemeSettings,
     /// ⚙ → Model Settings, Features or Config file, and what a button elsewhere opens.
@@ -517,6 +520,11 @@ impl TabViewer for Viewer<'_, '_> {
                         pull_request,
                         chips,
                         btw,
+                        queue: self
+                            .pass
+                            .execution()
+                            .map(|e| e.queue_view())
+                            .unwrap_or_default(),
                     },
                     root.as_ref(),
                     self.effects,

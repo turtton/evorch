@@ -594,6 +594,7 @@ fn attachment_chips_wrap_inside_a_narrow_composer_from_the_first_frame() {
                 crate::core_client::Draft {
                     text: "see".into(),
                     revision: 1,
+                    ..Default::default()
                 },
             );
         }

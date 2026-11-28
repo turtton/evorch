@@ -368,6 +368,16 @@ impl Database {
         crate::repo::threads::thread_of_run(&self.conn, run_id)
     }
 
+    /// The id of the thread a run belongs to, by the rules of [`Self::thread_of_run`] but in
+    /// statements that each stand alone: no transaction is opened. A run whose thread or
+    /// run is deleted, that names no thread or whose parent chain is broken has none.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn resolve_thread_of_run(&self, run_id: &str) -> Result<Option<String>, StorageError> {
+        crate::repo::threads::resolve_thread_id(&self.conn, run_id)
+    }
+
     /// Every run of a thread: its bound runs and conversation roots, and the
     /// runs delegated from them, ordered by depth then run ID.
     ///

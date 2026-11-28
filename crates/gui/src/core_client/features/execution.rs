@@ -21,6 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 mod card;
+pub mod queued_input;
 mod side_commands;
 
 pub use side_commands::{BtwCardView, CardState};
@@ -42,7 +43,8 @@ use workbench_protocol::{
     handshake::Capability,
     ids::{OperationId, PageCursor, RunId, ThreadId},
     namespaces::{
-        ExecutionCommand, ExecutionEvent, ExecutionQuery, ExecutionReply,
+        ConversationCommand, ConversationQuery, ExecutionCommand, ExecutionEvent, ExecutionQuery,
+        ExecutionReply,
         execution::{
             CancelBtw, GetBtw, GoalView, RunDetail, RunDetailsQuery, RunRef, RunScope,
             ThreadExecution,
@@ -85,6 +87,10 @@ enum Pending {
         kind: ReadKind,
         generation: u64,
     },
+    /// The words of a queued input, for Edit or Restore.
+    QueuedRead,
+    /// The withdrawal that an Edit makes before its words reach the composer.
+    QueuedWithdraw,
 }
 
 /// A cursor chain is read serially and published as one prefix. Keeping the old
@@ -122,6 +128,7 @@ pub struct ExecutionFeature {
     more_requested: bool,
     plan: PlanState,
     btw: side_commands::SideQuestions,
+    queued: queued_input::QueuedInputs,
     /// The Plan tab was drawn since the last `maintain`.
     plan_drawn: bool,
     /// The Plan tab was drawn before the last `maintain`: its reads are due.
@@ -186,6 +193,29 @@ impl ExecutionFeature {
     /// The side question's card was closed.
     pub fn close_btw(&mut self, thread: &ThreadId) {
         self.btw.close(thread);
+    }
+
+    /// What the queue of follow-ups shows of the Edit or Restore in progress.
+    pub fn queue_view(&self) -> queued_input::QueueView {
+        self.queued.view()
+    }
+
+    /// Edit or Restore pressed in the queue, or its failure dismissed.
+    pub fn queue_intent(&mut self, intent: queued_input::Intent) {
+        self.queued.intent(intent);
+    }
+
+    /// The frame compares the composer with what the operation started from.
+    pub fn queue_poll(
+        &mut self,
+        current: impl Fn(&ThreadId) -> queued_input::Guard,
+    ) -> queued_input::Polled {
+        let poll = self.queued.poll(current);
+        queued_input::Polled {
+            poll,
+            wants_pass: self.queued.wants_pass(),
+            receipts: self.queued.take_receipts_wanted(),
+        }
     }
 
     pub fn btw_card(&self, thread: &ThreadId) -> Option<BtwCardView<'_>> {
@@ -340,6 +370,30 @@ impl ExecutionFeature {
                 _ => continue,
             };
             self.command(ctx, label, command);
+        }
+    }
+
+    fn send_queued(&mut self, ctx: &mut FeatureContext<'_>) {
+        let Some(outgoing) = self.queued.next_request(ctx.has(Capability::InputReceipts)) else {
+            return;
+        };
+        match outgoing {
+            queued_input::Outgoing::Read(query) => {
+                let tag = self.tag(Pending::QueuedRead);
+                ctx.query(
+                    tag,
+                    Query::Conversation(ConversationQuery::GetInputDraft(query)),
+                );
+                self.queued.sent(tag);
+            }
+            queued_input::Outgoing::Withdraw(withdraw) => {
+                let tag = self.tag(Pending::QueuedWithdraw);
+                ctx.command(
+                    tag,
+                    Command::Conversation(ConversationCommand::WithdrawFollowUp(withdraw)),
+                );
+                self.queued.sent(tag);
+            }
         }
     }
 
@@ -649,6 +703,7 @@ impl Feature for ExecutionFeature {
     fn reset(&mut self) {
         self.shell_jobs.reset();
         self.btw.reset();
+        self.queued.reset();
         // What came from the core is dropped and asked for again; `pending`
         // stays, because a tag may still be answered.
         let loaded_pages = self.loaded_pages;
@@ -810,6 +865,19 @@ impl Feature for ExecutionFeature {
             (Pending::Btw { thread, operation }, FeatureReply::Query(reply)) => {
                 self.btw.read(&thread, &operation, reply);
             }
+            (Pending::QueuedRead, FeatureReply::Query(reply)) => {
+                self.queued.read_reply(tag, reply);
+            }
+            (Pending::QueuedRead, FeatureReply::Command(_)) => {}
+            (Pending::QueuedWithdraw, reply) => {
+                // The resolved reply for this tag follows after the reconnect.
+                if self
+                    .queued
+                    .withdraw_reply(tag, queued_input::withdraw_result(reply))
+                {
+                    self.pending.insert(tag, Pending::QueuedWithdraw);
+                }
+            }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
                 self.status = format!("{label}: accepted");
                 self.runs_stale = true;
@@ -840,8 +908,11 @@ impl Feature for ExecutionFeature {
                 Query::Execution(ExecutionQuery::ReadShellOutput(request)),
             );
         }
+        self.queued
+            .maintain(ctx.selection().thread.as_ref(), ctx.cache());
         if visibility.available {
             self.send_btw(ctx);
+            self.send_queued(ctx);
         }
         let selected = ctx.selection().thread.clone();
         if selected != self.thread {

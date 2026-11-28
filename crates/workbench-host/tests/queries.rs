@@ -1028,13 +1028,16 @@ fn input_receipt_query_and_changed_event_share_provenance_and_hide_tombstones() 
         .unwrap();
     f.store
         .handle()
-        .record_host_chat_submission(&storage::HostChatSubmission {
-            submission_id: "submission".into(),
-            fingerprint: "digest".into(),
-            run_id: "run-1".into(),
-            provenance_json: serde_json::to_string(&common::web()).unwrap(),
-            accepted_at_ns: 1,
-        })
+        .record_host_chat_submission(
+            &storage::HostChatSubmission {
+                submission_id: "submission".into(),
+                fingerprint: "digest".into(),
+                run_id: "run-1".into(),
+                provenance_json: serde_json::to_string(&common::web()).unwrap(),
+                accepted_at_ns: 1,
+            },
+            None,
+        )
         .unwrap();
     let query = Query::Conversation(ConversationQuery::GetInputReceipts(ThreadQuery {
         thread: ThreadId::new("thread-1").unwrap(),

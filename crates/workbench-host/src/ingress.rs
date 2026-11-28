@@ -998,17 +998,17 @@ impl CommandHost {
     /// as unverifiable instead of being answered with the original run.
     fn remember_submission(&mut self, chat: &ChatInput, run_id: &str, provenance: &Provenance) {
         let fingerprint = chat_fingerprint(chat);
-        let stored =
-            self.service
-                .runtime()
-                .record_host_chat_submission(&storage::HostChatSubmission {
-                    submission_id: chat.submission_id.clone(),
-                    fingerprint: fingerprint.clone(),
-                    run_id: run_id.to_owned(),
-                    provenance_json: serde_json::to_string(provenance).unwrap_or_default(),
-                    accepted_at_ns: storage::system_time_to_ns(std::time::SystemTime::now())
-                        .unwrap_or_default(),
-                });
+        let stored = self.service.runtime().record_host_chat_submission(
+            &storage::HostChatSubmission {
+                submission_id: chat.submission_id.clone(),
+                fingerprint: fingerprint.clone(),
+                run_id: run_id.to_owned(),
+                provenance_json: serde_json::to_string(provenance).unwrap_or_default(),
+                accepted_at_ns: storage::system_time_to_ns(std::time::SystemTime::now())
+                    .unwrap_or_default(),
+            },
+            crate::queries::input_draft::edit_data(chat).as_ref(),
+        );
         if let Err(error) = stored {
             tracing::warn!(%error, submission = %chat.submission_id, "could not persist chat submission");
         }

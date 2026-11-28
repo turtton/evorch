@@ -260,3 +260,103 @@ pub enum HostChatSubmissionState {
     /// message is returned; a physical reclaim removes the row altogether.
     Deleted(String),
 }
+
+/// Longest preview kept with a submission, in bytes.
+pub const HOST_INPUT_PREVIEW_BYTES: usize = 1024;
+/// Longest words kept for editing, in bytes.
+pub const HOST_INPUT_EDIT_TEXT_BYTES: usize = 256 * 1024;
+const HOST_INPUT_EDIT_ATTACHMENTS: u32 = 1024;
+
+/// What a client needs to edit or restore a submission after it was accepted: a short
+/// preview for lists and, when the message carried attachments, the words as typed.
+///
+/// Written once with the submission record. Without attachments the receipt's own text
+/// is those words, so none is kept here. Attachment bytes, paths and ids are never kept:
+/// only how many there were.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostChatSubmissionEdit {
+    /// The first [`HOST_INPUT_PREVIEW_BYTES`] bytes of the masked words, cut at a character.
+    pub preview: String,
+    pub preview_truncated: bool,
+    pub image_count: u32,
+    pub attachment_count: u32,
+    /// The words before attachment paths were added; `Some` exactly when there are
+    /// attachments (possibly empty). A row without edit data cannot be edited.
+    pub original_text: Option<String>,
+}
+
+impl HostChatSubmissionEdit {
+    /// Builds the edit data of a message: `text` as typed and its attachment counts. The
+    /// preview is the *masked* words cut at a character: the whole text is masked first, so a
+    /// secret that crosses the cut is not left half in the preview.
+    /// `None` when the words are too large to keep for editing.
+    pub fn new(text: &str, image_count: u32, attachment_count: u32) -> Option<Self> {
+        if text.len() > HOST_INPUT_EDIT_TEXT_BYTES {
+            return None;
+        }
+        let masked = secret_guard::SecretRedactor::from_env().redact(text).text;
+        let mut end = masked.len().min(HOST_INPUT_PREVIEW_BYTES);
+        while !masked.is_char_boundary(end) {
+            end -= 1;
+        }
+        Some(Self {
+            preview: masked[..end].to_owned(),
+            preview_truncated: end < masked.len(),
+            image_count,
+            attachment_count,
+            original_text: (attachment_count > 0).then(|| text.to_owned()),
+        })
+    }
+
+    /// # Errors
+    /// Rejects oversized or inconsistent edit data and secret-bearing text.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        let bad = |what: &str| {
+            StorageError::Serialization(format!("host chat submission edit data: {what}"))
+        };
+        if self.preview.len() > HOST_INPUT_PREVIEW_BYTES {
+            return Err(bad("preview is too large"));
+        }
+        if self.image_count > self.attachment_count
+            || self.attachment_count > HOST_INPUT_EDIT_ATTACHMENTS
+        {
+            return Err(bad("inconsistent attachment counts"));
+        }
+        if self.original_text.is_some() != (self.attachment_count > 0) {
+            return Err(bad("words are kept exactly when there are attachments"));
+        }
+        if let Some(original) = &self.original_text
+            && original.len() > HOST_INPUT_EDIT_TEXT_BYTES
+        {
+            return Err(bad("words are too large"));
+        }
+        let guard = crate::entity::SecretGuard::from_env();
+        guard.check_text("host_chat_submission", "preview", &self.preview)?;
+        if let Some(original) = &self.original_text {
+            guard.check_text("host_chat_submission", "original_text", original)?;
+        }
+        Ok(())
+    }
+}
+
+/// The list-sized part of a submission's edit data, for one id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostInputPreview {
+    pub submission_id: String,
+    pub preview: String,
+    pub preview_truncated: bool,
+    pub image_count: u32,
+    pub attachment_count: u32,
+}
+
+/// One submission's words for editing, read by id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostInputDraft {
+    pub run_id: String,
+    pub status: HostInputStatus,
+    /// `None` when the words exceed [`HOST_INPUT_EDIT_TEXT_BYTES`]; they are not read then.
+    pub text: Option<String>,
+    pub text_bytes: u64,
+    pub image_count: u32,
+    pub attachment_count: u32,
+}
