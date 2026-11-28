@@ -1,5 +1,6 @@
 use super::{Pager, error, storage_error, text};
 use event_bus::{EventKind, MessageEvent};
+use presentation::Resolve;
 use runtime::AgentRuntime;
 use std::{collections::VecDeque, sync::Mutex};
 use workbench_protocol::{
@@ -166,9 +167,22 @@ impl Bodies {
         &self,
         thread: &ThreadId,
         raw: RawMessage,
+        resolve: &mut Resolve<'_>,
     ) -> Result<Option<CommittedMessage>, WorkbenchError> {
         let Ok(run) = RunId::new(raw.run) else {
             return Ok(None);
+        };
+        let presentation = match (raw.role, &raw.presentation) {
+            (MessageRole::Artifacts, Some(row)) => {
+                Some(Box::new(presentation::view(row, resolve)?))
+            }
+            (MessageRole::Artifacts, None) => {
+                return Err(error(
+                    ErrorCode::StorageUnavailable,
+                    "an artifacts row has no presentation",
+                ));
+            }
+            _ => None,
         };
         let content = if let Some(input) = raw.input {
             self.register(
@@ -195,6 +209,7 @@ impl Bodies {
             role: raw.role,
             content,
             tool,
+            presentation,
         }))
     }
     pub fn changes(
@@ -212,7 +227,7 @@ impl Bodies {
                     && db.thread(&thread.thread_id)?.is_some()
                     && let Ok(thread) = ThreadId::new(thread.thread_id)
                 {
-                    match self.message(&thread, message) {
+                    match self.message(&thread, message, &mut |refs| db.resolve_bodies(refs)) {
                         Ok(Some(message)) => visit(message),
                         Ok(None) => {}
                         // The stream cannot carry the row, so clients read the history again
@@ -307,22 +322,37 @@ impl Bodies {
                     .ok_or_else(|| error(ErrorCode::NotFound, "history is unavailable"))?;
                 let key = format!("{key}#{}", super::revision(&raw).get());
                 let page = match q.direction {
-                    workbench_protocol::queries::HistoryDirection::Forward => {
-                        pager.page(&key, &raw, &q.page, Revision(high_water as u64))?
-                    }
-                    workbench_protocol::queries::HistoryDirection::Backward => {
-                        pager.page_backward(&key, &raw, &q.page, Revision(high_water as u64))?
-                    }
+                    workbench_protocol::queries::HistoryDirection::Forward => pager.page_sized(
+                        &key,
+                        &raw,
+                        &q.page,
+                        Revision(high_water as u64),
+                        RawMessage::budget_len,
+                    )?,
+                    workbench_protocol::queries::HistoryDirection::Backward => pager
+                        .page_backward_sized(
+                            &key,
+                            &raw,
+                            &q.page,
+                            Revision(high_water as u64),
+                            RawMessage::budget_len,
+                        )?,
                 };
                 (page, Some(reason))
             }
         };
-        // The read snapshot is closed before selected bodies enter the capability cache.
+        // The read snapshot is closed before selected bodies enter the capability cache and
+        // before an artifacts row reads its own few bodies.
+        let mut resolve = |refs: &[storage::BodyRef]| {
+            runtime
+                .with_storage_reader(|db| db.resolve_bodies(refs))?
+                .ok_or_else(|| storage::StorageError::Io("history is unavailable".into()))
+        };
         let result = Page {
             items: page
                 .items
                 .into_iter()
-                .filter_map(|raw| self.message(&q.thread, raw).transpose())
+                .filter_map(|raw| self.message(&q.thread, raw, &mut resolve).transpose())
                 .collect::<Result<_, _>>()?,
             next_cursor: page.next_cursor,
             snapshot_revision: page.snapshot_revision,
@@ -458,6 +488,7 @@ fn message_role(role: storage::history::Role) -> MessageRole {
         Role::Reasoning => MessageRole::Reasoning,
         Role::Notice => MessageRole::Notice,
         Role::Error => MessageRole::Error,
+        Role::Artifacts => MessageRole::Artifacts,
     }
 }
 
@@ -470,6 +501,7 @@ fn storage_role(role: MessageRole) -> storage::history::Role {
         MessageRole::Reasoning => Role::Reasoning,
         MessageRole::Notice => Role::Notice,
         MessageRole::Error => Role::Error,
+        MessageRole::Artifacts => Role::Artifacts,
     }
 }
 
@@ -524,6 +556,22 @@ struct RawMessage {
     input: Option<InputBody>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool: Option<storage::history::ToolRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presentation: Option<storage::history::PresentationRow>,
+}
+impl RawMessage {
+    /// What the row may weigh once it is a view: a presentation expands past the tokens it
+    /// is stored with, so its public bound is charged on top. Indexed history charges the
+    /// same.
+    fn budget_len(&self) -> usize {
+        serde_json::to_vec(self)
+            .expect("serializable message")
+            .len()
+            + self
+                .presentation
+                .as_ref()
+                .map_or(0, storage::history::rows::presentation_public_bound)
+    }
 }
 #[derive(Clone, serde::Serialize)]
 struct InputBody {
@@ -542,6 +590,7 @@ impl From<storage::history::read::Descriptor> for RawMessage {
                 bytes: i.bytes,
             }),
             tool: value.tool,
+            presentation: value.presentation,
         }
     }
 }
@@ -666,6 +715,7 @@ impl RunFold {
             parts: message.parts,
             input: None,
             tool: message.tool,
+            presentation: message.presentation,
         }
     }
     fn observe(
@@ -725,6 +775,7 @@ impl RunFold {
                 bytes: input.text_bytes,
             }),
             tool: None,
+            presentation: None,
         };
         self.reducer.next += 1;
         Some(raw)
@@ -1188,5 +1239,6 @@ fn committed_messages(
 
 #[cfg(test)]
 mod paging_tests;
+mod presentation;
 #[cfg(test)]
 mod tests;

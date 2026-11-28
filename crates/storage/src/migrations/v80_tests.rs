@@ -43,7 +43,7 @@ fn duration_version_invalidates_ready_indices_without_changing_schema_or_sources
         c.query_row("SELECT reducer_version FROM history_control", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        crate::history::index::REDUCER_VERSION
+        4
     );
     assert_eq!(
         c.query_row("SELECT payload FROM events", [], |r| r.get::<_, String>(0))

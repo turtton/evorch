@@ -489,3 +489,203 @@ fn tool_duration_survives_rebuild_and_missing_or_backwards_start_is_unknown() {
     assert_eq!(rows::duration_ms(1, 0), None);
     assert_eq!(rows::duration_ms(0, 999_999), Some(0));
 }
+
+fn artifact(id: u8, title: &str, caption: Option<&str>) -> event_bus::PresentedArtifact {
+    event_bus::PresentedArtifact {
+        artifact_id: format!("artifact-{id:032x}"),
+        title: title.into(),
+        caption: caption.map(Into::into),
+        media_type: "image/png".into(),
+        path: "/store/blobs/never-published.png".into(),
+        byte_len: 3,
+        sha256: format!("{id:064x}"),
+    }
+}
+fn presented(
+    run: &str,
+    title: Option<&str>,
+    caption: Option<&str>,
+    artifacts: Vec<event_bus::PresentedArtifact>,
+) -> ToolEvent {
+    ToolEvent::ArtifactsPresented {
+        run_id: run.into(),
+        presentation: event_bus::ArtifactPresentation {
+            presentation_id: "presentation-1".into(),
+            title: title.map(Into::into),
+            caption: caption.map(Into::into),
+            artifacts,
+        },
+    }
+}
+fn said(run: &str, text: &str) -> MessageEvent {
+    MessageEvent::MessageCompleted {
+        run_id: run.into(),
+        text: text.into(),
+    }
+}
+fn rebuild(db: &Database, run: &str) {
+    db.conn
+        .execute(
+            "UPDATE history_run_state SET phase=0 WHERE run_id=?1",
+            [run],
+        )
+        .unwrap();
+    struct FrozenClock;
+    impl super::build::Clock for FrozenClock {
+        fn now_ns(&self) -> i64 {
+            0
+        }
+    }
+    while !db
+        .history_build_step(run, super::build::BuildBudget::default(), &FrozenClock)
+        .unwrap()
+        .ready
+    {}
+}
+
+// Given: a message, a presentation, a message, the same presentation again and an empty one
+// Then: each presentation is its own row at its saved position, in the order its artifacts
+//       were listed, whichever way the history is read or rebuilt; the stored path is not kept
+#[test]
+fn presentations_are_rows_at_their_saved_position() {
+    let db = Database::open_in_memory().unwrap();
+    scope(&db, &["run"]);
+    let pair = || vec![artifact(2, "B", None), artifact(1, "A", Some("first"))];
+    append(&db, said("run", "before"));
+    append(&db, presented("run", Some("Compare"), Some("two"), pair()));
+    append(&db, said("run", "after"));
+    append(&db, presented("run", None, None, pair()));
+    append(&db, presented("run", None, None, vec![]));
+    let items = every_descriptor(&db, 1, Direction::Forward);
+    let shape: Vec<_> = items
+        .iter()
+        .map(|d| (d.index, d.role, d.parts.clone(), d.tool.is_none()))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            (0, Role::Assistant, vec![("before".into(), false)], true),
+            (1, Role::Artifacts, vec![], true),
+            (2, Role::Assistant, vec![("after".into(), false)], true),
+            (3, Role::Artifacts, vec![], true),
+            (4, Role::Artifacts, vec![], true),
+        ]
+    );
+    let first = items[1].presentation.as_ref().unwrap();
+    assert_eq!(first.title, Some(("Compare".into(), false)));
+    assert_eq!(first.caption, Some(("two".into(), false)));
+    let ids: Vec<_> = first
+        .artifacts
+        .iter()
+        .map(|a| a.artifact_id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            format!("artifact-{:032x}", 2),
+            format!("artifact-{:032x}", 1)
+        ]
+    );
+    assert_eq!(first.artifacts[1].digest, format!("{:064x}", 1));
+    assert_eq!(first.artifacts[1].caption, Some(("first".into(), false)));
+    assert_eq!(items[3].presentation.as_ref().unwrap().artifacts.len(), 2);
+    assert!(items[4].presentation.as_ref().unwrap().artifacts.is_empty());
+    assert!(items[0].presentation.is_none());
+    assert!(
+        !serde_json::to_string(&items)
+            .unwrap()
+            .contains("never-published")
+    );
+    assert_eq!(items, every_descriptor(&db, 50, Direction::Backward));
+    rebuild(&db, "run");
+    assert_eq!(items, every_descriptor(&db, 2, Direction::Forward));
+}
+
+// Given: strings a stored event holds as body tokens, a long caption and text that only
+//        starts with the escape character
+// Then: the row marks exactly those strings as tokens and reading a page reads no body
+#[cfg(feature = "test-support")]
+#[test]
+fn tokenized_presentation_strings_stay_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = crate::StorageConfig {
+        db_path: dir.path().join("presentation.db"),
+        ..Default::default()
+    };
+    let db = Database::open(&config).unwrap();
+    scope(&db, &["run"]);
+    let long = "あ".repeat(1000);
+    assert!(long.len() > 2048);
+    let escaped = "\u{e000}evorch-body:v1:not a token";
+    append(
+        &db,
+        presented(
+            "run",
+            Some(escaped),
+            Some(&long),
+            vec![artifact(1, "plain", Some(&long))],
+        ),
+    );
+    let bodies = crate::test_support::meter_full_body_reads(&db);
+    let items = every_descriptor(&db, 5, Direction::Forward);
+    assert_eq!(bodies.counts(), Default::default());
+    let row = items[0].presentation.as_ref().unwrap();
+    let token = |text: &Option<(String, bool)>| {
+        let (text, deferred) = text.as_ref().unwrap();
+        assert!(deferred, "{text}");
+        crate::BodyRef::from_token(text).expect("a well-formed token")
+    };
+    assert_eq!(token(&row.title).byte_len, escaped.len() as u64);
+    assert_eq!(token(&row.caption).byte_len, long.len() as u64);
+    assert_eq!(token(&row.artifacts[0].caption).byte_len, long.len() as u64);
+    assert_eq!(row.artifacts[0].title, ("plain".into(), false));
+}
+
+// Given: an event held inline whose text starts with the escape character
+// Then: it is not a token
+#[test]
+fn an_inline_event_has_no_tokens() {
+    let kind = EventKind::Tool(presented(
+        "run",
+        Some("\u{e000}evorch-body:v1:text"),
+        None,
+        vec![],
+    ));
+    let row = rows::committed(&kind, false, None).unwrap();
+    assert_eq!(row.role, Role::Artifacts);
+    assert_eq!(
+        row.presentation.unwrap().title,
+        Some(("\u{e000}evorch-body:v1:text".into(), false))
+    );
+}
+
+// Given: presentations with none, one and the most artifacts
+// Then: the page budget grows with their number and exceeds the text a view may hold
+#[test]
+fn the_budget_of_a_presentation_covers_its_largest_view() {
+    let row = |n: usize| rows::PresentationRow {
+        title: None,
+        caption: None,
+        artifacts: (0..n)
+            .map(|_| rows::PresentedRow {
+                artifact_id: String::new(),
+                digest: String::new(),
+                title: (String::new(), false),
+                caption: None,
+                media_type: (String::new(), false),
+            })
+            .collect(),
+    };
+    let widest = rows::PRESENTATION_TITLE_BYTES * 2
+        + rows::PRESENTATION_CAPTION_BYTES * 2
+        + rows::PRESENTATION_MEDIA_TYPE_BYTES * 2
+        + 105;
+    let (none, one, eight) = (
+        rows::presentation_public_bound(&row(0)),
+        rows::presentation_public_bound(&row(1)),
+        rows::presentation_public_bound(&row(8)),
+    );
+    assert!(none >= (rows::PRESENTATION_TITLE_BYTES + rows::PRESENTATION_CAPTION_BYTES) * 2);
+    assert!(one - none >= widest);
+    assert_eq!(eight - none, 8 * (one - none));
+}

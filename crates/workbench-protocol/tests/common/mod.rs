@@ -443,6 +443,42 @@ pub fn message(content: MessageContent) -> CommittedMessage {
         role: MessageRole::Assistant,
         content,
         tool: None,
+        presentation: None,
+    }
+}
+
+pub fn presented_artifact(
+    id: u8,
+    title: &str,
+    media_type: &str,
+) -> workbench_protocol::namespaces::artifacts::PresentedArtifactView {
+    workbench_protocol::namespaces::artifacts::PresentedArtifactView {
+        artifact_id: format!("artifact-{id:032x}"),
+        digest: format!("{id:064x}"),
+        title: title.into(),
+        caption: None,
+        media_type: media_type.into(),
+    }
+}
+
+pub fn artifacts_message() -> CommittedMessage {
+    use workbench_protocol::namespaces::artifacts::ArtifactPresentationView;
+    CommittedMessage {
+        role: MessageRole::Artifacts,
+        presentation: Some(Box::new(ArtifactPresentationView {
+            title: Some("Compare".into()),
+            caption: Some("two\nlines".into()),
+            artifacts: vec![
+                presented_artifact(1, "Before", "image/png"),
+                workbench_protocol::namespaces::artifacts::PresentedArtifactView {
+                    caption: Some("report".into()),
+                    ..presented_artifact(2, "After", "text/html")
+                },
+            ],
+        })),
+        ..message(MessageContent::Inline {
+            text: String::new(),
+        })
     }
 }
 

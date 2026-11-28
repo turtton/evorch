@@ -253,6 +253,7 @@ fn older_history_prepends_but_refresh_replaces_without_reordering_old_pages() {
             text: index.to_string(),
         },
         tool: None,
+        presentation: None,
     };
     let page = |items| Page {
         items,

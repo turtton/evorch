@@ -1,4 +1,35 @@
 {
+  "artifacts": {
+    "content": {
+      "payload": {
+        "text": ""
+      },
+      "type": "inline"
+    },
+    "index": "17",
+    "presentation": {
+      "artifacts": [
+        {
+          "artifact_id": "artifact-00000000000000000000000000000001",
+          "digest": "0000000000000000000000000000000000000000000000000000000000000001",
+          "media_type": "image/png",
+          "title": "Before"
+        },
+        {
+          "artifact_id": "artifact-00000000000000000000000000000002",
+          "caption": "report",
+          "digest": "0000000000000000000000000000000000000000000000000000000000000002",
+          "media_type": "text/html",
+          "title": "After"
+        }
+      ],
+      "caption": "two\nlines",
+      "title": "Compare"
+    },
+    "role": "artifacts",
+    "run": "run-1",
+    "thread": "thr-1"
+  },
   "body": {
     "content": {
       "payload": {

@@ -56,6 +56,9 @@ pub enum Effect {
     Open(CoreTab),
     /// Open pane pressed on an Execution row.
     OpenRun(RunPane),
+    /// Open pressed on an artifact of a conversation's card: an image goes to the artifacts
+    /// feature and a page to the browser preview.
+    OpenArtifact(super::transcript::artifacts::OpenArtifact),
     /// A goal control pressed in the composer band, for the execution feature.
     Goal(GoalAction),
     /// A side question was sent from the composer as `operation`, for the execution feature

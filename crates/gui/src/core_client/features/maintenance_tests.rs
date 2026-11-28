@@ -711,3 +711,36 @@ fn a_revealed_area_missing_from_the_layout_is_opened_as_a_tab() {
     compose(&ctx, &mut screen, input(false));
     assert!(!take(&log).contains(&Observed::Render));
 }
+
+// Given: a card's artifact that is a page, then one that is an image
+// Then: the page is a browser preview and the image is queued for the artifacts feature, whose
+//       section comes forward; neither reads anything
+#[test]
+fn a_card_sends_a_page_to_the_preview_and_anything_else_to_the_artifacts_feature() {
+    use crate::core_client::transcript::artifacts::OpenArtifact;
+    let log = Log::default();
+    let mut features = features(&log, Availability::Implemented { required: &[] });
+    features
+        .features
+        .push(Box::new(artifacts::ArtifactsFeature::default()));
+    let open = |media_type: &str| OpenArtifact {
+        reference: picture(),
+        title: "chart".into(),
+        media_type: media_type.into(),
+    };
+    features.open_card_artifact(open("text/html"));
+    assert_eq!(take(&log), [Observed::Preview]);
+    assert_eq!(features.take_focus(), [FeatureId::Browser]);
+    let requested = |features: &mut Features| {
+        features
+            .features
+            .iter_mut()
+            .find_map(|f| f.as_artifacts_mut())
+            .and_then(|artifacts| artifacts.requested().cloned())
+    };
+    assert_eq!(requested(&mut features), None);
+    features.open_card_artifact(open("image/png"));
+    assert!(take(&log).is_empty());
+    assert_eq!(features.take_focus(), [FeatureId::Artifacts]);
+    assert_eq!(requested(&mut features), Some(picture()));
+}

@@ -226,7 +226,8 @@ impl CoreArm {
                         MessageRole::Tool
                         | MessageRole::Reasoning
                         | MessageRole::Notice
-                        | MessageRole::Error => {}
+                        | MessageRole::Error
+                        | MessageRole::Artifacts => {}
                     }
                     drop(counts);
                     sink.notify.notify_waiters();

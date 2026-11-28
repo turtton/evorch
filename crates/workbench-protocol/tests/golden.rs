@@ -414,6 +414,7 @@ fn views_golden() {
             ),
             ("body".into(), message(MessageContent::Body(body_ref()))),
             ("tool".into(), tool_message()),
+            ("artifacts".into(), artifacts_message()),
             (
                 "reasoning".into(),
                 CommittedMessage {

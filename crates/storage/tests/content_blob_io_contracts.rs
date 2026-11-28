@@ -159,7 +159,11 @@ const C_GC: u64 = 24;
 // 12/18 frames and exactly 16,892 VM steps at both sizes. Add only those measured
 // 18 fixed schema frames (full-chain 519/817 frames, 245,142 steps at both sizes).
 // Collection and unrelated-row VM-scaling limits remain unchanged.
-const MIGRATION_FRAMES: u64 = 18
+// v82 recreates the three history triggers and invalidates the (empty) history state; the
+// probe, which now runs v81 and v82 together, writes 20/27 frames and 21,827 VM steps at
+// both sizes (v81 alone: 12/18), so 9 more fixed frames are reserved. No existing row is read.
+const MIGRATION_FRAMES: u64 = 9
+    + 18
     + 70
     + 24
     + 280
@@ -421,6 +425,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v82.sql"),
                     include_str!("../undo/undo_v81.sql"),
                     include_str!("../undo/undo_v80.sql"),
                     include_str!("../undo/undo_v79.sql"),
@@ -533,7 +538,10 @@ fn owner_free_schema_has_fixed_cost_for_unrelated_thread_history() {
         drop(Database::open(&config(&path)).unwrap());
         let observer = Connection::open(&path).unwrap();
         observer
-            .execute_batch(include_str!("../undo/undo_v81.sql"))
+            .execute_batch(concat!(
+                include_str!("../undo/undo_v82.sql"),
+                include_str!("../undo/undo_v81.sql")
+            ))
             .unwrap();
         observer
             .execute_batch(&format!(
@@ -560,8 +568,8 @@ fn owner_free_schema_has_fixed_cost_for_unrelated_thread_history() {
     }
     let small = cost(10);
     let large = cost(100_000);
-    println!("owner-free v81: 10 rows {small:?}, 100,000 rows {large:?} (frames, VM steps)");
-    assert!(small.0 > 0 && large.0 <= 18, "bounded empty-schema DDL");
+    println!("owner-free v81+v82: 10 rows {small:?}, 100,000 rows {large:?} (frames, VM steps)");
+    assert!(small.0 > 0 && large.0 <= 27, "bounded empty-schema DDL");
     assert!(small.1 > 0, "profiler must observe owner-free DDL");
     assert_eq!(
         small.1, large.1,

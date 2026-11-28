@@ -570,6 +570,11 @@ pub trait Feature: Send {
         None
     }
 
+    /// The artifacts feature itself, which a conversation card asks to open an image.
+    fn as_artifacts_mut(&mut self) -> Option<&mut artifacts::ArtifactsFeature> {
+        None
+    }
+
     /// The settings feature itself, for the ⚙ menu that opens its modal.
     fn as_settings_mut(&mut self) -> Option<&mut settings::SettingsFeature> {
         None
@@ -848,6 +853,25 @@ impl Features {
 
     pub fn settings_mut(&mut self) -> Option<&mut settings::SettingsFeature> {
         self.features.iter_mut().find_map(|f| f.as_settings_mut())
+    }
+
+    /// Routes an artifact a conversation card opens. A page becomes a browser preview. Anything
+    /// else is queued for the artifacts feature, whose section is brought forward: it opens
+    /// the artifact at its next pass, in its own scope. Nothing is read here.
+    pub fn open_card_artifact(&mut self, open: super::transcript::artifacts::OpenArtifact) {
+        if open.is_page() {
+            self.open_preview(open.reference);
+            return;
+        }
+        let queued = self
+            .features
+            .iter_mut()
+            .find_map(|f| f.as_artifacts_mut())
+            .map(|artifacts| artifacts.request_open(open.reference, open.title))
+            .is_some();
+        if queued {
+            self.reveal(FeatureId::Artifacts);
+        }
     }
 
     fn observe_selection(&mut self, selection: &Selection) -> bool {

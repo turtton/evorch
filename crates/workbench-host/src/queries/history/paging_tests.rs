@@ -18,6 +18,17 @@ fn storage_descriptor_encoding_is_the_legacy_raw_byte_cap_measure() {
         }),
         detail: Some(vec![("k: v".into(), false)]),
     };
+    let presentation = storage::history::PresentationRow {
+        title: Some(("Compare \"日本語\"".into(), false)),
+        caption: Some(("\u{e000}ref".into(), true)),
+        artifacts: vec![storage::history::PresentedRow {
+            artifact_id: format!("artifact-{:032x}", 1),
+            digest: format!("{:064x}", 1),
+            title: ("A".into(), false),
+            caption: None,
+            media_type: ("image/png".into(), false),
+        }],
+    };
     for role in [
         Role::User,
         Role::Assistant,
@@ -25,6 +36,7 @@ fn storage_descriptor_encoding_is_the_legacy_raw_byte_cap_measure() {
         Role::Reasoning,
         Role::Notice,
         Role::Error,
+        Role::Artifacts,
     ] {
         for index in [0, 9, 10, u64::MAX] {
             for input in [false, true] {
@@ -42,6 +54,7 @@ fn storage_descriptor_encoding_is_the_legacy_raw_byte_cap_measure() {
                         bytes: 16385,
                     }),
                     tool: (role == Role::Tool).then(|| tool.clone()),
+                    presentation: (role == Role::Artifacts).then(|| presentation.clone()),
                 };
                 let raw = RawMessage::from(descriptor.clone());
                 assert_eq!(
@@ -103,5 +116,62 @@ fn history_layer_checks_existence_and_cursor_before_limit_without_changing_ingre
     assert_eq!(
         read_history(&db, &pager, &q, "scope").err().unwrap().code,
         ErrorCode::Conflict
+    );
+}
+
+// Given: the largest presentation `present` can make, with text that doubles when JSON escapes it
+// Then: what both routes charge a page for the row is at least the size of the view it becomes
+#[test]
+fn the_budget_of_a_card_covers_the_view_it_expands_to() {
+    use storage::history::{PresentationRow, PresentedRow};
+    let quotes = |chars: usize| "\"".repeat(chars);
+    let artifacts = (0..8)
+        .map(|i| PresentedRow {
+            artifact_id: format!("artifact-{i:032x}"),
+            digest: format!("{i:064x}"),
+            title: (quotes(200), false),
+            caption: Some((quotes(1000), false)),
+            media_type: ("image/png".into(), false),
+        })
+        .collect();
+    let row = PresentationRow {
+        title: Some((quotes(200), false)),
+        caption: Some((quotes(1000), false)),
+        artifacts,
+    };
+    let raw = RawMessage {
+        run: "run-1".into(),
+        index: 7,
+        role: MessageRole::Artifacts,
+        parts: vec![],
+        input: None,
+        tool: None,
+        presentation: Some(row),
+    };
+    let mut never = |_: &[storage::BodyRef]| -> Result<Vec<_>, storage::StorageError> {
+        panic!("no body is stored")
+    };
+    let message = Bodies::default()
+        .message(&ThreadId::new("thread-1").unwrap(), raw.clone(), &mut never)
+        .unwrap()
+        .unwrap();
+    message.validate().unwrap();
+    let shown = serde_json::to_vec(&message).unwrap().len();
+    assert!(
+        shown > 8 * 2 * 1000,
+        "the fixture is as large as a view gets: {shown}"
+    );
+    assert!(raw.budget_len() >= shown, "{} < {shown}", raw.budget_len());
+}
+
+#[test]
+fn storage_budgets_use_the_protocol_caps() {
+    use storage::history::rows::*;
+    use workbench_protocol::namespaces::artifacts::*;
+    assert_eq!(PRESENTATION_TITLE_BYTES, MAX_PRESENTATION_TITLE_BYTES);
+    assert_eq!(PRESENTATION_CAPTION_BYTES, MAX_PRESENTATION_CAPTION_BYTES);
+    assert_eq!(
+        PRESENTATION_MEDIA_TYPE_BYTES,
+        MAX_PRESENTATION_MEDIA_TYPE_BYTES
     );
 }

@@ -52,6 +52,54 @@ pub struct ToolRow {
     pub detail: Option<Parts>,
 }
 
+/// Public caps of a presentation's text fields in bytes; the protocol bounds a view by the
+/// same values.
+pub const PRESENTATION_TITLE_BYTES: usize = 1024;
+pub const PRESENTATION_CAPTION_BYTES: usize = 4096;
+pub const PRESENTATION_MEDIA_TYPE_BYTES: usize = 128;
+/// An artifact id (`artifact-` and 32 hex digits) and a SHA-256 digest in hex.
+const ARTIFACT_IDENTITY_BYTES: usize = 41 + 64;
+/// Field names, quotes, braces and separators of one view, with room to spare.
+const VIEW_STRUCTURE_BYTES: usize = 256;
+
+/// A bound on the JSON bytes of the public view of `row` that holds however long a token
+/// expands, however secret masking rewrites the text and however JSON escapes it. Text is cut
+/// to its cap after masking, and escaping at most doubles what a view may contain, so the
+/// bound depends on the number of artifacts only and needs no body.
+pub fn presentation_public_bound(row: &PresentationRow) -> usize {
+    let escaped = |cap: usize| 2 * cap;
+    let heading = escaped(PRESENTATION_TITLE_BYTES) + escaped(PRESENTATION_CAPTION_BYTES);
+    let each = ARTIFACT_IDENTITY_BYTES
+        + escaped(PRESENTATION_TITLE_BYTES)
+        + escaped(PRESENTATION_CAPTION_BYTES)
+        + escaped(PRESENTATION_MEDIA_TYPE_BYTES)
+        + VIEW_STRUCTURE_BYTES;
+    VIEW_STRUCTURE_BYTES + heading + row.artifacts.len().saturating_mul(each)
+}
+
+/// A string of a presentation row and whether it is a body token to resolve. Only a string
+/// that starts with the escape character of a tokenized event is one; the rest is text.
+pub type PresentationText = (String, bool);
+
+/// One artifact of a presentation row, with the text fields the card shows. The stored path
+/// and anything not shown are left out, so no row ever carries them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PresentedRow {
+    pub artifact_id: String,
+    pub digest: String,
+    pub title: PresentationText,
+    pub caption: Option<PresentationText>,
+    pub media_type: PresentationText,
+}
+
+/// What an `ArtifactsPresented` event adds to a transcript, strings still as stored.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PresentationRow {
+    pub title: Option<PresentationText>,
+    pub caption: Option<PresentationText>,
+    pub artifacts: Vec<PresentedRow>,
+}
+
 /// One transcript row before it receives its position.
 #[derive(Debug)]
 pub struct Committed<'a> {
@@ -59,6 +107,7 @@ pub struct Committed<'a> {
     pub role: Role,
     pub parts: Parts,
     pub tool: Option<ToolRow>,
+    pub presentation: Option<PresentationRow>,
 }
 
 /// A `ToolStarted` of a run: `(run, call_id, input)`; the input is absent for old events.
@@ -95,6 +144,7 @@ pub fn committed(
             role,
             parts: vec![(text.to_owned(), tokenized)],
             tool: None,
+            presentation: None,
         })
     };
     match kind {
@@ -137,8 +187,47 @@ pub fn committed(
                     .as_ref()
                     .map(|detail| super::normalize(render(detail, tokenized))),
             }),
+            presentation: None,
+        }),
+        EventKind::Tool(ToolEvent::ArtifactsPresented {
+            run_id,
+            presentation,
+        }) => Some(Committed {
+            run: run_id,
+            role: Role::Artifacts,
+            parts: vec![],
+            tool: None,
+            presentation: Some(presentation_row(presentation, tokenized)),
         }),
         _ => notice(kind, tokenized),
+    }
+}
+
+/// The fields of a presentation that a card shows. No body is read: a token stays a token.
+fn presentation_row(
+    presentation: &event_bus::ArtifactPresentation,
+    tokenized: bool,
+) -> PresentationRow {
+    let text = |value: &str| -> PresentationText {
+        (
+            value.to_owned(),
+            tokenized && value.starts_with(crate::body_ref::ESCAPE),
+        )
+    };
+    PresentationRow {
+        title: presentation.title.as_deref().map(text),
+        caption: presentation.caption.as_deref().map(text),
+        artifacts: presentation
+            .artifacts
+            .iter()
+            .map(|artifact| PresentedRow {
+                artifact_id: artifact.artifact_id.clone(),
+                digest: artifact.sha256.clone(),
+                title: text(&artifact.title),
+                caption: artifact.caption.as_deref().map(text),
+                media_type: text(&artifact.media_type),
+            })
+            .collect(),
     }
 }
 
@@ -331,6 +420,7 @@ fn notice(kind: &EventKind, tokenized: bool) -> Option<Committed<'_>> {
             role,
             parts: vec![(text, false)],
             tool: None,
+            presentation: None,
         })
     };
     match kind {
@@ -408,6 +498,7 @@ fn notice(kind: &EventKind, tokenized: bool) -> Option<Committed<'_>> {
                 role,
                 parts: super::normalize(parts),
                 tool: None,
+                presentation: None,
             })
         }
         _ => None,

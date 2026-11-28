@@ -11,6 +11,7 @@ use crate::limits::{
     MAX_INLINE_MESSAGE_BYTES, MAX_NAME_BYTES, MAX_OPTION_BYTES, MAX_OPTIONS, MAX_PAGE_SIZE,
     MAX_TEXT_BYTES, MAX_TITLE_BYTES, MIN_BODY_CHUNK_BYTES,
 };
+use crate::namespaces::artifacts::ArtifactPresentationView;
 use crate::validation::{ValidationError, check_bytes, check_count};
 use crate::wire::{ByteOffset, InstanceEpoch, Revision, Sequence, UnixMillis};
 use serde::{Deserialize, Serialize};
@@ -271,7 +272,8 @@ pub struct InputReceipt {
     pub sent_by: Provenance,
 }
 
-/// What a committed-history row is. `Tool` rows carry a [`ToolCallView`]; no other role does.
+/// What a committed-history row is. `Tool` rows carry a [`ToolCallView`] and `Artifacts` rows
+/// an [`ArtifactPresentationView`]; no other role carries either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
@@ -284,6 +286,9 @@ pub enum MessageRole {
     Notice,
     /// A core-written failure of a request or of the run.
     Error,
+    /// Artifacts the conversation owner presented; the row carries an
+    /// [`ArtifactPresentationView`] and no content.
+    Artifacts,
 }
 
 /// A body stored apart from its message because it is large.
@@ -374,11 +379,44 @@ pub struct CommittedMessage {
     /// Present exactly on `Tool` rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolCallView>,
+    /// Present exactly on `Artifacts` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Box<ArtifactPresentationView>>,
 }
 
 impl CommittedMessage {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.content.validate("content")?;
+        match (&self.role, &self.presentation) {
+            (MessageRole::Artifacts, Some(presentation)) => {
+                if self.tool.is_some() {
+                    return Err(ValidationError::Inconsistent {
+                        field: "tool",
+                        reason: "only a tool row describes a call",
+                    });
+                }
+                if !matches!(&self.content, MessageContent::Inline { text } if text.is_empty()) {
+                    return Err(ValidationError::Inconsistent {
+                        field: "content",
+                        reason: "an artifacts row has no content",
+                    });
+                }
+                return presentation.validate();
+            }
+            (MessageRole::Artifacts, None) => {
+                return Err(ValidationError::Inconsistent {
+                    field: "presentation",
+                    reason: "an artifacts row must describe its presentation",
+                });
+            }
+            (_, Some(_)) => {
+                return Err(ValidationError::Inconsistent {
+                    field: "presentation",
+                    reason: "only an artifacts row describes a presentation",
+                });
+            }
+            (_, None) => {}
+        }
         match (&self.role, &self.tool) {
             (MessageRole::Tool, Some(tool)) => tool.validate(),
             (MessageRole::Tool, None) => Err(ValidationError::Inconsistent {

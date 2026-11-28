@@ -127,6 +127,9 @@ pub struct ArtifactsFeature {
     to_cancel: Vec<u64>,
     /// At most one decode runs at a time, whichever opening it was for.
     job: Option<image::Job>,
+    /// An artifact a conversation card asked to open, taken at the next pass: the thread's
+    /// artifacts are asked for by the feature itself, never from the card's callback.
+    requested: Option<(ArtifactRef, String)>,
 }
 
 enum Click {
@@ -149,6 +152,7 @@ impl ArtifactsFeature {
     /// Forget everything shown for the thread that was selected: its rows, the
     /// opened artifact with its text, image and texture, and what was asked.
     fn leave_scope(&mut self) {
+        self.requested = None;
         self.close_open();
         self.list = None;
         self.list_tag = None;
@@ -194,6 +198,31 @@ impl ArtifactsFeature {
         );
         self.list_tag = Some(tag);
         self.list = Some(ListState::Loading);
+    }
+
+    /// Queues the opening of `reference` (a card's Open): nothing is sent from here. The next
+    /// pass opens it as a selection of the list would be, if the selected thread is still its
+    /// own, and drops it otherwise.
+    pub fn request_open(&mut self, reference: ArtifactRef, title: String) {
+        self.requested = Some((reference, title));
+    }
+
+    #[cfg(test)]
+    pub(super) fn requested(&self) -> Option<&ArtifactRef> {
+        self.requested.as_ref().map(|(reference, _)| reference)
+    }
+
+    fn start_requested(&mut self, ctx: &mut FeatureContext<'_>) {
+        let Some((reference, title)) = self.requested.take() else {
+            return;
+        };
+        let ours = self
+            .scope
+            .as_ref()
+            .is_some_and(|(p, t)| &reference.project == p && &reference.thread == t);
+        if ours && reference.validate().is_ok() {
+            self.open_artifact(ctx, reference, title);
+        }
     }
 
     fn open_artifact(
@@ -722,6 +751,10 @@ impl Feature for ArtifactsFeature {
         "Artifacts"
     }
 
+    fn as_artifacts_mut(&mut self) -> Option<&mut ArtifactsFeature> {
+        Some(self)
+    }
+
     fn availability(&self) -> Availability {
         // List/Get/ReadContent are queries; binding an image's bytes is a command.
         Availability::Implemented {
@@ -769,6 +802,7 @@ impl Feature for ArtifactsFeature {
             self.list = None;
         }
         self.shown = shown;
+        self.start_requested(ctx);
         self.flush(ctx);
     }
 

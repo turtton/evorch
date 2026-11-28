@@ -18,7 +18,7 @@ mod structured_tests;
 mod tests;
 
 use event_bus::{EventKind, LifecycleEvent, MessageEvent};
-pub use rows::{Committed, ToolInput, ToolRow};
+pub use rows::{Committed, PresentationRow, PresentationText, PresentedRow, ToolInput, ToolRow};
 
 pub type PendingParts = (usize, usize, Vec<(String, bool)>);
 /// Domain-separated digest of ordered normalized part identities. Fixed size
@@ -45,6 +45,7 @@ pub enum Role {
     Reasoning,
     Notice,
     Error,
+    Artifacts,
 }
 
 impl Role {
@@ -56,6 +57,7 @@ impl Role {
             Self::Reasoning => "reasoning",
             Self::Notice => "notice",
             Self::Error => "error",
+            Self::Artifacts => "artifacts",
         }
     }
 
@@ -67,6 +69,7 @@ impl Role {
             "reasoning" => Self::Reasoning,
             "notice" => Self::Notice,
             "error" => Self::Error,
+            "artifacts" => Self::Artifacts,
             _ => return None,
         })
     }
@@ -78,6 +81,7 @@ pub struct Message {
     pub role: Role,
     pub parts: Vec<(String, bool)>,
     pub tool: Option<ToolRow>,
+    pub presentation: Option<PresentationRow>,
 }
 
 /// Merge adjacent plain parts; a deferred body reference always stands alone.
@@ -112,6 +116,7 @@ impl Reducer {
         start: Option<ToolInput>,
     ) -> Option<Message> {
         let mut tool = None;
+        let mut presentation = None;
         let (role, parts) =
             if let EventKind::Message(MessageEvent::MessagePart {
                 text, index, total, ..
@@ -137,6 +142,7 @@ impl Reducer {
             } else {
                 let committed = rows::committed(kind, tokenized, start)?;
                 tool = committed.tool;
+                presentation = committed.presentation;
                 (committed.role, committed.parts)
             };
         let prompt = matches!(
@@ -147,6 +153,7 @@ impl Reducer {
             role,
             parts,
             tool,
+            presentation,
             prompt,
             matches!(
                 kind,
@@ -161,17 +168,25 @@ impl Reducer {
         prompt: bool,
         finish: bool,
     ) -> Option<Message> {
-        self.build(role, parts, None, prompt, finish)
+        self.build(role, parts, None, None, prompt, finish)
     }
     /// The message of a row restored from its sources, which is never a first prompt or a final result.
     pub fn assemble(&mut self, row: Committed<'_>) -> Option<Message> {
-        self.build(row.role, row.parts, row.tool, false, false)
+        self.build(
+            row.role,
+            row.parts,
+            row.tool,
+            row.presentation,
+            false,
+            false,
+        )
     }
     fn build(
         &mut self,
         role: Role,
         parts: Vec<(String, bool)>,
         tool: Option<ToolRow>,
+        presentation: Option<PresentationRow>,
         prompt: bool,
         finish: bool,
     ) -> Option<Message> {
@@ -220,6 +235,7 @@ impl Reducer {
             role,
             parts: normalized,
             tool,
+            presentation,
         };
         self.next += 1;
         Some(raw)

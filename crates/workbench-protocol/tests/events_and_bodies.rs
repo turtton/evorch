@@ -220,6 +220,103 @@ fn only_tool_rows_describe_a_call_and_every_tool_row_does() {
 }
 
 #[test]
+fn only_artifacts_rows_describe_a_presentation_and_every_artifacts_row_does() {
+    artifacts_message().validate().unwrap();
+    let presentation = artifacts_message().presentation;
+    for role in [
+        MessageRole::User,
+        MessageRole::Assistant,
+        MessageRole::Tool,
+        MessageRole::Reasoning,
+        MessageRole::Notice,
+        MessageRole::Error,
+    ] {
+        let mut row = message(MessageContent::Inline { text: "x".into() });
+        row.role = role;
+        row.tool = (role == MessageRole::Tool).then(tool_call);
+        row.validate().unwrap();
+        assert!(
+            serde_json::to_value(&row)
+                .unwrap()
+                .get("presentation")
+                .is_none(),
+            "{role:?} keeps its wire form"
+        );
+        row.presentation = presentation.clone();
+        assert!(
+            row.validate().is_err(),
+            "{role:?} must not carry a presentation"
+        );
+    }
+    let mut bare = artifacts_message();
+    bare.presentation = None;
+    assert!(bare.validate().is_err());
+    let mut called = artifacts_message();
+    called.tool = Some(tool_call());
+    assert!(called.validate().is_err());
+    let mut texted = artifacts_message();
+    texted.content = MessageContent::Inline { text: "x".into() };
+    assert!(texted.validate().is_err());
+    texted.content = MessageContent::Body(body_ref());
+    assert!(texted.validate().is_err());
+}
+
+#[test]
+fn a_presentation_is_bounded_field_by_field_and_may_be_empty_or_repeat() {
+    use workbench_protocol::namespaces::artifacts::*;
+    let with = |change: fn(&mut ArtifactPresentationView)| {
+        let mut row = artifacts_message();
+        change(row.presentation.as_mut().unwrap());
+        row.validate()
+    };
+    assert!(with(|p| p.artifacts.clear()).is_ok());
+    assert!(with(|p| p.artifacts.push(p.artifacts[0].clone())).is_ok());
+    assert!(
+        with(|p| p.artifacts = (0..8)
+            .map(|i| presented_artifact(i, "A", "image/png"))
+            .collect())
+        .is_ok()
+    );
+    assert!(
+        with(|p| p.artifacts = (0..9)
+            .map(|i| presented_artifact(i, "A", "image/png"))
+            .collect())
+        .is_err()
+    );
+    assert!(with(|p| p.title = Some("x".repeat(1024))).is_ok());
+    assert!(with(|p| p.title = Some("x".repeat(1025))).is_err());
+    assert!(with(|p| p.title = Some("a\nb".into())).is_err());
+    assert!(with(|p| p.title = Some(String::new())).is_err());
+    assert!(with(|p| p.caption = Some("x\ny\tz\r".repeat(100))).is_ok());
+    assert!(with(|p| p.caption = Some(String::new())).is_ok());
+    assert!(with(|p| p.caption = Some("x".repeat(4097))).is_err());
+    assert!(with(|p| p.caption = Some("bell\u{7}".into())).is_err());
+    assert!(with(|p| p.artifacts[0].title = "x".repeat(1025)).is_err());
+    assert!(with(|p| p.artifacts[0].title = "two\nlines".into()).is_err());
+    assert!(with(|p| p.artifacts[0].caption = Some("x".repeat(4097))).is_err());
+    assert!(with(|p| p.artifacts[0].media_type = "x".repeat(129)).is_err());
+    assert!(with(|p| p.artifacts[0].media_type = String::new()).is_err());
+    assert!(with(|p| p.artifacts[0].artifact_id = "artifact-1".into()).is_err());
+    assert!(with(|p| p.artifacts[0].digest = "z".repeat(64)).is_err());
+    assert!(with(|p| p.artifacts[0].digest = "a".repeat(63)).is_err());
+}
+
+#[test]
+fn a_presentation_names_artifacts_without_paths_or_content() {
+    let wire = serde_json::to_value(artifacts_message()).unwrap();
+    let card = &wire["presentation"]["artifacts"][1];
+    let mut keys: Vec<_> = card.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["artifact_id", "caption", "digest", "media_type", "title"]
+    );
+    let mut unknown = wire;
+    unknown["presentation"]["artifacts"][0]["path"] = "/store/blobs/a.png".into();
+    assert!(serde_json::from_value::<CommittedMessage>(unknown).is_err());
+}
+
+#[test]
 fn a_tool_call_is_bounded_field_by_field() {
     let with = |change: fn(&mut ToolCallView)| {
         let mut row = tool_message();
