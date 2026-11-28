@@ -251,6 +251,17 @@ fn live_collector(
             .unwrap()
     };
     let before = roots();
+    // Production creates a thread's scratch through `prepare`, which makes the
+    // parent a private (0700) directory; the cleanup refuses any other parent.
+    // Make the fixture's parent the same whatever the process umask is.
+    let scratch_parent = f.scratch.thread_dir(fixture::THREADS[0]);
+    let scratch_parent = scratch_parent.parent().unwrap();
+    std::fs::create_dir_all(scratch_parent).unwrap();
+    std::fs::set_permissions(
+        scratch_parent,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
     for thread in fixture::THREADS {
         let dir = f.scratch.thread_dir(thread);
         std::fs::create_dir_all(&dir).unwrap();
