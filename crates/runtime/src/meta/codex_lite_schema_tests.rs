@@ -49,6 +49,20 @@ fn violations(schema: &Value, path: &str, found: &mut Vec<String>) {
                 | "unevaluatedProperties"
                 | "contains"
                 | "propertyNames",
+                Value::Array(tuple),
+            ) => {
+                for (index, value) in tuple.iter().enumerate() {
+                    violations(value, &format!("{here}[{index}]"), found);
+                }
+            }
+            (
+                "items"
+                | "additionalItems"
+                | "additionalProperties"
+                | "unevaluatedItems"
+                | "unevaluatedProperties"
+                | "contains"
+                | "propertyNames",
                 child,
             ) => violations(child, &here, found),
             _ => {}
@@ -124,4 +138,23 @@ fn the_canonical_wait_schema_keeps_its_exclusivity_constraint() {
     let mut found = Vec::new();
     violations(&spec.input_schema, "wait", &mut found);
     assert!(!found.is_empty(), "the canonical schema is not weakened");
+}
+
+// Given: a schema with `not` inside tuple-form `items` and `dependencies`, and a property named `not`
+// When: the scanner above walks it
+// Then: it reports exactly the keyword positions, so a blind spot cannot hide a rejected keyword
+#[test]
+fn the_scanner_sees_tuple_items_and_dependencies_but_not_property_names() {
+    let schema = json!({
+        "properties": {"not": {"type": "string"}},
+        "items": [{"type": "string"}, {"not": {"type": "null"}}],
+        "dependencies": {"a": {"uniqueItems": true}, "b": ["not"]}
+    });
+    let mut found = Vec::new();
+    violations(&schema, "t", &mut found);
+    found.sort();
+    assert_eq!(
+        found,
+        ["t.dependencies.a.uniqueItems", "t.items[1].not"].map(String::from)
+    );
 }

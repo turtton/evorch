@@ -1,5 +1,6 @@
 //! Metadata only: no executor, browser, network, process, file or lease is opened.
-//! Host/runtime tools and optional network/browser tools are not in this catalog.
+//! [`standard_tools`] lists the standard tools only; the host/runtime tools are not in this
+//! module, and the optional browser, web and LSP tools are in [`optional_tools`].
 use crate::{ApplyPatch, Edit, GitDiff, Grep, Read, RunJs, Shell, Tool, Write};
 use std::sync::Arc;
 
