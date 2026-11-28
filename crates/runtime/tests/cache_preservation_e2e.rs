@@ -6448,6 +6448,106 @@ async fn codex_lite_tools_and_instructions_are_a_stable_input_prefix_across_tool
     assert_codex_lite_prefix(&harness);
 }
 
+/// Object keys the Lite strict schema check rejects, found anywhere under `value`.
+fn lite_rejected_keys(value: &Value, path: &str, found: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let here = format!("{path}.{key}");
+                if ["not", "oneOf", "uniqueItems", "if", "then", "else"].contains(&key.as_str()) {
+                    found.push(here.clone());
+                }
+                lite_rejected_keys(child, &here, found);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                lite_rejected_keys(child, &format!("{path}[{index}]"), found);
+            }
+        }
+        _ => {}
+    }
+}
+
+// Given: a Responses Lite profile and an Orchestrator, whose catalog carries `wait` (its
+// run_id / run_ids exclusivity is a oneOf of `not` branches in the canonical definition)
+// When: the run makes several tool round trips and answers
+// Then: on every request the converted `wait` schema is the same bytes, has lost the oneOf /
+// `not` the backend rejects but keeps its properties, and tools, history and cache affinity stay
+// a stable prefix that the mock reports as cached
+#[tokio::test]
+async fn codex_lite_wait_schema_is_converted_and_stays_a_stable_cached_prefix() {
+    let script = (0..4)
+        .map(read_response)
+        .chain([text_response("done")])
+        .collect();
+    let mut harness = harness_with_catalog(
+        Wire::Codex,
+        MODEL,
+        Some(lite_capabilities()),
+        script,
+        1_000_000,
+        Arc::new(BulkRead),
+        Vec::new(),
+        None,
+        0.5,
+        |_| {},
+    );
+    let run = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Read four results".into(),
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    verify_trace(&harness, run, &events, 0);
+    assert_codex_lite_prefix(&harness);
+
+    let requests: Vec<Value> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == harness.wire.path())
+        .map(|request| request.body)
+        .filter(|body| !is_compaction_trigger_request(body))
+        .collect();
+    assert!(requests.len() >= 5, "{} requests", requests.len());
+    let wait_of = |request: &Value| {
+        request["input"][0]["tools"][0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "wait")
+            .expect("the Orchestrator catalog carries wait")
+            .clone()
+    };
+    let wait = wait_of(&requests[0]);
+    let mut found = Vec::new();
+    lite_rejected_keys(&wait["parameters"], "wait", &mut found);
+    assert!(found.is_empty(), "rejected keys sent: {found:?}");
+    for property in ["run_id", "run_ids", "mode"] {
+        assert!(wait["parameters"]["properties"][property].is_object());
+    }
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(wait_of(request), wait, "request {index}");
+        assert_eq!(
+            request["prompt_cache_key"], requests[0]["prompt_cache_key"],
+            "request {index}"
+        );
+        if index > 0 {
+            let previous = requests[index - 1]["input"].as_array().unwrap();
+            assert_eq!(
+                &request["input"].as_array().unwrap()[..previous.len()],
+                previous.as_slice(),
+                "request {index} keeps the previous input as a prefix"
+            );
+        }
+    }
+}
+
 // Given: a Responses Lite profile whose official compaction call fails (the mock has no
 // compaction item scripted), so the runtime falls back to its re-summary
 // When: history is compacted (manual, then automatic)
