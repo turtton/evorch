@@ -303,6 +303,16 @@ fn answer(query: &WorkspaceQuery, attention: bool) -> Result<WorkspaceReply, Str
             }))
         }
         WorkspaceQuery::ListSkills(_) => WorkspaceReply::Skills(Vec::new()),
+        // No scenario opens the thread search, so the core finds nothing: an explicit
+        // arm, not a wildcard that would answer queries the fixture does not know.
+        WorkspaceQuery::SearchThreads(_) => WorkspaceReply::ThreadSearchResults(
+            workbench_protocol::namespaces::workspace::ThreadSearchResults {
+                hits: Vec::new(),
+                next_cursor: None,
+                index: None,
+                title_scan_limited: false,
+            },
+        ),
         other => {
             return Err(format!(
                 "the fixture does not answer the workspace query {other:?}"

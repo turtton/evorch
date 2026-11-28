@@ -3,13 +3,15 @@
 //! directories, families, renames) is done by `self.areas.workspace`.
 use workbench_protocol::commands::CommandReply;
 use workbench_protocol::envelope::Provenance;
-use workbench_protocol::errors::WorkbenchError;
+use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::namespaces::{WorkspaceCommand, WorkspaceQuery};
 use workbench_protocol::queries::{Query, QueryReply};
 
 use crate::ingress::CommandHost;
 
 mod skills;
+mod thread_search;
+pub use thread_search::ThreadSearchJob;
 
 impl CommandHost {
     pub(in crate::ingress) fn workspace_command(
@@ -49,6 +51,13 @@ impl CommandHost {
                 .query(namespace_query)
                 .map(QueryReply::Workspace),
             WorkspaceQuery::ListSkills(target) => self.list_skills(target),
+            // Reads storage, so it never runs under the host lock: the caller
+            // takes `prepare_thread_search` and runs the job after releasing it.
+            WorkspaceQuery::SearchThreads(_) => Err(WorkbenchError::new(
+                ErrorCode::Internal,
+                "thread search runs outside the host lock",
+                RetryAdvice::Never,
+            )),
         }
     }
 }

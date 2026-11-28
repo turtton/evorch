@@ -39,3 +39,4 @@ pub mod thread_retention;
 pub use ingress::CommandHost;
 /// The Q1 leaf, built and registered by the composition root.
 pub use ingress::namespaces::lifecycle::quarantine::{QuarantineFacade, StorageQuarantineStore};
+pub use ingress::namespaces::workspace::ThreadSearchJob;

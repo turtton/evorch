@@ -38,7 +38,7 @@ mod pull_requests;
 mod questions;
 mod settings;
 mod teams;
-mod workspace;
+pub(crate) mod workspace;
 
 use workbench_protocol::commands::{Command, CommandReply};
 use workbench_protocol::envelope::Provenance;

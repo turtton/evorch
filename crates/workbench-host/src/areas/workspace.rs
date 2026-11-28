@@ -507,13 +507,15 @@ impl WorkspaceArea {
             Q::GetThreadDetail(target) => service
                 .detail(&document, &target.thread)
                 .map(|detail| WorkspaceReply::ThreadDetail(Box::new(detail))),
-            Q::ListProjects(_) | Q::ListThreads(_) | Q::GetThread(_) | Q::ListSkills(_) => {
-                Err(WorkbenchError::new(
-                    ErrorCode::InvalidRequest,
-                    "answered by the projection",
-                    RetryAdvice::Never,
-                ))
-            }
+            Q::ListProjects(_)
+            | Q::ListThreads(_)
+            | Q::GetThread(_)
+            | Q::ListSkills(_)
+            | Q::SearchThreads(_) => Err(WorkbenchError::new(
+                ErrorCode::InvalidRequest,
+                "answered by the projection",
+                RetryAdvice::Never,
+            )),
         }
     }
 }

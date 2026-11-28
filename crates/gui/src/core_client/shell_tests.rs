@@ -9,7 +9,8 @@ use workbench_protocol::{
     namespaces::{
         WorkspaceQuery, WorkspaceReply,
         workspace::{
-            FamilyView, LineageType, ProjectAccessView, SkillSummary, ThreadDetail, TrustLevel,
+            FamilyView, LineageType, ProjectAccessView, SearchThreads, SkillSummary, ThreadDetail,
+            ThreadSearchResults, TrustLevel,
         },
     },
     queries::{Query, QueryReply},
@@ -21,7 +22,7 @@ use workbench_protocol::{
 };
 
 use super::connection::Action;
-use super::features::{FeatureAction, FeatureId, FeatureReply, FeatureRequest};
+use super::features::{FeatureAction, FeatureError, FeatureId, FeatureReply, FeatureRequest};
 use super::shell::{self, CoreTab};
 use super::{CoreClientScreen, Shared};
 
@@ -155,6 +156,14 @@ fn extra_lane(id: &str) -> Option<Fixture> {
             ..thread("thr-sub-1", "Sub thread", 0)
         });
     }
+    // Plain threads of the thread search tests: "thr-bulk-7" is "Bulk 7", "thr-pool-7" is "Pool 7".
+    for (prefix, name) in [("thr-bulk-", "Bulk"), ("thr-pool-", "Pool")] {
+        if let Some(number) = id.strip_prefix(prefix) {
+            let title: &'static str = Box::leak(format!("{name} {number}").into_boxed_str());
+            let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+            return Some(thread(id, title, 0));
+        }
+    }
     let (lead, archived, title) =
         match (id.strip_prefix("thr-lane-"), id.strip_prefix("thr-alane-")) {
             (Some(number), _) => ("thr-1", false, format!("Lane {number}")),
@@ -240,6 +249,15 @@ fn answer(query: &WorkspaceQuery) -> WorkspaceReply {
                 .collect(),
         ),
         other => panic!("the shell test does not answer {other:?}"),
+    }
+}
+
+fn empty_search_page() -> ThreadSearchResults {
+    ThreadSearchResults {
+        hits: Vec::new(),
+        next_cursor: None,
+        index: None,
+        title_scan_limited: false,
     }
 }
 
@@ -404,6 +422,16 @@ impl Screen {
 
     /// [`Self::settle`], with each answer changed by `patch` first.
     fn settle_with(&mut self, patch: &dyn Fn(&WorkspaceQuery, &mut WorkspaceReply)) -> Vec<Action> {
+        self.settle_scripted(patch, &mut |_| Ok(empty_search_page()))
+    }
+
+    /// [`Self::settle_with`], with the core's thread-search pages (or refusals) from
+    /// `search`, which sees every `search_threads` request in the order it leaves.
+    fn settle_scripted(
+        &mut self,
+        patch: &dyn Fn(&WorkspaceQuery, &mut WorkspaceReply),
+        search: &mut dyn FnMut(&SearchThreads) -> Result<ThreadSearchResults, FeatureError>,
+    ) -> Vec<Action> {
         let mut others = Vec::new();
         for _ in 0..16 {
             self.harness.run_steps(1);
@@ -415,9 +443,18 @@ impl Screen {
                         tag,
                         request: FeatureRequest::Query(Query::Workspace(query)),
                     }) => {
-                        let mut answer = answer(&query);
-                        patch(&query, &mut answer);
-                        let reply = FeatureReply::Query(Ok(QueryReply::Workspace(answer)));
+                        let reply = match &query {
+                            WorkspaceQuery::SearchThreads(request) => FeatureReply::Query(
+                                search(request).map(|page| {
+                                    QueryReply::Workspace(WorkspaceReply::ThreadSearchResults(page))
+                                }),
+                            ),
+                            _ => {
+                                let mut answer = answer(&query);
+                                patch(&query, &mut answer);
+                                FeatureReply::Query(Ok(QueryReply::Workspace(answer)))
+                            }
+                        };
                         let mut shared = self.shared.lock().unwrap();
                         shared.features.reply(FeatureId::Workspace, tag, reply);
                         answered = true;

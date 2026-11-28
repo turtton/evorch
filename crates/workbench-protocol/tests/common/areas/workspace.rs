@@ -103,6 +103,11 @@ pub fn samples() -> AreaSamples {
             Query::Workspace(WorkspaceQuery::ListSkills(ProjectTarget {
                 project: project(),
             })),
+            Query::Workspace(WorkspaceQuery::SearchThreads(SearchThreads {
+                project: project(),
+                query: "migration plan".into(),
+                cursor: Some(ThreadSearchCursor::new("host:titles:20").unwrap()),
+            })),
         ],
         ui_events: vec![UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
             revision: Revision(11),
@@ -186,6 +191,22 @@ pub fn samples() -> AreaSamples {
                 name: "review".into(),
                 description: "Review a change".into(),
             }])),
+            QueryReply::Workspace(WorkspaceReply::ThreadSearchResults(ThreadSearchResults {
+                hits: vec![ThreadSearchHit {
+                    thread: thread(),
+                    title: Some("Plan the migration".into()),
+                    snippet_kind: Some("user".into()),
+                    snippet: Some("...the migration plan needs a rollback...".into()),
+                    archived: false,
+                }],
+                next_cursor: Some(ThreadSearchCursor::new("host:body-start").unwrap()),
+                index: Some(ThreadSearchIndex {
+                    enabled: Some(true),
+                    unindexed: 2,
+                    backfill_in_progress: true,
+                }),
+                title_scan_limited: false,
+            })),
         ],
     }
 }
