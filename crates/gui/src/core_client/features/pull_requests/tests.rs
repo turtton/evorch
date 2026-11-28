@@ -695,6 +695,7 @@ fn maintained_only(thread: &str) -> Harness<'static, Screen> {
         },
         cache: crate::core_client::cache::Cache::default(),
         frame: FeatureFrame::default(),
+        visible: false,
     };
     Harness::new_ui_state(
         |_ui, screen: &mut Screen| {

@@ -14,12 +14,12 @@
 //! only what the core cut for the wire.
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::diagnostics::read::{Phase, Read, cut_note, phase_label};
+use super::diagnostics::read::{Phase, Read, cut_note, phase_label_retry};
 use super::layout::paged_list;
-use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply, Visibility};
 use crate::panes::memory_widgets::{
-    ALL_STATUSES, APPROVAL_FILTERS, EMPTY, EVIDENCE, NO_PROJECT, REFRESH, approval_action,
-    approval_badge, approval_filter_label, reject_controls, scope_word, status_word,
+    ALL_STATUSES, APPROVAL_FILTERS, EMPTY, EVIDENCE, NO_PROJECT, approval_action, approval_badge,
+    approval_filter_label, reject_controls, scope_word, status_word,
 };
 use crate::theme::text::{badge, muted};
 use crate::theme::tokens::palette;
@@ -81,6 +81,8 @@ pub struct MemoryFeature {
     items: Vec<MemorySummary>,
     next_cursor: Option<PageCursor>,
     list_due: bool,
+    /// Whether the last pass drew the lessons: showing them again reads them again.
+    shown: bool,
     more_requested: bool,
     selected: Option<MemoryId>,
     detail_read: Read,
@@ -156,7 +158,8 @@ pub(super) fn update_line(
         }
         OperationState::Ready => "Updated.".to_owned(),
         OperationState::Cancelled { .. } => {
-            "The update was cancelled. Refresh to check the current state.".to_owned()
+            "The update was cancelled. The lessons are read again to show the current state."
+                .to_owned()
         }
         OperationState::Failed { code } => match (code, denial) {
             (_, Some(reason)) => denial_label(reason).to_owned(),
@@ -186,7 +189,7 @@ pub(super) const UPDATING: &str = "Updating…";
 pub(super) const CHECKING: &str = "Checking the outcome of the update…";
 
 /// The line for an update whose outcome cannot be known: it is not "done".
-pub(super) const UNKNOWN_LINE: &str = "The outcome of the update is unknown (a reconnect or a core restart). It is not counted as done; refresh to check the state.";
+pub(super) const UNKNOWN_LINE: &str = "The outcome of the update is unknown (a reconnect or a core restart). It is not counted as done; the lessons are read again to show the current state.";
 
 /// The update line: muted, or in the error colour when the update failed.
 pub(super) fn draw_update_line(ui: &mut egui::Ui, line: &str, failed: bool) {
@@ -389,6 +392,21 @@ impl Feature for MemoryFeature {
         self.detail_due = self.selected.is_some();
     }
 
+    fn maintain(&mut self, _ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        let shown = visibility.is_visible();
+        if shown && !self.shown {
+            // What changed while the lessons were out of sight is read once they are
+            // back. A read still out is answered (and asked again) by its own events.
+            if self.project.is_some() && self.list_read.phase() != &Phase::Waiting {
+                self.list_due = true;
+            }
+            if self.selected.is_some() && self.detail_read.phase() != &Phase::Waiting {
+                self.detail_due = true;
+            }
+        }
+        self.shown = shown;
+    }
+
     fn event(&mut self, event: &UiEvent) {
         match event {
             UiEvent::Memory(MemoryEvent::MemoryOperationChanged { view }) => {
@@ -555,7 +573,11 @@ impl Feature for MemoryFeature {
             self.ask_detail(ctx, request);
         }
 
-        phase_label(ui, self.list_read.phase());
+        // A failed read is the one case the person has to start again: the lessons are
+        // read from the first page, so an old cursor never joins a new list.
+        if phase_label_retry(ui, self.list_read.phase(), "Retry list") {
+            self.list_due = true;
+        }
         if self.list_read.phase() == &Phase::Ready {
             if self.items.is_empty() {
                 ui.label(EMPTY);
@@ -576,7 +598,9 @@ impl Feature for MemoryFeature {
 
         if self.selected.is_some() {
             ui.separator();
-            phase_label(ui, self.detail_read.phase());
+            if phase_label_retry(ui, self.detail_read.phase(), "Retry detail") {
+                self.detail_due = true;
+            }
             if let Some((state, action)) = self.lesson_detail(ui) {
                 self.confirm_reject = None;
                 self.send(ctx, project.clone(), &state, action);
@@ -611,9 +635,7 @@ impl MemoryFeature {
             approval.response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Approval")
             });
-            // Drawn every frame, also when a filter just changed.
-            let refresh = ui.button(REFRESH).clicked();
-            if refresh || before != (self.status, self.approval) {
+            if before != (self.status, self.approval) {
                 self.list_due = true;
             }
         });

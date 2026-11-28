@@ -134,6 +134,11 @@ impl Rig {
     }
 
     fn maintain(&mut self) {
+        self.maintain_as(false);
+    }
+
+    /// A maintenance pass of a panel that is drawn (`visible`) or not.
+    fn maintain_as(&mut self, visible: bool) {
         let mut ctx = FeatureContext {
             feature: FeatureId::Artifacts,
             view: FeatureView {
@@ -147,7 +152,7 @@ impl Rig {
         };
         let visibility = Visibility {
             available: true,
-            expanded: false,
+            expanded: visible,
             minimized: false,
         };
         self.feature.maintain(&mut ctx, visibility);
@@ -327,6 +332,91 @@ fn the_selected_thread_is_listed_opened_and_read_in_utf8_chunks() {
     assert!(frames(&mut harness).queries.is_empty());
     let body = harness.state().text();
     assert_eq!((body.len(), body.line_count()), (6 + 3 + 1 + 9, 2));
+}
+
+#[test]
+fn showing_the_list_again_reads_it_once_from_the_first_page_and_keeps_the_open_text() {
+    let note = reference("t1", 1);
+    let mut rig = Rig::new("t1");
+    rig.maintain_as(true);
+    let mut harness = harness(rig);
+    let sent = frames(&mut harness);
+    let (tag, _) = only_query(&sent);
+    harness.state_mut().feature.reply(
+        tag,
+        list(vec![meta(&note, "memo.txt", "text/plain", 2)], Some("more")),
+    );
+    let sent = open_row(
+        &mut harness,
+        "memo.txt",
+        &meta(&note, "memo.txt", "text/plain", 2),
+    );
+    let (tag, _) = only_query(&sent);
+    harness
+        .state_mut()
+        .feature
+        .reply(tag, content(&note, 0, "ok", true));
+    assert!(frames(&mut harness).queries.is_empty());
+    // Staying shown, for as many passes as it takes, asks for nothing.
+    for _ in 0..3 {
+        harness.state_mut().maintain_as(true);
+        assert!(frames(&mut harness).queries.is_empty());
+    }
+
+    harness.state_mut().maintain_as(false);
+    assert!(
+        frames(&mut harness).queries.is_empty(),
+        "nothing while hidden"
+    );
+    harness.state_mut().maintain_as(true);
+    let sent = frames(&mut harness);
+    let (_, query) = only_query(&sent);
+    assert_eq!(
+        *query,
+        ArtifactsQuery::List {
+            project: project("p"),
+            thread: thread("t1"),
+            after: None,
+            limit: LIST_PAGE
+        },
+        "the first page, not the old cursor"
+    );
+    assert!(
+        sent.started.is_empty(),
+        "the opened content is not fetched again"
+    );
+    assert_eq!(harness.state().text().len(), 2);
+    assert!(frames(&mut harness).queries.is_empty());
+
+    // That read is still out: hiding and showing the list does not ask a second time.
+    harness.state_mut().maintain_as(false);
+    harness.state_mut().maintain_as(true);
+    assert!(frames(&mut harness).queries.is_empty());
+}
+
+#[test]
+fn a_failed_list_is_read_again_when_shown_again_and_the_reload_button_stays() {
+    let mut rig = Rig::new("t1");
+    rig.maintain_as(true);
+    let mut harness = harness(rig);
+    let sent = frames(&mut harness);
+    let (tag, _) = only_query(&sent);
+    harness
+        .state_mut()
+        .feature
+        .reply(tag, err(FeatureError::new("the core is busy")));
+    frames(&mut harness);
+    harness.get_by_label("Reload artifacts").click();
+    let sent = frames(&mut harness);
+    assert_eq!(sent.queries.len(), 1, "the retained Reload still reads");
+    let (tag, _) = only_query(&sent);
+    harness
+        .state_mut()
+        .feature
+        .reply(tag, err(FeatureError::new("still busy")));
+    harness.state_mut().maintain_as(false);
+    harness.state_mut().maintain_as(true);
+    assert_eq!(frames(&mut harness).queries.len(), 1);
 }
 
 #[test]

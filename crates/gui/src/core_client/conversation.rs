@@ -438,10 +438,6 @@ fn header(
                 phase_circle(ui, thread_phase(io.cache, thread, activity));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button(icons::DOTS_THREE, |ui| {
-                        if ui.button("Refresh history").clicked() {
-                            effects.push(Effect::send(Action::History(thread.clone(), None, false)));
-                            ui.close();
-                        }
                         if ui.button("Deliver queued follow-ups next turn").clicked() {
                             effects.push(Effect::send(command(Command::Conversation(
                                 ConversationCommand::DeliverFollowUpsNextTurn(ThreadTarget {
@@ -604,6 +600,21 @@ fn thread_transcript(
         .older
         .get(thread.as_str())
         .is_some_and(Option::is_some);
+    // The first page is read on its own (a selection, a reconnect, a resync); only a read
+    // that failed needs the person, and the empty-conversation text would misreport it.
+    let failed = io.cache.history_read_failed(thread.as_str());
+    let loading = io.cache.history_loading(thread.as_str());
+    if failed {
+        ui.horizontal(|ui| {
+            ui.label(muted("Could not read this conversation's history"));
+            if ui
+                .add_enabled(io.connected && !loading, ghost("Retry history"))
+                .clicked()
+            {
+                effects.push(Effect::send(Action::History(thread.clone(), None, false)));
+            }
+        });
+    }
     let answers = &mut pane.answers;
     transcript::transcript(
         ui,
@@ -615,7 +626,7 @@ fn thread_transcript(
             chips,
         },
         |ui| {
-            if !waiting && !older {
+            if !waiting && !older && !failed && !loading {
                 empty_state(
                     ui,
                     "Start the conversation",

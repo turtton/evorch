@@ -14,14 +14,20 @@
 //! * Every request tag and data tag of this leaf has the high bit set (`TAG_BASE`),
 //!   which keeps them apart from the preview's.
 //! * What a core refusal or a stream failure ended is not started again by
-//!   itself; the user's reload does it.
+//!   itself; the user's Retry observation does it.
+//! * The list of runs is read again by itself every [`RELIST_PERIOD`] while the
+//!   area is shown and connected. That read changes nothing on screen until its
+//!   answer, and a failed one stops the period until Retry list.
 mod pixels;
 mod view;
 
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::{Duration, Instant},
+};
 
 use workbench_protocol::{
     commands::{Command, CommandResult},
@@ -43,6 +49,7 @@ use super::{
         data::{DataNotice, DataPayload, DataSource},
     },
     frame::Picture,
+    ops::Clock,
 };
 
 pub const TAG_BASE: u64 = 1 << 63;
@@ -60,7 +67,10 @@ const MAX_VERIFY: usize = MAX_STOPPED_IMAGES + 1;
 const NOTE_STOPPED: &str = "The page was closed.";
 const NOTE_UNAVAILABLE: &str = "This run's browser cannot be observed";
 const NOTE_REVOKED: &str = "Observation ended because the run was revoked";
-const NOTE_CAPACITY: &str = "Too many pages are being observed at once. Refresh in a moment.";
+const NOTE_CAPACITY: &str = "Too many pages are being observed at once. Try again in a moment.";
+
+/// How long after a list of runs was answered the next one is asked for.
+pub(super) const RELIST_PERIOD: Duration = Duration::from_secs(30);
 const NOTE_ENDED: &str = "The stream ended";
 const NOTE_UNEXPECTED: &str = "Unexpected reply from the core";
 
@@ -80,6 +90,8 @@ enum Request {
     List {
         project: ProjectId,
         thread: ThreadId,
+        /// Asked on the period: what is on screen stays until the answer.
+        background: bool,
     },
     Snapshot(ObservationScope),
     /// Whether the scope is still valid, asked when no snapshot of it is.
@@ -180,6 +192,11 @@ pub struct ObservationFeature {
     was_visible: bool,
     runs: Runs,
     relist: bool,
+    /// Why the periodic list failed. The runs it found before stay on screen.
+    list_error: Option<String>,
+    /// When the list of runs is next asked for by itself.
+    list_next: Option<Instant>,
+    clock: Clock,
     live: Option<Live>,
     stopped: VecDeque<Stopped>,
     hold: Option<Hold>,
@@ -195,6 +212,12 @@ pub struct ObservationFeature {
 
 impl Default for ObservationFeature {
     fn default() -> Self {
+        Self::with_clock(Clock::system())
+    }
+}
+
+impl ObservationFeature {
+    pub(super) fn with_clock(clock: Clock) -> Self {
         Self {
             next_tag: TAG_BASE,
             target: None,
@@ -202,6 +225,9 @@ impl Default for ObservationFeature {
             was_visible: false,
             runs: Runs::Unknown,
             relist: false,
+            list_error: None,
+            list_next: None,
+            clock,
             live: None,
             stopped: VecDeque::new(),
             hold: None,
@@ -217,6 +243,23 @@ impl ObservationFeature {
     /// The typed View-to-run intent. It does no I/O: the next composition pass does.
     pub fn observe_run(&mut self, target: ObservationTarget) {
         self.choose(target);
+    }
+
+    /// How long until the list of runs is asked for again, so that a screen at rest wakes
+    /// for it. Nothing while a list is out, after a failure, or once it is due (the next
+    /// pass asks for it).
+    pub(super) fn relist_in(&self, now: Instant) -> Option<Duration> {
+        let waiting = matches!(self.runs, Runs::Loaded(_))
+            && !self.relist
+            && self.list_error.is_none()
+            && !self
+                .requests
+                .values()
+                .any(|r| matches!(r, Request::List { .. }));
+        self.list_next
+            .filter(|_| waiting)
+            .and_then(|next| next.checked_duration_since(now))
+            .filter(|wait| !wait.is_zero())
     }
 
     fn tag(&mut self) -> u64 {
@@ -247,6 +290,8 @@ impl ObservationFeature {
     fn forget_session(&mut self) {
         self.runs = Runs::Unknown;
         self.relist = false;
+        self.list_error = None;
+        self.list_next = None;
         self.live = None;
         self.stopped.clear();
         self.hold = None;
@@ -661,19 +706,51 @@ impl ObservationFeature {
         ) else {
             return;
         };
+        // One list at a time, whatever asked for it.
+        let listing = self
+            .requests
+            .values()
+            .any(|r| matches!(r, Request::List { .. }));
         if (matches!(self.runs, Runs::Unknown) || self.relist)
             && !matches!(self.runs, Runs::Loading)
+            && !listing
         {
+            // A first list, a list after the area was shown again, a run not known and
+            // the user's retries: nothing is subscribed until this answer is in.
             let tag = self.tag();
             self.requests.insert(
                 tag,
                 Request::List {
                     project: project.clone(),
                     thread: thread.clone(),
+                    background: false,
                 },
             );
             self.runs = Runs::Loading;
             self.relist = false;
+            self.list_error = None;
+            self.list_next = None;
+            ctx.query(
+                tag,
+                Query::Browser(BrowserQuery::ListAgentRuns { project, thread }),
+            );
+        } else if !listing
+            && !self.relist
+            && matches!(self.runs, Runs::Loaded(_))
+            && self.list_error.is_none()
+            && self.list_next.is_some_and(|next| self.clock.now() >= next)
+        {
+            // The period: the runs on screen stay as they are until the answer.
+            let tag = self.tag();
+            self.requests.insert(
+                tag,
+                Request::List {
+                    project: project.clone(),
+                    thread: thread.clone(),
+                    background: true,
+                },
+            );
+            self.list_next = None;
             ctx.query(
                 tag,
                 Query::Browser(BrowserQuery::ListAgentRuns { project, thread }),
@@ -825,6 +902,8 @@ impl Feature for ObservationFeature {
         self.verify.clear();
         self.runs = Runs::Unknown;
         self.relist = false;
+        self.list_error = None;
+        self.list_next = None;
         self.hold = None;
         self.navigated = false;
         // A reply still to come for a subscription is answered with its release.
@@ -875,28 +954,41 @@ impl Feature for ObservationFeature {
             return;
         };
         match request {
-            Request::List { project, thread } => {
-                if !matches!(self.runs, Runs::Loading) {
+            Request::List {
+                project,
+                thread,
+                background,
+            } => {
+                let expected = if background {
+                    matches!(self.runs, Runs::Loaded(_))
+                } else {
+                    matches!(self.runs, Runs::Loading)
+                };
+                if !expected {
                     return;
                 }
-                match reply {
+                let failure = match reply {
                     FeatureReply::Query(Ok(QueryReply::Browser(
                         BrowserReply::AgentObservation(ObservationReply::Runs { scopes }),
-                    ))) => self.on_runs(&project, &thread, scopes),
+                    ))) => {
+                        self.on_runs(&project, &thread, scopes);
+                        self.list_error = None;
+                        self.list_next = Some(self.clock.now() + RELIST_PERIOD);
+                        return;
+                    }
                     FeatureReply::Query(Ok(QueryReply::Browser(
                         BrowserReply::AgentObservation(ObservationReply::State(state)),
-                    ))) => {
-                        self.suspect();
-                        self.runs = Runs::Failed(state_note(state).to_owned())
-                    }
-                    FeatureReply::Query(Err(e)) | FeatureReply::Command(Err(e)) => {
-                        self.suspect();
-                        self.runs = Runs::Failed(e.message)
-                    }
-                    _ => {
-                        self.suspect();
-                        self.runs = Runs::Failed(NOTE_UNEXPECTED.to_owned())
-                    }
+                    ))) => state_note(state).to_owned(),
+                    FeatureReply::Query(Err(e)) | FeatureReply::Command(Err(e)) => e.message,
+                    _ => NOTE_UNEXPECTED.to_owned(),
+                };
+                self.suspect();
+                self.list_next = None;
+                if background {
+                    // What was found stays on screen; the period waits for Retry list.
+                    self.list_error = Some(failure);
+                } else {
+                    self.runs = Runs::Failed(failure);
                 }
             }
             Request::Snapshot(scope) => self.on_snapshot_reply(scope, reply),

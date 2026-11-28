@@ -5,17 +5,19 @@ use workbench_protocol::namespaces::browser::observation::{
 };
 
 use super::{ObservationFeature, Runs, Shown, pixels::one_line};
-use crate::theme::icons;
 use crate::theme::text::{medium, muted};
 use crate::theme::tokens::palette;
-use crate::theme::widgets::{icon_button, reason_label};
+use crate::theme::widgets::reason_label;
 
 /// The newest activity lines laid over the picture, as the previous pane did.
 const OVERLAY_LINES: usize = 6;
 
 pub(super) enum Click {
     View(ObservationTarget),
-    Reload,
+    /// Read the list of runs again, from nothing on screen to the answer. A hold stays.
+    RetryList,
+    /// Watch the run again after a refusal or an end the page does not recover from.
+    RetryObservation,
 }
 
 /// What is on screen for the run being watched: the live watch, or the still
@@ -58,7 +60,8 @@ impl ObservationFeature {
     pub(super) fn apply(&mut self, click: Click) {
         match click {
             Click::View(target) => self.choose(target),
-            Click::Reload => {
+            Click::RetryList => self.relist = true,
+            Click::RetryObservation => {
                 self.hold = None;
                 self.relist = true;
             }
@@ -75,6 +78,9 @@ impl ObservationFeature {
             }
             Runs::Failed(message) => {
                 reason_label(ui, palette().ERROR_FG, one_line(message));
+                if ui.button("Retry list").clicked() {
+                    click = Some(Click::RetryList);
+                }
             }
             Runs::Loaded(scopes) => {
                 if scopes.is_empty() && self.stopped.is_empty() {
@@ -94,8 +100,12 @@ impl ObservationFeature {
                 });
             }
         }
-        if icon_button(ui, icons::ARROW_CLOCKWISE, "Refresh agent pages").clicked() {
-            click = Some(Click::Reload);
+        // A period read that failed leaves the runs found before on screen.
+        if let Some(message) = &self.list_error {
+            reason_label(ui, palette().ERROR_FG, one_line(message));
+            if ui.button("Retry list").clicked() {
+                click = Some(Click::RetryList);
+            }
         }
         let current = self.current();
         if let Some(hold) = &self.hold
@@ -104,6 +114,9 @@ impl ObservationFeature {
                 .is_none_or(|c| c.note != Some(hold.message.as_str()))
         {
             reason_label(ui, palette().ERROR_FG, one_line(&hold.message));
+        }
+        if self.hold.is_some() && ui.button("Retry observation").clicked() {
+            click = Some(Click::RetryObservation);
         }
         if let Some(current) = current {
             self.draw_current(ui, &current);

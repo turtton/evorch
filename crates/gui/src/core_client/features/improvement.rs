@@ -12,12 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use std::time::SystemTime;
 
-use super::diagnostics::read::{Phase, Read, cut_note, phase_label};
+use super::diagnostics::read::{Phase, Read, cut_note, phase_label_retry};
 use super::layout::paged_list;
 use super::memory::{
     CHECKING, UNKNOWN_LINE, UPDATING, denial_label, draw_update_line, update_failed, update_line,
 };
-use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply, Visibility};
 use crate::panes::improvement_widgets::{
     ALL, DISABLED, DISMISS, EMPTY, EVIDENCE, MARK_REVIEWED, NO_PROJECT, STATUS_ACCESS,
     STATUS_LABEL, evidence_runs, kind_badges, reopened_badge, seen_line, severity_word,
@@ -79,6 +79,8 @@ pub struct ImprovementFeature {
     items: Vec<ImprovementSummary>,
     next_cursor: Option<PageCursor>,
     list_due: bool,
+    /// Whether the last pass drew the candidates: showing them again reads them again.
+    shown: bool,
     more_requested: bool,
     selected: Option<ImprovementCandidateId>,
     detail_read: Read,
@@ -328,6 +330,21 @@ impl Feature for ImprovementFeature {
         self.detail_due = self.selected.is_some();
     }
 
+    fn maintain(&mut self, _ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        let shown = visibility.is_visible();
+        if shown && !self.shown {
+            // What changed while the candidates were out of sight is read once they are
+            // back. A read still out is answered (and asked again) by its own events.
+            if self.project.is_some() && self.list_read.phase() != &Phase::Waiting {
+                self.list_due = true;
+            }
+            if self.selected.is_some() && self.detail_read.phase() != &Phase::Waiting {
+                self.detail_due = true;
+            }
+        }
+        self.shown = shown;
+    }
+
     fn event(&mut self, event: &UiEvent) {
         match event {
             UiEvent::Improvement(ImprovementEvent::ImprovementOperationChanged { view }) => {
@@ -487,9 +504,7 @@ impl Feature for ImprovementFeature {
             status.response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, STATUS_ACCESS)
             });
-            // Drawn every frame, also when the filter just changed.
-            let refresh = ui.button("Refresh").clicked();
-            if refresh || before != self.status {
+            if before != self.status {
                 self.list_due = true;
             }
         });
@@ -523,7 +538,11 @@ impl Feature for ImprovementFeature {
                 "{DISABLED} Earlier candidates are still listed."
             )));
         }
-        phase_label(ui, self.list_read.phase());
+        // A failed read is the one case the person has to start again: the candidates are
+        // read from the first page, so an old cursor never joins a new list.
+        if phase_label_retry(ui, self.list_read.phase(), "Retry list") {
+            self.list_due = true;
+        }
         if self.list_read.phase() == &Phase::Ready {
             if self.items.is_empty() {
                 ui.label(EMPTY);
@@ -544,7 +563,9 @@ impl Feature for ImprovementFeature {
 
         if self.selected.is_some() {
             ui.separator();
-            phase_label(ui, self.detail_read.phase());
+            if phase_label_retry(ui, self.detail_read.phase(), "Retry detail") {
+                self.detail_due = true;
+            }
             if let Some((state, action)) = self.candidate_detail(ui, now) {
                 self.send(ctx, project.clone(), &state, action);
             }

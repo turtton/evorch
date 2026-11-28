@@ -190,10 +190,10 @@ fn the_usage_summary_is_asked_once_and_drawn_as_the_legacy_overview() {
     screen.get_by_label("opus");
     assert!(asked(&mut screen).is_empty(), "nothing is asked twice");
 
-    screen.get_by_label("Refresh").click();
-    let again = asked(&mut screen);
-    assert_eq!(again.len(), 1);
-    assert_ne!(summary_of(&again[0]).operation_id, get.operation_id);
+    assert!(
+        screen.query_by_label("Refresh").is_none(),
+        "the usage reads again by itself"
+    );
 }
 
 // Given: an answered tab / When: every range is picked in turn
@@ -376,59 +376,40 @@ fn the_breakdown_groups_by_day_week_and_provider_and_sorts_by_a_column() {
     assert_english(&screen);
 }
 
-// Given: a read that waits / When: Refresh is clicked, then the new read is refused
-// Then: Refresh stays usable while waiting and asks anew, and the refusal is shown
+// Given: a read that waits / When: the ask is refused
+// Then: there is no Refresh to press, the refusal is shown, and nothing is asked in a hurry
 #[test]
-fn refresh_can_restart_a_waiting_read_and_a_refusal_is_shown() {
+fn a_refused_usage_ask_is_shown_without_a_refresh_button_and_is_not_asked_in_a_loop() {
     let mut screen = screen(Box::<DiagnosticsFeature>::default(), None);
     let first = asked(&mut screen);
-    assert!(
-        !screen
-            .get_by_label("Refresh")
-            .accesskit_node()
-            .is_disabled()
-    );
+    assert!(screen.query_by_label("Refresh").is_none());
     assert_english(&screen);
-    screen.get_by_label("Refresh").click();
-    let again = asked(&mut screen);
-    assert_eq!(again.len(), 1);
-    assert_ne!(
-        summary_of(&again[0]).operation_id,
-        summary_of(&first[1]).operation_id
-    );
     answer(
         &mut screen,
         first[1].tag,
-        FeatureReply::Query(Err(FeatureError::new("an earlier ask was lost"))),
-    );
-    assert!(screen.query_by_label("an earlier ask was lost").is_none());
-    answer(
-        &mut screen,
-        again[0].tag,
         FeatureReply::Query(Err(FeatureError::new("the core is busy"))),
     );
     screen.get_by_label("the core is busy");
     assert!(screen.query_by_label("Loading usage…").is_none());
-    assert!(
-        !screen
-            .get_by_label("Refresh")
-            .accesskit_node()
-            .is_disabled()
-    );
+    assert!(screen.query_by_label("Refresh").is_none());
+    assert!(asked(&mut screen).is_empty());
 }
 
-// Given: an answered tab / When: a refresh fails in the core
-// Then: the failure is shown above the usage it last read, which stays drawn until a new answer
+// Given: an answered usage read that is read again and fails
+// Then: the last usage stays, the failure is held, and the next periodic read is the retry
 #[test]
-fn a_failed_refresh_keeps_the_last_usage_and_says_why() {
-    let mut screen = answered(None);
-    screen.get_by_label("Refresh").click();
-    let again = asked(&mut screen);
-    let get = summary_of(&again[0]).clone();
-    screen.get_by_label("$1.50*");
-    answer(
-        &mut screen,
-        again[0].tag,
+fn a_failed_periodic_usage_read_keeps_the_last_usage_and_is_retried_by_itself() {
+    let mut feature = DiagnosticsFeature::default();
+    let t0 = Instant::now();
+    let first = keep_usage_at(&mut feature, t0);
+    let get = summary_of(&first[0]).clone();
+    feature.reply(first[0].tag, usage(&get, OperationState::Ready, 110));
+
+    let refreshed = keep_usage_at(&mut feature, t0 + USAGE_REFRESH);
+    assert_eq!(refreshed.len(), 1);
+    let get = summary_of(&refreshed[0]).clone();
+    feature.reply(
+        refreshed[0].tag,
         usage(
             &get,
             OperationState::Failed {
@@ -437,25 +418,46 @@ fn a_failed_refresh_keeps_the_last_usage_and_says_why() {
             0,
         ),
     );
-    screen.get_by_label("The storage could not be read.");
-    screen.get_by_label("$1.50*");
-    screen.get_by_label("Daily tokens");
-    assert_english(&screen);
-
-    screen.get_by_label("Refresh").click();
-    let last = asked(&mut screen);
-    let get = summary_of(&last[0]).clone();
-    answer(
-        &mut screen,
-        last[0].tag,
-        usage(&get, OperationState::Ready, 0),
-    );
+    assert!(feature.usage.is_some(), "the last usage stays");
+    assert!(matches!(feature.usage_read.phase(), Phase::Failed(_)));
     assert!(
-        screen
-            .query_by_label("The storage could not be read.")
-            .is_none()
+        keep_usage_at(&mut feature, t0 + USAGE_REFRESH).is_empty(),
+        "a failure is not a hot retry loop"
     );
-    screen.get_by_label("$1.50");
+    assert_eq!(
+        feature.usage_refresh_in(t0 + USAGE_REFRESH),
+        Some(USAGE_REFRESH)
+    );
+
+    let retry = keep_usage_at(&mut feature, t0 + USAGE_REFRESH * 2);
+    assert_eq!(retry.len(), 1, "the next period reads again");
+    let get = summary_of(&retry[0]).clone();
+    feature.reply(retry[0].tag, usage(&get, OperationState::Ready, 0));
+    assert_eq!(*feature.usage_read.phase(), Phase::Ready);
+}
+
+// Given: the three usage views of a thread / Then: only Context, a paged read of one
+//       moment, has a Refresh, and it reads that run again from the first page
+#[test]
+fn only_the_context_view_keeps_a_refresh_button() {
+    let mut screen = answered(Some("t1"));
+    add_run(&mut screen, "run-1", None, "orchestrator");
+    assert!(screen.query_by_label("Refresh").is_none());
+    screen
+        .get_by_role_and_label(Role::Button, "Breakdown")
+        .click();
+    steps(&mut screen);
+    assert!(screen.query_by_label("Refresh").is_none());
+    screen
+        .get_by_role_and_label(Role::Button, "Context")
+        .click();
+    let first = asked(&mut screen);
+    assert_eq!(first.len(), 1);
+    screen.get_by_label("Refresh").click();
+    let again = asked(&mut screen);
+    assert_eq!(again.len(), 1);
+    assert_eq!(context_of(&again[0]).run.as_str(), "run-1");
+    assert!(context_of(&again[0]).page.cursor.is_none());
 }
 
 // Given: an answered tab / When: another range is picked and its read fails

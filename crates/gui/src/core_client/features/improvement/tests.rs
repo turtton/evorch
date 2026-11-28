@@ -305,6 +305,181 @@ fn the_candidate_status_filter_asks_for_that_status_only() {
 }
 
 #[test]
+fn no_refresh_button_is_drawn_and_showing_the_candidates_again_reads_them_once() {
+    let mut screen = screen_with_detail();
+    assert!(screen.query_by_label("Refresh").is_none());
+    for _ in 0..3 {
+        assert!(
+            asked(&mut screen).is_empty(),
+            "no read while they stay shown"
+        );
+    }
+    screen.state_mut().visible = false;
+    assert!(
+        asked(&mut screen).is_empty(),
+        "no read while they are hidden"
+    );
+    screen.state_mut().visible = true;
+    let asks = asked(&mut screen);
+    assert_eq!(asks.len(), 2, "the list and the open candidate, once each");
+    assert!(matches!(
+        query_of(&asks[0]),
+        Query::Improvement(ImprovementQuery::ListImprovement(_))
+    ));
+    assert!(matches!(
+        query_of(&asks[1]),
+        Query::Improvement(ImprovementQuery::GetImprovement(_))
+    ));
+    assert!(asked(&mut screen).is_empty());
+}
+
+#[test]
+fn a_failed_list_and_a_failed_detail_each_offer_their_own_retry() {
+    let mut screen = screen(Box::<ImprovementFeature>::default(), None);
+    let first = asked(&mut screen);
+    let list = list_of(&first[0]);
+    answer(
+        &mut screen,
+        first[0].tag,
+        FeatureReply::Query(Err(FeatureError::new("the core went away"))),
+    );
+    screen.get_by_label("Retry list").click();
+    let retry = asked(&mut screen);
+    assert_eq!(retry.len(), 1, "one click, one read");
+    let retried = list_of(&retry[0]);
+    assert_ne!(retried.operation_id, list.operation_id);
+    answer(
+        &mut screen,
+        retry[0].tag,
+        list_reply(
+            &retried.operation_id,
+            true,
+            vec![summary("cand-a", ImprovementStatus::New)],
+        ),
+    );
+    assert!(screen.query_by_label("Retry list").is_none());
+
+    screen.get_by_label("cand-a").click();
+    let detail = asked(&mut screen);
+    answer(
+        &mut screen,
+        detail[0].tag,
+        FeatureReply::Query(Err(FeatureError::new("no detail"))),
+    );
+    assert!(screen.query_by_label("Retry list").is_none());
+    screen.get_by_label("Retry detail").click();
+    let again = asked(&mut screen);
+    assert_eq!(again.len(), 1);
+    assert!(matches!(
+        query_of(&again[0]),
+        Query::Improvement(ImprovementQuery::GetImprovement(_))
+    ));
+}
+
+#[test]
+fn a_failed_further_page_is_retried_from_the_first_page_and_the_detail_retry_recovers() {
+    let mut screen = screen(Box::<ImprovementFeature>::default(), None);
+    let first = asked(&mut screen);
+    let list = list_of(&first[0]);
+    answer(
+        &mut screen,
+        first[0].tag,
+        FeatureReply::Query(Ok(QueryReply::Improvement(ImprovementReply::List(
+            Box::new(ReadOutcome {
+                operation: view(&list.operation_id, OperationState::Ready),
+                data: Some(ImprovementList {
+                    enabled: true,
+                    candidates: Page {
+                        items: vec![summary("cand-a", ImprovementStatus::New)],
+                        next_cursor: Some(PageCursor::new("page-2").unwrap()),
+                        snapshot_revision: Revision(1),
+                    },
+                }),
+            }),
+        )))),
+    );
+    screen.get_by_label("Load more candidates").click();
+    let more = asked(&mut screen);
+    assert!(matches!(
+        query_of(&more[0]),
+        Query::Improvement(ImprovementQuery::ListImprovement(ListImprovement {
+            page: PageRequest {
+                cursor: Some(_),
+                ..
+            },
+            ..
+        }))
+    ));
+    answer(
+        &mut screen,
+        more[0].tag,
+        FeatureReply::Query(Err(FeatureError::new("the core went away"))),
+    );
+    screen.get_by_label("Retry list").click();
+    let retry = asked(&mut screen);
+    assert_eq!(retry.len(), 1);
+    let retried = list_of(&retry[0]);
+    assert!(matches!(
+        query_of(&retry[0]),
+        Query::Improvement(ImprovementQuery::ListImprovement(ListImprovement {
+            page: PageRequest { cursor: None, .. },
+            ..
+        }))
+    ));
+    assert_ne!(retried.operation_id, list.operation_id);
+    answer(
+        &mut screen,
+        retry[0].tag,
+        list_reply(
+            &retried.operation_id,
+            true,
+            vec![summary("cand-b", ImprovementStatus::New)],
+        ),
+    );
+    screen.get_by_label("cand-b");
+    assert!(screen.query_by_label("cand-a").is_none());
+    assert!(screen.query_by_label("Retry list").is_none());
+
+    screen.get_by_label("cand-b").click();
+    let detail = asked(&mut screen);
+    answer(
+        &mut screen,
+        detail[0].tag,
+        FeatureReply::Query(Err(FeatureError::new("no detail"))),
+    );
+    screen.get_by_label("Retry detail").click();
+    let again = asked(&mut screen);
+    let Query::Improvement(ImprovementQuery::GetImprovement(get)) = query_of(&again[0]) else {
+        panic!("a detail was expected");
+    };
+    let get = get.clone();
+    answer(
+        &mut screen,
+        again[0].tag,
+        FeatureReply::Query(Ok(QueryReply::Improvement(ImprovementReply::Detail(
+            Box::new(ReadOutcome {
+                operation: view(&get.operation_id, OperationState::Ready),
+                data: Some(ImprovementDetail {
+                    summary: summary("cand-b", ImprovementStatus::New),
+                    evidence: BoundedText {
+                        text: "evidence".into(),
+                        total_bytes: 8,
+                        truncated: false,
+                    },
+                    draft_file: Some("cand-b.md".into()),
+                    run: None,
+                    recent_runs: vec![],
+                    created_ms: 1,
+                    reopened_count: 0,
+                }),
+            }),
+        )))),
+    );
+    screen.get_by_label("Draft: cand-b.md");
+    assert!(screen.query_by_label("Retry detail").is_none());
+}
+
+#[test]
 fn a_time_past_what_chrono_holds_reads_as_unknown_and_an_ordinary_one_as_legacy() {
     use std::time::{Duration, UNIX_EPOCH};
     let now = UNIX_EPOCH + Duration::from_secs(951_827_696 + 3_742);

@@ -1,7 +1,11 @@
 //! The observation leaf without a core: a scripted fake answers its requests
 //! and data slots are claimed by the real `DataInbox`. Completion is awaited
 //! through explicit signals (replies, notices), never through sleeps.
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use egui_kittest::{Harness, kittest::Queryable};
 use workbench_client::renderer::observation::AgentFrame;
@@ -124,6 +128,8 @@ struct Core {
     refuse_subscribe: Option<FeatureError>,
     /// The run list is answered with a refusal.
     fail_list: bool,
+    /// The run list is not answered until the test says so.
+    defer_lists: bool,
     /// The state a subscription is answered with instead of being registered.
     subscribe_state: Option<ObservationState>,
     /// Scopes whose incarnation the core no longer accepts.
@@ -283,12 +289,18 @@ fn with_ctx<R>(
 struct Rig {
     harness: Harness<'static, State>,
     core: Core,
+    /// The time the feature reads, moved by hand.
+    clock: Arc<Mutex<Instant>>,
+    /// The list asks held back while `core.defer_lists` is set.
+    deferred: Vec<FeatureAction>,
 }
 
 impl Rig {
     fn new(runs: &[&str]) -> Self {
+        let clock = Arc::new(Mutex::new(Instant::now()));
+        let reads = Arc::clone(&clock);
         let state = State {
-            feature: ObservationFeature::default(),
+            feature: ObservationFeature::with_clock(Clock::from_fn(move || *reads.lock().unwrap())),
             selection: Selection {
                 project: Some(ProjectId::new("p").unwrap()),
                 thread: Some(ThreadId::new("t").unwrap()),
@@ -323,6 +335,8 @@ impl Rig {
                 scopes: runs.iter().map(|r| scope(r)).collect(),
                 ..Core::default()
             },
+            clock,
+            deferred: Vec::new(),
         };
         rig.pump();
         rig
@@ -363,6 +377,14 @@ impl Rig {
     }
 
     fn answer(&mut self, action: FeatureAction) {
+        if self.core.defer_lists
+            && let FeatureRequest::Query(query @ Query::Browser(BrowserQuery::ListAgentRuns { .. })) =
+                &action.request
+        {
+            self.core.queries.push(query.clone());
+            self.deferred.push(action);
+            return;
+        }
         let reply = match &action.request {
             FeatureRequest::Command(command) => self.core.command(command),
             FeatureRequest::Query(query) => self.core.query(query),
@@ -463,6 +485,35 @@ impl Rig {
                     state,
                 },
             )));
+        self.pump();
+    }
+
+    /// Moves the feature's time on and lets it ask for what has become due.
+    fn advance(&mut self, by: Duration) {
+        *self.clock.lock().unwrap() += by;
+        self.pump();
+    }
+
+    fn now(&self) -> Instant {
+        *self.clock.lock().unwrap()
+    }
+
+    /// Answers the list asks that were held back.
+    fn release_lists(&mut self) {
+        self.core.defer_lists = false;
+        for action in std::mem::take(&mut self.deferred) {
+            let FeatureRequest::Query(Query::Browser(BrowserQuery::ListAgentRuns { .. })) =
+                &action.request
+            else {
+                unreachable!();
+            };
+            let reply = FeatureReply::Query(Ok(QueryReply::Browser(
+                BrowserReply::AgentObservation(ObservationReply::Runs {
+                    scopes: self.core.scopes.clone(),
+                }),
+            )));
+            self.feature().reply(action.tag, reply);
+        }
         self.pump();
     }
 
@@ -723,7 +774,7 @@ fn a_new_incarnation_revokes_the_run_and_its_pictures() {
     let mut rig = Rig::new(&["run-1"]);
     rig.watch("run-1", 1);
     rig.core.scopes = vec![scope_in("t", "run-1", "i2")];
-    rig.click("Refresh agent pages");
+    rig.advance(RELIST_PERIOD);
     let feature = &rig.state().feature;
     assert!(feature.live.is_none() && feature.stopped.is_empty());
     assert_eq!(
@@ -797,7 +848,7 @@ fn a_refused_subscription_is_shown_and_waits_for_the_user() {
     assert!(rig.state().feature.live.is_none());
     assert_eq!(rig.core.subscribes(), 1, "it is not retried by itself");
     rig.harness.get_by_label_contains("denied");
-    rig.click("Refresh agent pages");
+    rig.click("Retry observation");
     assert_eq!(rig.core.subscribes(), 2);
     assert!(rig.state().feature.live.is_some());
 }
@@ -1381,4 +1432,192 @@ fn a_picture_the_list_shows_as_it_is_is_not_put_to_the_core() {
         before + 1,
         "only the new watch's own snapshot, no check of the current page"
     );
+}
+
+// ---- the period and the retries ------------------------------------------
+
+#[test]
+fn the_run_list_is_asked_again_thirty_seconds_after_an_answer_and_not_before() {
+    let mut rig = Rig::new(&["run-1"]);
+    assert_eq!(rig.core.lists(), 1);
+    assert_eq!(
+        rig.state().feature.relist_in(rig.now()),
+        Some(RELIST_PERIOD),
+        "the screen is woken for the period"
+    );
+    assert!(rig.harness.query_by_label("Refresh agent pages").is_none());
+    assert!(rig.harness.query_by_label("Retry list").is_none());
+    assert!(rig.harness.query_by_label("Retry observation").is_none());
+
+    rig.advance(RELIST_PERIOD - Duration::from_millis(1));
+    assert_eq!(rig.core.lists(), 1);
+    assert_eq!(
+        rig.state().feature.relist_in(rig.now()),
+        Some(Duration::from_millis(1))
+    );
+    rig.advance(Duration::from_millis(1));
+    assert_eq!(rig.core.lists(), 2);
+    assert_eq!(
+        rig.state().feature.relist_in(rig.now()),
+        Some(RELIST_PERIOD)
+    );
+    rig.advance(Duration::from_secs(10));
+    assert_eq!(
+        rig.core.lists(),
+        2,
+        "the next period counts from the answer"
+    );
+}
+
+#[test]
+fn a_period_read_in_flight_changes_nothing_on_screen_and_is_never_doubled() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let size = rig.shown_size();
+    assert!(size.is_some());
+    let subscribes = rig.core.subscribes();
+    let lists = rig.core.lists();
+    rig.core.defer_lists = true;
+    rig.advance(RELIST_PERIOD);
+    assert_eq!(rig.core.lists(), lists + 1);
+    assert_eq!(rig.state().feature.relist_in(rig.now()), None);
+    rig.advance(RELIST_PERIOD * 4);
+    assert_eq!(rig.core.lists(), lists + 1, "one list at a time");
+    assert!(
+        rig.harness
+            .query_by_label_contains("Looking for agent pages")
+            .is_none()
+    );
+    assert_eq!(rig.shown_size(), size);
+    assert!(rig.state().feature.live.is_some());
+    assert_eq!(
+        rig.state().feature.target.as_ref().map(|t| t.run.as_str()),
+        Some("run-1"),
+        "the selection stays"
+    );
+
+    rig.core.scopes = vec![scope("run-1"), scope("run-2")];
+    rig.release_lists();
+    rig.harness.get_by_label("run-2");
+    assert_eq!(rig.shown_size(), size);
+    assert_eq!(
+        rig.core.subscribes(),
+        subscribes,
+        "no new watch for the answer"
+    );
+    assert_eq!(
+        rig.state().feature.relist_in(rig.now()),
+        Some(RELIST_PERIOD)
+    );
+}
+
+#[test]
+fn a_failed_period_read_keeps_the_runs_and_the_picture_and_waits_for_retry_list() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let size = rig.shown_size();
+    let lists = rig.core.lists();
+    rig.core.fail_list = true;
+    rig.advance(RELIST_PERIOD);
+    assert_eq!(rig.core.lists(), lists + 1);
+    rig.harness.get_by_label("list refused");
+    rig.harness.get_by_label("run-1");
+    assert_eq!(rig.shown_size(), size);
+    assert!(rig.state().feature.live.is_some());
+    assert_eq!(rig.state().feature.relist_in(rig.now()), None);
+    rig.advance(RELIST_PERIOD * 4);
+    assert_eq!(rig.core.lists(), lists + 1, "a failure stops the period");
+
+    rig.core.fail_list = false;
+    rig.click("Retry list");
+    assert_eq!(rig.core.lists(), lists + 2, "one click, one list");
+    assert!(rig.harness.query_by_label("list refused").is_none());
+    assert!(rig.harness.query_by_label("Retry list").is_none());
+    rig.advance(RELIST_PERIOD);
+    assert_eq!(rig.core.lists(), lists + 3, "the period runs again");
+}
+
+#[test]
+fn a_failed_first_list_offers_retry_list() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.core.fail_list = true;
+    rig.visible(false);
+    rig.visible(true);
+    rig.harness.get_by_label("list refused");
+    let lists = rig.core.lists();
+    rig.advance(RELIST_PERIOD * 4);
+    assert_eq!(rig.core.lists(), lists, "nothing is asked by itself");
+    rig.core.fail_list = false;
+    rig.click("Retry list");
+    assert_eq!(rig.core.lists(), lists + 1);
+    rig.harness.get_by_label("run-1");
+    assert!(rig.harness.query_by_label("Retry list").is_none());
+}
+
+#[test]
+fn nothing_is_asked_by_the_period_while_hidden_or_disconnected() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.visible(false);
+    let lists = rig.core.lists();
+    rig.advance(RELIST_PERIOD * 4);
+    assert_eq!(rig.core.lists(), lists, "hidden");
+    rig.visible(true);
+    assert_eq!(rig.core.lists(), lists + 1, "shown again reads once");
+
+    rig.harness.state_mut().connected = false;
+    rig.advance(RELIST_PERIOD * 4);
+    assert_eq!(rig.core.lists(), lists + 1, "disconnected");
+}
+
+#[test]
+fn a_period_read_neither_releases_a_hold_nor_watches_a_held_run() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.core.refuse_subscribe = Some(FeatureError::new("denied"));
+    rig.click("run-1");
+    assert_eq!(rig.core.subscribes(), 1);
+    rig.harness.get_by_label_contains("denied");
+    let lists = rig.core.lists();
+    rig.advance(RELIST_PERIOD);
+    assert_eq!(rig.core.lists(), lists + 1);
+    assert_eq!(rig.core.subscribes(), 1, "a held run is not watched");
+    assert!(rig.state().feature.hold.is_some());
+    rig.harness.get_by_label_contains("denied");
+
+    // Retry list reads the runs and leaves the hold where it is.
+    rig.core.fail_list = true;
+    rig.advance(RELIST_PERIOD);
+    rig.core.fail_list = false;
+    rig.click("Retry list");
+    assert_eq!(rig.core.subscribes(), 1);
+    assert!(rig.state().feature.hold.is_some());
+
+    rig.click("Retry observation");
+    assert_eq!(rig.core.subscribes(), 2);
+    assert!(rig.state().feature.hold.is_none());
+    assert!(rig.state().feature.live.is_some());
+    assert!(rig.harness.query_by_label("Retry observation").is_none());
+}
+
+#[test]
+fn a_run_shown_again_after_its_page_changed_is_watched_only_under_the_new_generation() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    rig.core.scopes = vec![scope_gen("run-1", 2)];
+    rig.core.defer_lists = true;
+    rig.visible(true);
+    assert_eq!(
+        rig.core.subscribes(),
+        1,
+        "nothing is subscribed while the list is out"
+    );
+    rig.release_lists();
+    assert_eq!(rig.core.subscribes(), 2);
+    let watched: Vec<_> = rig.core.commands.iter().filter_map(subscribe_of).collect();
+    assert_eq!(watched.last(), Some(&&scope_gen("run-1", 2)));
+}
+
+#[test]
+fn no_note_tells_the_person_to_refresh() {
+    assert!(!NOTE_CAPACITY.to_lowercase().contains("refresh"));
 }

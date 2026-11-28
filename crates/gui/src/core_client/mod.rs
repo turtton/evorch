@@ -829,7 +829,7 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
             if !shared.connected {
                 return;
             }
-            shared.cache.history_asked(thread.as_str());
+            shared.cache.history_requested(thread.as_str());
         }
         // One ask per scope at a time: the page it returns moves the cursor on.
         Action::History(thread, run, true) => {

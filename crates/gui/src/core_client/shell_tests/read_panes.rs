@@ -351,13 +351,8 @@ fn the_memory_tab_lists_and_opens_a_lesson_in_english() {
     let mut screen = screen(egui::vec2(1440.0, 900.0));
     screen.settle();
     screen.read_in_front(FeatureId::Memory);
-    for label in [
-        "Refresh",
-        "3 lessons",
-        "lesson-redirect",
-        "promoted",
-        "Approved",
-    ] {
+    assert!(screen.harness.query_by_label("Refresh").is_none());
+    for label in ["3 lessons", "lesson-redirect", "promoted", "Approved"] {
         screen.harness.get_by_label(label);
     }
     screen.harness.get_by_label("lesson-tests").click();
