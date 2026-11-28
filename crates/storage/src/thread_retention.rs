@@ -122,8 +122,8 @@ pub enum BlockReason {
     FamilyMemberNotDue(String),
     FamilyMemberBlocked(String),
     FamilyUnresolved(String),
-    /// An owner (a running or recently running conversation) holds the thread.
-    Owner(String),
+    /// A current binding, recovery reservation, or runtime-use gate holds the thread.
+    SafetyHold(String),
     /// Closure search or event backfill is not finished.
     Exploring,
     OverBudget,
@@ -420,7 +420,7 @@ impl Database {
     }
 
     /// Re-check the family's closure and protections and confirm its deletion in
-    /// one transaction. `owner_blocks` maps thread IDs held by an owner to the
+    /// one transaction. `safety_blocks` maps thread IDs held by a safety gate to the
     /// reason. Same exclusivity requirement as [`Self::retention_explore`]; use
     /// [`Self::retention_finalize_budget`] for the first budget and
     /// [`FinalizeBudget::doubled`] to retry after `OverBudget`.
@@ -432,7 +432,7 @@ impl Database {
         family_key: &str,
         input: &RetentionInput,
         policy: &ThreadRetentionPolicy,
-        owner_blocks: &BTreeMap<String, String>,
+        safety_blocks: &BTreeMap<String, String>,
         binding: &BindingInput,
         budget: FinalizeBudget,
     ) -> Result<FinalizeOutcome, StorageError> {
@@ -441,7 +441,7 @@ impl Database {
             family_key,
             input,
             policy,
-            owner_blocks,
+            safety_blocks,
             binding,
             budget,
         )

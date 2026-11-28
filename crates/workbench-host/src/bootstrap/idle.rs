@@ -19,7 +19,6 @@ impl BootstrappedHost {
             // managed retry alive even before it can publish any local RunEntry.
             || self.recovery_diagnostics.as_ref().is_some_and(|d| d.has_pending_work())
             || self.runtime.has_paused_recovery()
-            || self.runtime.pending_lane_stop_writes() != 0
             || !self.runtime.pending_lane_admissions().is_empty()
             || self.host.lock().unwrap().service().has_background_work()
             || self.area_tasks.busy()

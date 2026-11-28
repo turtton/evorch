@@ -54,7 +54,7 @@ fn snapshot(store: &dyn QuarantineStore, limit: usize) -> Result<QuarantineSnaps
 
 impl AdminFacade for QuarantineFacade {
     /// The current state of the one graph a discard names, as the binding a
-    /// client would have to hold. A graph with an owner is not this leaf's.
+    /// client would have to hold. Only a cold, terminal graph is this leaf's.
     fn inspect<'a>(
         &'a self,
         intent: &'a AdminIntent,
@@ -80,8 +80,6 @@ impl AdminFacade for QuarantineFacade {
                         capture_id: found.item.capture_id,
                         expected_revision: found.item.revision,
                         expected_core_epoch: epoch,
-                        owner_identity: None,
-                        owner_generation: None,
                         operation_id,
                     }))
                 })
@@ -148,8 +146,6 @@ impl AdminFacade for QuarantineFacade {
         let binding = confirmed.binding;
         if expected != AdminInspection::Graph(binding.clone())
             || binding.expected_core_epoch != self.epoch
-            || binding.owner_identity.is_some()
-            || binding.owner_generation.is_some()
         {
             return Err(conflict());
         }

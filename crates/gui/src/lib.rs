@@ -18,7 +18,6 @@ pub mod composer_input;
 pub mod core_client;
 pub mod diff;
 pub mod dock;
-pub mod events;
 pub mod fixture;
 pub mod format;
 pub mod keymap;

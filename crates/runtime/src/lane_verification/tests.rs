@@ -722,12 +722,6 @@ fn reviewer_purpose_is_required_and_wrong_roles_get_no_submit_capability() {
     );
 }
 
-struct NoOwner;
-impl crate::pull_requests::OwnershipView for NoOwner {
-    fn owned_permit(&self, _: &str) -> Option<crate::ownership::OwnerPermit> {
-        None
-    }
-}
 struct Clock(std::sync::atomic::AtomicI64);
 impl crate::pull_requests::WallClock for Clock {
     fn now_ns(&self) -> i64 {
@@ -778,17 +772,6 @@ fn install_pr(
     crate::pull_requests::FakePullRequestSource,
     storage::pull_requests::PullRequestKey,
 ) {
-    install_pr_with(f, Arc::new(NoOwner))
-}
-fn install_pr_with(
-    f: &Fixture,
-    ownership: Arc<dyn crate::pull_requests::OwnershipView>,
-) -> (
-    crate::pull_requests::PullRequestService,
-    Arc<Clock>,
-    crate::pull_requests::FakePullRequestSource,
-    storage::pull_requests::PullRequestKey,
-) {
     let key = storage::pull_requests::PullRequestKey::github("owner/repo", 2).unwrap();
     f.storage
         .handle()
@@ -805,7 +788,6 @@ fn install_pr_with(
         crate::pull_requests::PullRequestService::start(crate::pull_requests::ServiceParts {
             storage: f.storage.handle(),
             source: Arc::new(source.clone()),
-            ownership,
             environment: Arc::new(Environment {
                 run: f.lane.root_run_id.to_string(),
                 thread: f.lane.thread_id.clone(),
@@ -836,7 +818,7 @@ async fn fresh_pr_versions_are_bound_to_a_review_and_a_close_never_fetches_or_ch
         f.runtime.verification_pr(&lane).await.unwrap_err().code,
         "evidence_unavailable"
     );
-    // NoFacts + NotOwner: the review still starts, with the missing facts noted.
+    // Missing PR facts: the review still starts, with the missing facts noted.
     let early = f
         .runtime
         .verify_lane(f.lead, &lane.lane_id, lane.latest_report_seq)
@@ -877,7 +859,13 @@ async fn fresh_pr_versions_are_bound_to_a_review_and_a_close_never_fetches_or_ch
         .handle()
         .commit_pull_request_fetch(&key, seq, facts(), clock.now_ns() + 1)
         .unwrap();
+    let fetches_before_close = source.calls().len();
     let closed = f.close(&v).await.unwrap();
+    assert_eq!(
+        source.calls().len(),
+        fetches_before_close,
+        "close must never fetch"
+    );
     assert_eq!(closed.review.unwrap().pr_evidence, v.pr_evidence);
     clock.0.store(
         clock.now_ns() + 61_000_000_000,
@@ -905,10 +893,7 @@ async fn fresh_pr_versions_are_bound_to_a_review_and_a_close_never_fetches_or_ch
         f.close(&v).await.unwrap().outcome,
         LaneCloseOutcome::AlreadyClosed
     ); // LastFetchFailed
-    assert!(
-        source.calls().is_empty(),
-        "neither close nor a NotOwner refresh fetched"
-    );
+
     assert_eq!(
         f.storage
             .handle()
@@ -959,9 +944,14 @@ async fn relink_head_and_required_facts_changes_never_reject_a_close() {
                 .commit_pull_request_fetch(&key, seq, changed, clock.now_ns())
                 .unwrap();
         }
+        let fetches_before_close = source.calls().len();
         let closed = f.close(&v).await.unwrap();
         assert_eq!(closed.review.unwrap().pr_evidence, v.pr_evidence);
-        assert!(source.calls().is_empty());
+        assert_eq!(
+            source.calls().len(),
+            fetches_before_close,
+            "close never fetches"
+        );
         service.shutdown();
         f.cleanup().await;
     }
@@ -1423,19 +1413,10 @@ async fn a_brief_and_ready_update_between_the_lane_and_target_reads_is_rejected(
     f.cleanup().await;
 }
 #[tokio::test]
-async fn an_owned_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
+async fn a_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
     let f = Fixture::new(Mode::Approve).await;
     require_pr(&f);
-    let host = Arc::new(
-        crate::ownership::OwnerHost::open(
-            f.dir.sockets(),
-            config::OwnershipConfig::default(),
-            f.runtime.shared.bus.clone(),
-        )
-        .unwrap(),
-    );
-    host.start(&f.lane.thread_id).unwrap();
-    let (service, clock, source, key) = install_pr_with(&f, host);
+    let (service, clock, source, key) = install_pr(&f);
     source.push_ok(
         &key,
         crate::pull_requests::FetchedPullRequest {
@@ -1450,7 +1431,7 @@ async fn an_owned_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
     let v = f.verify().await;
     assert!(v.pr_evidence.is_some());
     let fetches_by_verify = source.calls().len();
-    assert!(fetches_by_verify >= 1, "verify refreshed through the owner");
+    assert!(fetches_by_verify >= 1, "verify refreshed PR facts");
     f.runtime
         .wait(v.reviewer_run_id.parse().unwrap())
         .await
@@ -1466,19 +1447,10 @@ async fn an_owned_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn verify_still_starts_with_a_caveat_when_owned_pr_refresh_times_out() {
+async fn verify_still_starts_with_a_caveat_when_pr_refresh_times_out() {
     let f = Fixture::new(Mode::Approve).await;
     require_pr(&f);
-    let owner = Arc::new(
-        crate::ownership::OwnerHost::open(
-            f.dir.sockets(),
-            Default::default(),
-            f.runtime.shared.bus.clone(),
-        )
-        .unwrap(),
-    );
-    owner.start(&f.lane.thread_id).unwrap();
-    let (service, _, source, key) = install_pr_with(&f, owner);
+    let (service, _, source, key) = install_pr(&f);
     let gate = source.push_gate(&key);
     let ready_seq = f
         .storage
@@ -1490,12 +1462,14 @@ async fn verify_still_starts_with_a_caveat_when_owned_pr_refresh_times_out() {
     let verify = f.runtime.verify_lane(f.lead, &f.lane.lane_id, ready_seq);
     let expire = async {
         gate.arrived().await;
+        let fetches_at_timeout = source.calls().len();
         tokio::time::advance(std::time::Duration::from_secs(
             config::PullRequestsConfig::default().review_refresh_timeout_seconds,
         ))
         .await;
+        fetches_at_timeout
     };
-    let (result, ()) = tokio::join!(verify, expire);
+    let (result, fetches_at_timeout) = tokio::join!(verify, expire);
     let v = result.unwrap();
     assert!(v.pr_evidence.is_none());
     assert!(
@@ -1509,7 +1483,12 @@ async fn verify_still_starts_with_a_caveat_when_owned_pr_refresh_times_out() {
         .wait(v.reviewer_run_id.parse().unwrap())
         .await
         .unwrap();
-    assert_eq!(source.calls().len(), 1);
+    assert!(fetches_at_timeout >= 1, "the gated review fetch started");
+    assert_eq!(
+        source.calls().len(),
+        fetches_at_timeout,
+        "timeout must not start another fetch"
+    );
     service.shutdown();
     drop(gate);
     f.cleanup().await;

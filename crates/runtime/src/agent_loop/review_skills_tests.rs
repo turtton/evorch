@@ -358,7 +358,6 @@ async fn an_escalation_seed_keeps_the_skills_its_source_had_read() {
             source,
             "worker memo",
             &RunConfig::default(),
-            false,
             &Default::default(),
             None,
         )

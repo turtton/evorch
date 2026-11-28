@@ -35,7 +35,6 @@ const COMMAND_NAMESPACE = {
   resolve_project: "conversation",
   create_execution: "conversation",
   create_goal: "conversation",
-  prepare_existing_thread: "conversation",
   upload_image: "conversation",
   discard_attachment: "conversation",
   send_chat: "conversation",

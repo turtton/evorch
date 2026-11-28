@@ -79,18 +79,6 @@ impl AgentRuntime {
         }
         drop(runs);
         drop(admissions);
-        let permits = authority
-            .members
-            .values()
-            .map(|c| {
-                c.ownership
-                    .clone()
-                    .ok_or_else(|| error("quarantine Stop current ownership required"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // Hold these guards through readback AND the FULL CAS. A handoff cannot
-        // manufacture rights from either the saved recipe or the current row.
-        let _authority = crate::ownership::OwnerPermit::mutation_guards(&permits).map_err(error)?;
         let store = self
             .shared
             .run_store

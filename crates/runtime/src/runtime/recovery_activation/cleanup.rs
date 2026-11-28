@@ -297,7 +297,7 @@ fn coherent(s: &RecoveryClaimSnapshot, activated: bool) -> bool {
         .collect::<BTreeSet<_>>();
     if !manifest.committed
         || manifest.superseded != activated
-        || manifest.schema_version != 1
+        || manifest.schema_version != storage::recovery::RECOVERY_SCHEMA_VERSION
         || claimed.is_empty()
         || claimed != resume
         || claimed.len() != s.claim.members.len()

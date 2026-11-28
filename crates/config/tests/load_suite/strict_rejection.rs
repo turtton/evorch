@@ -733,3 +733,27 @@ typo_field = true
         &["providers.local.typo_field", "unknown field"],
     );
 }
+
+// Given: ADR 0024 のプロセス間所有権が廃止された後も残る [ownership] セクション
+// When: strict / 通常のどちらで読み込む
+// Then: 黙って無視せず、セクションごとの削除が必要だと path 付きで伝えて拒否する
+#[test]
+fn removed_ownership_section_is_refused_with_a_removal_instruction() {
+    for text in [
+        "[ownership]\nheartbeat_ms = 100\nlease_ms = 500\ngrace_ms = 1000\n",
+        "[ownership]\n",
+    ] {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+        let user = tmp.path().join("user");
+        write_file(&user.join("config.toml"), text);
+        let opts = LoadOptions {
+            user_config_dir: Some(user),
+            read_env: false,
+            ..Default::default()
+        };
+
+        for load in [Config::load, Config::load_strict] {
+            assert_error_contains(load(&opts), &["ownership", "delete", "[ownership]"]);
+        }
+    }
+}

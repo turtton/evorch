@@ -117,7 +117,7 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.validate_question_parent(caller, child)?;
-        let (registered_role, ownership, budget, terminal) = {
+        let (registered_role, budget, terminal) = {
             let runs = super::super::lock_runs(&self.shared.runs);
             let entry = runs.get(&child);
             let parent = &runs[&caller];
@@ -162,16 +162,10 @@ impl AgentRuntime {
             }
             (
                 entry.map(|entry| entry.role),
-                parent.config.ownership.clone(),
                 entry.map_or_else(Default::default, |entry| entry.config.budget.clone()),
                 terminal,
             )
         };
-        let _authority = ownership
-            .as_ref()
-            .map(|permit| permit.mutation_guard())
-            .transpose()
-            .map_err(|error| error.to_string())?;
         let bundle = store
             .restore_bundle(child)
             .map_err(read_failure)?
@@ -205,7 +199,7 @@ impl AgentRuntime {
             return Ok(None);
         }
         let restored = self
-            .renewed_child_state(&bundle, &descriptor, ownership.as_ref())
+            .renewed_child_state(&bundle, &descriptor)
             .map_err(|error| {
                 format!("answer saved, but child continuation is unavailable: {error}")
             })?;
@@ -219,7 +213,6 @@ impl AgentRuntime {
             lane_scope: descriptor.lane_scope,
             spawn_credits: descriptor.spawn_credits.clone(),
             keep_alive: descriptor.keep_alive,
-            ownership,
             budget,
             ..RunConfig::default()
         };

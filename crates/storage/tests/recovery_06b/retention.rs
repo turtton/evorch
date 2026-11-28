@@ -190,7 +190,7 @@ fn prepared_claim_is_an_owner_hold_not_a_partial_deletion() {
     let states = f.settle();
     assert_eq!(
         f.finalize(&states[0].0, u64::MAX),
-        FinalizeOutcome::Blocked(BlockReason::Owner("recovery claim pending".into()))
+        FinalizeOutcome::Blocked(BlockReason::SafetyHold("recovery claim pending".into()))
     );
     assert_eq!(f.tombstones(), 0);
 }

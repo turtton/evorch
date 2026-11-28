@@ -23,7 +23,7 @@ pub async fn checked_target(dir: &Path) -> (Arc<CurrentElf>, CaptureCheckedTarge
         version: 1,
         build_identity: core_instance::handoff::elf_identity(&elf).unwrap(),
         elf_path: elf,
-        handoff_format: 1,
+        handoff_format: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_format: 1,
         schema: SchemaRange {
             minimum: 1,
@@ -54,7 +54,7 @@ pub async fn checked_target(dir: &Path) -> (Arc<CurrentElf>, CaptureCheckedTarge
         },
         &current,
         TargetRequirements {
-            handoff: 1,
+            handoff: core_instance::handoff::HANDOFF_FORMAT_VERSION,
             snapshot: 1,
             storage_schema: 62,
             protocol: 1,

@@ -166,6 +166,20 @@ impl Fixture {
     async fn new() -> Self {
         let dir = test_socket_dir::SplitDir::new();
         let root = dir.path().canonicalize().unwrap();
+        let mut sidebar = workspace_state::SidebarState::default();
+        sidebar
+            .add_project(
+                workspace_state::ProjectId::new("fixture-project"),
+                "fixture",
+                &root,
+            )
+            .unwrap();
+        sidebar.projects[0].trust = workspace_state::TrustState::Approved;
+        std::fs::write(
+            root.join("sidebar.json"),
+            serde_json::to_vec(&sidebar).unwrap(),
+        )
+        .unwrap();
         let wrapper = root.join("target.sh");
         let description = crate::handoff_description::describe().unwrap();
         std::fs::write(
@@ -210,7 +224,6 @@ impl Fixture {
         }
     }
     async fn chat(&mut self) -> RunId {
-        self.boot.owner.start("plain").unwrap();
         let events = self.boot.host.lock().unwrap().submit_local(
             HostCommand::SendChat(ChatInput {
                 submission_id: "first".into(),
@@ -247,22 +260,9 @@ impl Fixture {
         }
     }
     fn inventory(&self) -> Vec<RestartRecipeMember> {
-        let binding = self.source.bindings().unwrap();
-        let held = binding
-            .chats
-            .iter()
-            .filter_map(|(thread, run)| {
-                binding
-                    .permits
-                    .get(thread)
-                    .map(|permit| (*run, permit.clone()))
-            })
-            .collect();
-        self.boot.runtime.restart_recipe_inventory(&held).unwrap()
+        self.boot.runtime.restart_recipe_inventory().unwrap()
     }
     async fn configured_chat(&mut self, mut config: RunConfig) -> RunId {
-        let permit = self.boot.owner.start("plain").unwrap();
-        config.ownership = Some(permit.clone());
         config.interactive = true;
         config.keep_alive = true;
         let run = self
@@ -274,7 +274,6 @@ impl Fixture {
             let mut host = self.boot.host.lock().unwrap();
             let service = host.service_mut();
             service.bindings.chat_runs.insert("plain".into(), run);
-            service.bindings.chat_permits.insert("plain".into(), permit);
             service.publish_lane_bindings();
         }
         self.waiting(run).await;
@@ -286,7 +285,6 @@ impl Fixture {
     async fn rejected(&self, kind: &str) {
         let calls = self.calls();
         let binding_observation = self.source.bindings().unwrap().observed;
-        let owner = self.boot.owner.owned_permit("plain").unwrap();
         let error = self.source.collect().await.err().expect("must reject");
         assert_eq!(error.code, ErrorCode::UnsupportedCapability);
         assert!(
@@ -348,10 +346,6 @@ impl Fixture {
         assert!(db.restart_transactions().unwrap().is_empty());
         assert_eq!(self.calls(), calls);
         assert!(binding_observation.is_current());
-        assert!(same_permit(
-            &owner,
-            &self.boot.owner.owned_permit("plain").unwrap()
-        ));
     }
     async fn lane(
         &mut self,
@@ -377,7 +371,7 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
 }
 
 #[tokio::test]
-async fn restored_lane_can_recollect_recipes_without_gui_permits_or_a_second_physical_restart() {
+async fn restored_lane_can_recollect_recipes_without_gui_bindings_or_a_second_physical_restart() {
     ordinary_or_lane_graph(true, false).await;
 }
 
@@ -438,16 +432,11 @@ async fn ordinary_or_lane_graph(is_lane: bool, switch_choice: bool) {
         )
         .unwrap();
     f.model.entered.notified().await;
-    let bindings = f.source.bindings().unwrap();
-    let initial = f.inventory();
-    let mut held = held_permits(&bindings, Some(&initial));
-    held.insert(root, f.boot.owner.owned_permit(&thread).unwrap());
-    let inventory = f.boot.runtime.restart_recipe_inventory(&held).unwrap();
+    let inventory = f.boot.runtime.restart_recipe_inventory().unwrap();
     let child_metadata = inventory.iter().find(|m| m.run == child).unwrap();
     assert_eq!(child_metadata.root, root);
     assert_eq!(child_metadata.parent, Some(root));
     assert_eq!(child_metadata.thread.as_deref(), Some(thread.as_str()));
-    assert!(child_metadata.permit_matches);
     let root_metadata = inventory.iter().find(|m| m.run == root).unwrap();
     assert!(root_metadata.conversation);
     assert_eq!(root_metadata.lane, is_lane);
@@ -498,7 +487,7 @@ async fn ordinary_or_lane_graph(is_lane: bool, switch_choice: bool) {
     }
     assert_eq!(f.calls(), calls, "recipe evidence must not activate runs");
     // A normal child parks before executing its returned tool. Recovery uses
-    // current owner/config authority, never the saved descriptor as authority.
+    // current binding/config authority, never the saved descriptor as authority.
     f.boot
         .runtime
         .begin_planned_restart_quiesce(&observed.recipes)
@@ -521,11 +510,6 @@ async fn ordinary_or_lane_graph(is_lane: bool, switch_choice: bool) {
         .save_recovery_graph("ordinary", &records)
         .unwrap();
     assert_eq!(manifests.len(), if is_lane { 2 } else { 1 });
-    // Logical adoption does not perform the physical successor owner claim.
-    // End the parked child's live turn with its current scoped permit first.
-    let mut predecessor = f.boot.owner.owned_permit(&thread).unwrap();
-    predecessor.run_id = Some(child.to_string());
-    predecessor.checkpoint(&[]).unwrap();
     // Logical source and target coexist in this unit test. Take a consistent
     // database snapshot so target incarnations cannot fence source cleanup.
     let recovery_config = storage::StorageConfig {
@@ -581,13 +565,12 @@ async fn ordinary_or_lane_graph(is_lane: bool, switch_choice: bool) {
         workbench_host::bootstrap::recovery::bindings::load(&recovery_config, &projects).unwrap();
     let authority = workbench_host::bootstrap::recovery::authority::CurrentAuthorityProvider {
         runtime: &restarted,
-        owner: &f.boot.owner,
         bindings: &bindings,
         storage: &recovery_config,
         writer: &recovered_storage.handle(),
         config_dir: f._dir.path(),
     }
-    .resolve_owned(&records, &std::collections::BTreeSet::from([root, child]))
+    .resolve_current(&records, &std::collections::BTreeSet::from([root, child]))
     .unwrap();
     restarted.bind_thread_root(&thread, root).unwrap();
     let reservation = restarted
@@ -649,7 +632,7 @@ async fn ordinary_or_lane_graph(is_lane: bool, switch_choice: bool) {
         // recollection observes a stable live run, not an intermediate snapshot.
         f.model.parent_entered.notified().await;
         // Startup also uses goal_projects as project metadata, not evidence of
-        // an actual goal. Neither this metadata nor missing GUI permits blocks
+        // an actual goal. Neither this metadata nor absent GUI bindings blocks
         // a subsequent recipe collection.
         f.boot
             .host
@@ -662,7 +645,6 @@ async fn ordinary_or_lane_graph(is_lane: bool, switch_choice: bool) {
         let source = HostRecipeSource {
             runtime: restarted.clone(),
             host: f.boot.host.clone(),
-            owner: f.boot.owner.clone(),
             storage: recovery_config.clone(),
             reader: f.source.reader.clone(),
         };
@@ -712,7 +694,7 @@ async fn host_goal_binding_rejects_instead_of_becoming_none() {
 }
 
 #[tokio::test]
-async fn missing_binding_or_retained_permit_never_defaults_to_core_owned() {
+async fn missing_binding_never_defaults_to_core_owned() {
     let mut f = Fixture::new().await;
     let root = f.chat().await;
     {
@@ -721,16 +703,14 @@ async fn missing_binding_or_retained_permit_never_defaults_to_core_owned() {
         service.bindings.chat_runs.clear();
         service.publish_lane_bindings();
     }
-    assert!(!f.inventory()[0].permit_matches);
-    f.rejected("ownership").await;
+    f.rejected("binding").await;
     {
         let mut host = f.boot.host.lock().unwrap();
         let service = host.service_mut();
         service.bindings.chat_runs.insert("plain".into(), root);
-        service.bindings.chat_permits.clear();
         service.publish_lane_bindings();
     }
-    f.rejected("ownership").await;
+    assert_eq!(f.source.collect().await.unwrap().recipes.len(), 1);
     f.shutdown().await;
 }
 
@@ -853,6 +833,9 @@ async fn lane_ledger_alone_rejects_a_plain_live_graph() {
         .unwrap();
     assert!(!f.inventory()[0].lane);
     f.rejected("lane").await;
+    // Undo the deliberately inconsistent ledger before normal durable Stop.
+    sql.execute("DELETE FROM lanes WHERE lane_id='ledger-only'", [])
+        .unwrap();
     f.shutdown().await;
 }
 
@@ -942,7 +925,7 @@ async fn live_lane_team_and_internal_classifications_are_copied_and_rejected() {
         let mut f = Fixture::new().await;
         f.configured_chat(config).await;
         let member = &f.inventory()[0];
-        assert!(member.parent.is_none() && member.conversation && member.permit_matches);
+        assert!(member.parent.is_none() && member.conversation);
         assert_eq!(member.thread.as_deref(), Some("plain"));
         assert_eq!(member.lane, kind == "lane");
         assert_eq!(member.team, kind == "team");
@@ -966,87 +949,12 @@ async fn runtime_goal_is_not_hidden_by_plain_host_binding() {
 }
 
 #[tokio::test]
-async fn cli_like_non_conversation_root_is_not_promoted_even_with_a_permit() {
+async fn cli_like_non_conversation_root_is_not_promoted_by_a_binding() {
     let mut f = Fixture::new().await;
     f.configured_chat(RunConfig::default()).await;
     assert!(!f.inventory()[0].conversation);
     f.rejected("non-conversation root").await;
     f.shutdown().await;
-}
-
-#[tokio::test]
-async fn foreign_retained_permit_cannot_match_live_runtime_metadata() {
-    let mut f = Fixture::new().await;
-    f.chat().await;
-    {
-        let mut host = f.boot.host.lock().unwrap();
-        let service = host.service_mut();
-        service
-            .bindings
-            .chat_permits
-            .get_mut("plain")
-            .unwrap()
-            .lease
-            .owner_id = "foreign".into();
-        service.publish_lane_bindings();
-    }
-    assert!(!f.inventory()[0].permit_matches);
-    f.rejected("ownership").await;
-    f.shutdown().await;
-}
-
-#[tokio::test]
-async fn only_current_owner_generation_or_identity_changes_do_not_reauthorize_retained_permits() {
-    for change_identity in [false, true] {
-        let mut f = Fixture::new().await;
-        f.chat().await;
-        let inventory = f.inventory();
-        let binding = f.source.bindings().unwrap();
-        let held = binding.permits["plain"].clone();
-        let calls = f.calls();
-        let mut registry =
-            runtime::ownership::Registry::open_existing(&held.registry_path).unwrap();
-        let original = registry.attach("plain").unwrap();
-        registry
-            .update("plain", |owner| {
-                if change_identity {
-                    owner.lease.owner_id = "different-current-owner".into();
-                } else {
-                    owner.lease.generation += 1;
-                }
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(
-            f.inventory(),
-            inventory,
-            "runtime and held permit stay unchanged"
-        );
-        assert!(binding.observed.is_current(), "only owner evidence changed");
-        let error = f
-            .source
-            .collect()
-            .await
-            .err()
-            .expect("current owner must match");
-        assert_eq!(error.code, ErrorCode::UnsupportedCapability);
-        assert!(error.message.contains("foreign or fenced owner"));
-        assert_eq!(f.calls(), calls);
-        assert!(
-            storage::Database::open(f.boot.storage_config())
-                .unwrap()
-                .restart_transactions()
-                .unwrap()
-                .is_empty()
-        );
-        registry
-            .update("plain", |owner| {
-                *owner = original.clone();
-                Ok(())
-            })
-            .unwrap();
-        f.shutdown().await;
-    }
 }
 
 #[tokio::test]
@@ -1120,7 +1028,7 @@ fn lane_brief(policy: event_bus::LanePolicy) -> event_bus::LaneBrief {
 }
 
 #[tokio::test]
-async fn unopened_lanes_and_their_children_use_current_ledger_and_owner_not_chat_bindings() {
+async fn unopened_lanes_and_their_children_use_current_ledger_not_chat_bindings() {
     let mut f = Fixture::new().await;
     let lead = f.chat().await;
     let mut expected = vec![lead];
@@ -1152,13 +1060,6 @@ async fn unopened_lanes_and_their_children_use_current_ledger_and_owner_not_chat
                 .chats
                 .contains_key(&lane.thread_id)
         );
-        assert!(
-            !f.source
-                .bindings()
-                .unwrap()
-                .permits
-                .contains_key(&lane.thread_id)
-        );
         expected.extend([lane.root_run_id, child]);
     }
     let observed = f.source.collect().await.unwrap();
@@ -1183,7 +1084,7 @@ async fn unopened_lanes_and_their_children_use_current_ledger_and_owner_not_chat
 }
 
 #[tokio::test]
-async fn lane_ledger_scope_snapshot_and_foreign_owner_refusals_keep_the_cause_run() {
+async fn lane_ledger_scope_and_snapshot_refusals_keep_the_cause_run() {
     let mut f = Fixture::new().await;
     let lead = f.chat().await;
     let lane = f.lane(lead, event_bus::LanePolicy::Attached).await;
@@ -1204,27 +1105,6 @@ async fn lane_ledger_scope_snapshot_and_foreign_owner_refusals_keep_the_cause_ru
         rusqlite::params![lane.root_run_id.to_string(), &lane.lane_id],
     )
     .unwrap();
-    let permit = f.boot.owner.owned_permit(&lane.thread_id).unwrap();
-    let mut registry = runtime::ownership::Registry::open_existing(&permit.registry_path).unwrap();
-    let original = registry.attach(&lane.thread_id).unwrap();
-    registry
-        .update(&lane.thread_id, |o| {
-            o.lease.owner_id = "foreign".into();
-            Ok(())
-        })
-        .unwrap();
-    let failure = f.source.collect().await.err().unwrap();
-    assert!(
-        failure.message.contains(&lane.root_run_id.to_string())
-            && failure.message.contains("owner"),
-        "{failure:?}"
-    );
-    registry
-        .update(&lane.thread_id, |o| {
-            *o = original.clone();
-            Ok(())
-        })
-        .unwrap();
     conn.pragma_update(None, "foreign_keys", false).unwrap();
     conn.execute(
         "DELETE FROM run_contexts WHERE run_id=?1",
@@ -1276,6 +1156,13 @@ async fn lane_ledger_change_between_discovery_and_snapshot_validation_is_a_confl
         failure.message.contains(&lane.root_run_id.to_string()),
         "{failure:?}"
     );
+    rusqlite::Connection::open(&f.boot.storage_config().db_path)
+        .unwrap()
+        .execute(
+            "UPDATE lanes SET root_run_id=?1 WHERE lane_id=?2",
+            rusqlite::params![lane.root_run_id.to_string(), &lane.lane_id],
+        )
+        .unwrap();
     // The pinned futures borrow f until this scope ends; explicit shutdown is
     // performed below by stopping the runs and joining the bootstrap services.
     f.boot.shutdown().await.unwrap();

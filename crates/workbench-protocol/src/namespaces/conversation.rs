@@ -25,7 +25,6 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "resolve_project",
     "create_execution",
     "create_goal",
-    "prepare_existing_thread",
     "begin_attachment",
     "append_attachment",
     "finish_attachment",
@@ -58,12 +57,6 @@ pub enum ConversationCommand {
     CreateExecution(SendChat),
     /// Start the desktop team/goal entry point without a synthetic chat prompt.
     CreateGoal(SubmitGoal),
-    /// Opt-in legacy import. Does not itself start/resume an agent. Only a
-    /// released, demonstrably offline owner may be claimed; never force a lease.
-    PrepareExistingThread {
-        project: ProjectId,
-        thread: ThreadId,
-    },
     BeginAttachment {
         project: ProjectId,
         thread: ThreadId,
@@ -101,7 +94,6 @@ impl ConversationCommand {
             Self::ResolveProject { .. }
             | Self::CreateExecution(_)
             | Self::CreateGoal(_)
-            | Self::PrepareExistingThread { .. }
             | Self::BeginAttachment { .. }
             | Self::AppendAttachment { .. }
             | Self::FinishAttachment { .. }
@@ -160,8 +152,7 @@ impl ConversationCommand {
                 true,
             ),
             Self::FinishAttachment { .. } => Ok(()),
-            Self::PrepareExistingThread { .. }
-            | Self::DiscardAttachment { .. }
+            Self::DiscardAttachment { .. }
             | Self::CompactChat(_)
             | Self::DeliverFollowUpsNextTurn(_)
             | Self::WithdrawFollowUp(_) => Ok(()),
@@ -192,9 +183,6 @@ pub struct AttachmentLimits {
 pub enum ConversationResult {
     ProjectResolved {
         project: ProjectId,
-    },
-    ExistingThreadPrepared {
-        thread: ThreadId,
     },
     AttachmentBegun {
         upload_id: AttachmentId,

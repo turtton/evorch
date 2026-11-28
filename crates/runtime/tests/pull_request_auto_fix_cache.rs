@@ -8,7 +8,6 @@ use mock_openai::{
     cache_contract::{CacheProtocol, assert_append_only},
 };
 use runtime::lane_delivery::{LaneDeliveryHost, LaneDeliveryTarget};
-use runtime::ownership::{OwnerHost, OwnerPermit};
 use runtime::pull_requests::checkout::Checkout;
 use runtime::pull_requests::{
     CheckoutResolution, CiLogBundle, FakePullRequestLogSource, FakePullRequestSource,
@@ -152,8 +151,6 @@ struct World {
     clock: Arc<Clock>,
     environment: Arc<Environment>,
     delivery: Arc<Delivery>,
-    _owner: Arc<OwnerHost>,
-    permit: OwnerPermit,
 }
 fn text(s: &str) -> ScriptedResponse {
     ScriptedResponse::text_stream("response", MODEL, [s])
@@ -249,15 +246,6 @@ threshold=0.95
         if let Some(task) = runtime.bind_lane_delivery_host(host) {
             task.abort();
         }
-        let owner = Arc::new(
-            OwnerHost::open(
-                dir.sockets(),
-                config::OwnershipConfig::default(),
-                bus.clone(),
-            )
-            .unwrap(),
-        );
-        let permit = owner.start(THREAD).unwrap();
         let environment = Arc::new(Environment(Mutex::new("a".repeat(40))));
         let source = FakePullRequestSource::new();
         let logs = Arc::new(GatedLogs::default());
@@ -269,7 +257,6 @@ threshold=0.95
             ServiceParts {
                 storage: store.handle(),
                 source: Arc::new(source.clone()),
-                ownership: owner.clone(),
                 environment: environment.clone(),
                 bus: bus.clone(),
                 settings: config::PullRequestsConfig {
@@ -299,18 +286,11 @@ threshold=0.95
             clock,
             environment,
             delivery,
-            _owner: owner,
-            permit,
         };
         w.phase(AgentRunPhase::Waiting).await;
         let gate = w.source.push_gate(&key());
         w.service
-            .link(
-                THREAD,
-                "https://github.com/owner/repo/pull/42",
-                0,
-                &w.permit,
-            )
+            .link(THREAD, "https://github.com/owner/repo/pull/42", 0)
             .await
             .unwrap();
         gate.arrived().await;
@@ -408,7 +388,7 @@ threshold=0.95
     async fn toggle(&self, enabled: bool) {
         let p = self.service.auto_fix_state(THREAD).await.unwrap();
         self.service
-            .set_auto_fix(THREAD, 1, p.policy_revision, enabled, &self.permit)
+            .set_auto_fix(THREAD, 1, p.policy_revision, enabled)
             .await
             .unwrap();
     }
@@ -437,7 +417,7 @@ threshold=0.95
         if publishing {
             self.publish(head);
         } else {
-            self.service.refresh(THREAD, &self.permit).await.unwrap();
+            self.service.refresh(THREAD).await.unwrap();
         }
         gate.arrived().await;
         gate.release_ok(self.answer(head, pending));
@@ -608,7 +588,6 @@ async fn standard_runtime_rechecks_the_global_switch_after_ready_before_model_in
         w.service = w
             .runtime
             .start_pull_requests(
-                w._owner.clone(),
                 Arc::new(w.source.clone()),
                 config::PullRequestsConfig {
                     enabled: false,

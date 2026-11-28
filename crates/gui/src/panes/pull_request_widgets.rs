@@ -312,13 +312,10 @@ pub fn mismatches_of(
     }
 }
 
-/// One thing a person should know about how far the shown facts can be trusted. The three
-/// kinds are independent: each is shown whenever it holds, whatever the others say.
+/// One thing a person should know about how far the shown facts can be trusted. The kinds
+/// are independent: each is shown whenever it holds, whatever the others say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
-    /// This window does not poll the thread: another window owns it, or nobody does (after a
-    /// restart). What is shown is the last stored snapshot.
-    NotTracked,
     /// Nothing newer than [`STALE_AFTER_SECONDS`] arrived.
     Stale,
     /// The newest fetch failed; the facts shown are the last ones that arrived.
@@ -345,15 +342,11 @@ pub fn is_stale_at(fetched_at_ns: Option<i64>, now_ns: i64) -> bool {
 /// message of the newest fetch, when it failed.
 #[must_use]
 pub fn statuses_of(
-    tracked: bool,
     fetched_at_ns: Option<i64>,
     failure: Option<(&str, &str)>,
     now_ns: i64,
 ) -> Vec<Status> {
     let mut found = Vec::new();
-    if !tracked {
-        found.push(Status::NotTracked);
-    }
     if is_stale_at(fetched_at_ns, now_ns) {
         found.push(Status::Stale);
     }
@@ -440,8 +433,6 @@ pub struct AutoFixInput<'a> {
     pub thread: &'a str,
     /// The revision of the thread's active link.
     pub link_revision: u64,
-    /// This window (or core) polls the thread and can change it.
-    pub tracked: bool,
     /// The pull request is open.
     pub open: bool,
     /// The open pull request has a failed check.
@@ -497,9 +488,7 @@ pub fn auto_fix_controls_of(input: &AutoFixInput<'_>, now_ns: i64) -> AutoFixCon
     let limit_reached = input.limit_reached;
     let mut chips = Vec::new();
 
-    let toggle = if !input.tracked {
-        Control::off("Not tracked in this window")
-    } else if !open {
+    let toggle = if !open {
         Control::off("The pull request is not open")
     } else if limit_reached {
         Control::off("Limit reached; reset the count to turn auto fix on")
@@ -606,9 +595,7 @@ pub fn auto_fix_controls_of(input: &AutoFixInput<'_>, now_ns: i64) -> AutoFixCon
         });
     }
 
-    let send = if !input.tracked {
-        Control::off("Not tracked in this window")
-    } else if sent {
+    let send = if sent {
         Control::off("Already sent for this commit")
     } else if sending {
         Control::off("Sending to the agent")
@@ -622,13 +609,7 @@ pub fn auto_fix_controls_of(input: &AutoFixInput<'_>, now_ns: i64) -> AutoFixCon
         Control::on("Send this failure to the agent now")
     };
 
-    let reset = limit_reached.then(|| {
-        if input.tracked {
-            Control::on("Start the count again and turn auto fix on")
-        } else {
-            Control::off("Not tracked in this window")
-        }
-    });
+    let reset = limit_reached.then(|| Control::on("Start the count again and turn auto fix on"));
 
     AutoFixControls {
         on_here,
@@ -838,11 +819,6 @@ fn status_lines(view: &BarView<'_>) -> Vec<StatusLine> {
         .statuses
         .iter()
         .map(|status| match status {
-            Status::NotTracked => StatusLine {
-                text: "Not tracked in this window".to_owned(),
-                color: palette().TEXT_MUTED,
-                hover: Some("Another window polls this pull request, or none does".into()),
-            },
             Status::Stale => StatusLine {
                 text: "Stale".to_owned(),
                 color: palette().WARNING_FG,

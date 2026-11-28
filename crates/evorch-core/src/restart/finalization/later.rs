@@ -2,7 +2,7 @@ use super::*;
 use core_launcher::handoff::{CurrentElf, targets::CaptureCheckedTarget};
 use sha2::{Digest, Sha256};
 use storage::recovery::restart::RestartMetadata;
-use workbench_host::bootstrap::planned_exit::RestartHolds;
+use workbench_host::bootstrap::planned_exit::RestartTransactionGuard;
 
 /// Consumes only the result of the reversible pre-capture child reprobe.
 /// No transaction, target or exec capability is returned to a waiter.
@@ -63,7 +63,7 @@ impl RestartCoordinator {
         &self,
         id: RestartId,
         target: Option<FinalizationTarget>,
-        holds: Arc<RestartHolds>,
+        transaction: Arc<RestartTransactionGuard>,
         metadata: RestartMetadata,
     ) -> Result<ArmedFinalization, String> {
         let target = target.ok_or("capture-checked target is not owned; exec prohibited")?;
@@ -76,23 +76,22 @@ impl RestartCoordinator {
         }
         self.finalization_checkpoint(id, Some(ExitStage::TargetChecked))?;
 
-        target.observe(ExitStage::OwnersHeld);
+        target.observe(ExitStage::TransactionChecked);
         self.finalization_checkpoint(id, Some(ExitStage::TargetChecked))?;
-        let committed = holds.read_transaction(&metadata)?;
-        let held = holds.save_and_read_back(&committed)?;
+        let committed = transaction.read_transaction(&metadata)?;
         #[cfg(test)]
         if let Some(after) = &target.after {
-            after(ExitStage::OwnersHeld);
+            after(ExitStage::TransactionChecked);
         }
-        self.finalization_checkpoint(id, Some(ExitStage::OwnersHeld))?;
+        self.finalization_checkpoint(id, Some(ExitStage::TransactionChecked))?;
 
         target.observe(ExitStage::Armed);
-        self.finalization_checkpoint(id, Some(ExitStage::OwnersHeld))?;
+        self.finalization_checkpoint(id, Some(ExitStage::TransactionChecked))?;
         let nonce_hash = format!(
             "sha256:{:x}",
             Sha256::digest(uuid::Uuid::new_v4().as_bytes())
         );
-        let armed = holds.arm_and_read_back(&held, nonce_hash)?;
+        let armed = transaction.arm_and_read_back(&committed, nonce_hash)?;
         #[cfg(test)]
         if let Some(after) = &target.after {
             after(ExitStage::Armed);
@@ -135,7 +134,6 @@ pub(super) struct ArmedFinalization {
 }
 
 struct ExecWorkers {
-    owner: Arc<runtime::ownership::OwnerHost>,
     archive: Arc<runtime::scratch::archive::ArchiveService>,
 }
 
@@ -144,7 +142,6 @@ impl RestartCoordinator {
         &self,
         id: RestartId,
         armed: ArmedFinalization,
-        owner: Arc<runtime::ownership::OwnerHost>,
         archive: Arc<runtime::scratch::archive::ArchiveService>,
         writer: storage::StorageHandle,
     ) -> Result<(), String> {
@@ -207,10 +204,10 @@ impl RestartCoordinator {
             .map_err(text)?;
         let core = self.clone();
         tokio::task::spawn_blocking(move || {
-            core.prepare_and_stop_owner(
+            core.prepare_and_stop_workers(
                 id,
                 armed,
-                ExecWorkers { owner, archive },
+                ExecWorkers { archive },
                 control,
                 deadline,
                 writer,
@@ -219,7 +216,7 @@ impl RestartCoordinator {
         .await
         .map_err(|_| "exec preparation worker panicked".to_owned())?
     }
-    fn prepare_and_stop_owner(
+    fn prepare_and_stop_workers(
         &self,
         id: RestartId,
         armed: ArmedFinalization,
@@ -229,7 +226,7 @@ impl RestartCoordinator {
         writer: storage::StorageHandle,
     ) -> Result<(), String> {
         use core_instance::handoff::HandoffRecord;
-        let ExecWorkers { owner, archive } = workers;
+        let ExecWorkers { archive } = workers;
         let target = &armed.target;
         let environment = target
             .environment
@@ -241,7 +238,7 @@ impl RestartCoordinator {
         // This object borrows Instance (the lifetime lock), while ArmedFinalization
         // owns the checked target and the exact read-back tx/revision/nonce.
         // CString backing, pointer arrays, ticket and FD rollback data are owned
-        // by PreparedExec. No preparation is repeated after owner stop.
+        // by PreparedExec. No preparation is repeated after worker stop.
         tracing::debug!(target: "restart_drain", phase = "fd_prepare_begin");
         let mut prepared = environment
             .instance
@@ -281,41 +278,32 @@ impl RestartCoordinator {
         self.finalization_checkpoint(id, Some(ExitStage::SignalsStopped))?;
         check_deadline(deadline)?;
         stopped.check_pending().map_err(text)?;
-        target.observe(ExitStage::OwnerStopped);
+        target.observe(ExitStage::WorkersStopped);
         self.finalization_checkpoint(id, Some(ExitStage::SignalsStopped))?;
         stopped.check_pending().map_err(text)?;
-        // Register recovery BEFORE stopping: even partial stop/unlink failure or
-        // unwind must recover heartbeat/diagnostic ownership, never business work.
-        let recovery = FailedClosedOwner {
-            core: self,
-            owner: &owner,
-        };
-        tracing::debug!(target: "restart_drain", phase = "owner_stop_begin");
-        // The exec below replaces this image and its log thread; what was logged
-        // up to here (the connections closed for the restart) is written first.
-        // Past this point nothing logs.
+        // Even a partial cleanup stop or unwind must restore the collector;
+        // business admission remains failed closed on every returning path.
+        let recovery = FailedClosedCleanup { core: self };
+        tracing::debug!(target: "restart_drain", phase = "worker_stop_begin");
         crate::logging::flush();
-        // Preserve the existing archive -> owner -> collector order, but keep
-        // each resource lifecycle separate from the ownership mechanism.
         let stopped_archive = archive.stop().map_err(text);
-        let stopped_owner = owner.stop_worker_for_exec().map_err(text);
         let stopped_cleanup = sandbox::scratch::stop_scratch_cleanup().map_err(text);
-        let stopped_owner = stopped_archive.and(stopped_owner).and(stopped_cleanup);
+        let stopped_workers = stopped_archive.and(stopped_cleanup);
         #[cfg(test)]
-        if stopped_owner.is_ok()
+        if stopped_workers.is_ok()
             && let Some(after) = &target.after
         {
-            after(ExitStage::OwnerStopped);
+            after(ExitStage::WorkersStopped);
         }
         // The successful stage-11 tail is only latch/pending checks plus the
         // prebuilt raw boundary. No notifications, allocation, logging or DB.
-        let completed = stopped_owner.is_ok().then_some(ExitStage::OwnerStopped);
-        let raw = if stopped_owner.is_ok() {
+        let completed = stopped_workers.is_ok().then_some(ExitStage::WorkersStopped);
+        let raw = if stopped_workers.is_ok() {
             self.with_exec_latches(id, || {
                 match stopped.exec_pending() {
                     Ok(false) => {
                         // SAFETY: first_five closed/reaped the spawn ledger;
-                        // control and signal readers stopped, owners joined;
+                        // control and signal readers stopped, workers joined;
                         // Instance, target, ticket and inventoried FDs stay owned.
                         Ok(unsafe { prepared.raw_exec_under_latch() })
                     }
@@ -326,8 +314,8 @@ impl RestartCoordinator {
             None
         };
         // Only failures return. Release both latches BEFORE rollback, diagnostic
-        // owner recovery, logging and the same-TX invalidation in the driver.
-        let result = match (stopped_owner, raw) {
+        // cleanup recovery, logging and the same-TX invalidation in the driver.
+        let result = match (stopped_workers, raw) {
             (Err(error), _) => Err(error),
             (Ok(()), None) => Err("raw exec prohibited by lifecycle/runtime latch".into()),
             (Ok(()), Some(Err(reason))) => Err(reason.into()),
@@ -338,9 +326,9 @@ impl RestartCoordinator {
                 )),
             },
         };
-        tracing::debug!(target: "restart_drain", phase = "owner_stop_end", ok = completed.is_some());
+        tracing::debug!(target: "restart_drain", phase = "worker_stop_end", ok = completed.is_some());
         self.fail_finalization_closed(completed);
-        drop(recovery); // heartbeat/diagnostic restoration, never business
+        drop(recovery); // scratch cleanup restoration, never business
         drop(stopped); // same AsyncFd restored; pending signals were not consumed
         result
     }
@@ -380,18 +368,14 @@ impl RestartCoordinator {
         }
     }
 }
-struct FailedClosedOwner<'a> {
+struct FailedClosedCleanup<'a> {
     core: &'a RestartCoordinator,
-    owner: &'a runtime::ownership::OwnerHost,
 }
-impl Drop for FailedClosedOwner<'_> {
+impl Drop for FailedClosedCleanup<'_> {
     fn drop(&mut self) {
         self.core.fail_finalization_closed(None);
-        let restarted = sandbox::scratch::resume_scratch_cleanup()
-            .map_err(runtime::ownership::RegistryError::from)
-            .and_then(|()| self.owner.restart_worker_failed_closed());
-        if let Err(error) = restarted {
-            tracing::error!(%error, "owner heartbeat recovery unconfirmed; business remains closed");
+        if let Err(error) = sandbox::scratch::resume_scratch_cleanup() {
+            tracing::error!(%error, "scratch cleanup recovery unconfirmed; business remains closed");
         }
     }
 }

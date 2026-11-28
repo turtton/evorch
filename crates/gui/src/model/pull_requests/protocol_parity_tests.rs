@@ -113,7 +113,6 @@ fn as_protocol(legacy: &ThreadPullRequest) -> wire::ThreadPullRequest {
     wire::ThreadPullRequest {
         thread: ThreadId::new(legacy.thread_id.as_str()).unwrap(),
         tracking_enabled: true,
-        owned_here: legacy.tracked_here,
         lifecycle_revision: Revision(legacy.lifecycle_revision),
         transition_seq: Sequence(legacy.transition_seq),
         link,

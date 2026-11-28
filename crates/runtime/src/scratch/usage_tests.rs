@@ -195,14 +195,7 @@ pub(crate) fn has_shell_users(scratch: &ThreadScratch, key: &ScratchKey) -> bool
 async fn shell_teardown_notification_reclaims_after_the_idle_boundary_without_a_new_hint() {
     let mut h = Harness::new().await;
     let sockets = test_socket_dir::SocketDir::new();
-    let host = crate::ownership::OwnerHost::open(
-        sockets.path(),
-        Default::default(),
-        Arc::new(event_bus::EventBus::new(32)),
-    )
-    .unwrap();
-    host.start("thread").unwrap();
-    let scratch = host.thread_scratch();
+    let scratch = Arc::new(ThreadScratch::at(sockets.path().join("scratch")));
     let run = h.state.task.run_id;
     let incarnation = h.state.task.publication.incarnation();
     scratch
@@ -213,9 +206,9 @@ async fn shell_teardown_notification_reclaims_after_the_idle_boundary_without_a_
     let mut binding = RunScratch::new(dir.clone(), false);
     binding.binding = Some((scratch.clone(), h.key.clone(), run, incarnation));
     h.state.scratch = Some(binding);
-    h.scratch = scratch;
+    h.scratch = scratch.clone();
     let (consulted, mut received) = tokio::sync::mpsc::unbounded_channel();
-    let archive = runtime_archive(&host);
+    let archive = runtime_archive(&scratch, sockets.path());
     archive.set_checker(Arc::new(move |_| {
         consulted.send(()).unwrap();
         Ok(true)
@@ -326,12 +319,6 @@ fn execution_release_forgets_its_incarnation_but_preserves_the_epoch_on_resume()
     let scratch = ThreadScratch::at(temp.path().join("scratch"));
     let key = ScratchKey::Thread("thread".into());
     let run = RunId::new(1);
-    let lease = Lease {
-        owner_id: "owner".into(),
-        generation: 1,
-        expires_at: u64::MAX,
-    };
-    scratch.record_scratch_lease("thread", &lease);
     let path = scratch.prepare(&key).unwrap();
     for incarnation in ["old", "current"] {
         scratch.register_execution(&key, run, incarnation).unwrap();
@@ -349,27 +336,20 @@ fn execution_release_forgets_its_incarnation_but_preserves_the_epoch_on_resume()
     assert!(scratch.archive_snapshot("thread").is_none());
     scratch.release_execution(run, "current");
     assert!(scratch.lock().execution_keys.is_empty());
-    let (epoch, lease) = scratch.archive_snapshot("thread").unwrap();
+    let epoch = scratch.archive_snapshot("thread").unwrap();
     scratch.register_execution(&key, run, "current").unwrap();
     assert_eq!(scratch.lock().execution_keys.len(), 1);
     assert!(scratch.archive_snapshot("thread").is_none());
     scratch.release_execution(run, "current");
     assert!(scratch.lock().execution_keys.is_empty());
-    let (resumed_epoch, _) = scratch.archive_snapshot("thread").unwrap();
+    let resumed_epoch = scratch.archive_snapshot("thread").unwrap();
     assert_eq!(resumed_epoch, epoch + 1);
     // Even after the resumed user leaves, a snapshot from before that resume
     // cannot detach the tree. Removing the execution lookup must not reset it.
-    assert!(
-        scratch
-            .detach_archived("thread", epoch, &lease)
-            .unwrap()
-            .is_none()
-    );
+    assert!(scratch.detach_archived("thread", epoch).unwrap().is_none());
     assert!(path.exists());
     assert_eq!(
-        scratch
-            .detach_archived("thread", resumed_epoch, &lease)
-            .unwrap(),
+        scratch.detach_archived("thread", resumed_epoch).unwrap(),
         Some(true)
     );
     assert!(!path.exists());
@@ -381,12 +361,6 @@ fn exhausted_epoch_or_notice_counter_keeps_the_tree_without_wrapping() {
         let temp = tempfile::tempdir().unwrap();
         let scratch = ThreadScratch::at(temp.path().join("scratch"));
         let key = ScratchKey::Thread("thread".into());
-        let lease = Lease {
-            owner_id: "owner".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        };
-        scratch.record_scratch_lease("thread", &lease);
         let path = scratch.prepare(&key).unwrap();
         std::fs::write(path.join("keep"), "keep").unwrap();
         if epoch_exhausted {
@@ -399,14 +373,14 @@ fn exhausted_epoch_or_notice_counter_keeps_the_tree_without_wrapping() {
             assert!(scratch.archive_snapshot("thread").is_none());
             assert!(
                 scratch
-                    .detach_archived("thread", u64::MAX, &lease)
+                    .detach_archived("thread", u64::MAX)
                     .unwrap()
                     .is_none()
             );
             assert_eq!(scratch.lock().usage[&key].epoch, u64::MAX);
         } else {
             scratch.lock().archived.insert(key.name(), u64::MAX);
-            assert!(scratch.detach_archived("thread", 0, &lease).is_err());
+            assert!(scratch.detach_archived("thread", 0).is_err());
             assert_eq!(scratch.lock().archived[&key.name()], u64::MAX);
         }
         assert_eq!(std::fs::read_to_string(path.join("keep")).unwrap(), "keep");
@@ -419,14 +393,9 @@ fn disposal_observation_distinguishes_unused_in_use_and_unknown() {
     let scratch = ThreadScratch::at(temp.path().join("scratch"));
     let key = ScratchKey::Thread("thread".into());
     let run = RunId::new(7);
-    let lease = crate::ownership::Lease {
-        owner_id: "owner".into(),
-        generation: 3,
-        expires_at: u64::MAX,
-    };
     assert_eq!(
         scratch.disposal_usage("thread"),
-        DisposalScratchUse::Unknown
+        DisposalScratchUse::Unused { epoch: 0 }
     );
     scratch
         .register_user(
@@ -437,11 +406,6 @@ fn disposal_observation_distinguishes_unused_in_use_and_unknown() {
             },
         )
         .unwrap();
-    assert_eq!(
-        scratch.disposal_usage("thread"),
-        DisposalScratchUse::Unknown
-    );
-    scratch.record_scratch_lease("thread", &lease);
     assert_eq!(scratch.disposal_usage("thread"), DisposalScratchUse::InUse);
     assert!(scratch.archive_snapshot("thread").is_none());
     scratch.release_user(
@@ -451,13 +415,10 @@ fn disposal_observation_distinguishes_unused_in_use_and_unknown() {
             incarnation: "i".into(),
         },
     );
-    let (epoch, observed) = scratch.archive_snapshot("thread").unwrap();
+    let epoch = scratch.archive_snapshot("thread").unwrap();
     assert_eq!(
         scratch.disposal_usage("thread"),
-        DisposalScratchUse::Unused {
-            epoch,
-            lease: observed
-        }
+        DisposalScratchUse::Unused { epoch }
     );
     scratch
         .register_user(
@@ -487,10 +448,27 @@ fn disposal_observation_distinguishes_unused_in_use_and_unknown() {
     assert!(scratch.archive_snapshot("thread").is_none());
 }
 
-fn runtime_archive(host: &crate::ownership::OwnerHost) -> crate::scratch::archive::ArchiveService {
+fn runtime_archive(
+    scratch: &Arc<ThreadScratch>,
+    root: &std::path::Path,
+) -> crate::scratch::archive::ArchiveService {
+    let storage = storage::StorageConfig {
+        db_path: root.join("archive.db"),
+        ..Default::default()
+    };
+    drop(storage::Database::open(&storage).unwrap());
+    let leases = Arc::new(
+        storage::WriterLeases::acquire(&storage.db_path, root, std::time::Duration::ZERO).unwrap(),
+    );
     crate::scratch::archive::ArchiveService::new(
-        &host.thread_scratch(),
-        host.scratch_archive_authority(),
+        scratch,
+        crate::scratch::archive::authority(
+            storage,
+            root.to_path_buf(),
+            root.join("sidebar.json"),
+            leases,
+            scratch.clone(),
+        ),
     )
     .unwrap()
 }

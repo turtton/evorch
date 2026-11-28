@@ -104,7 +104,7 @@ impl Fixture {
         self.handle()
             .prepare_recovery_manifest(RecoveryManifestRecord {
                 manifest_id: MANIFEST.into(),
-                schema_version: 1,
+                schema_version: 2,
                 committed: false,
                 superseded: false,
                 edges: vec![RecoveryEdge {
@@ -176,8 +176,6 @@ impl Fixture {
                 thread_id: threads.then(|| run.into()),
                 intent_revision: 0,
                 snapshot: None,
-                owner_id: None,
-                owner_generation: None,
                 lane_id: None,
             };
             sql.execute(
@@ -206,7 +204,7 @@ impl Fixture {
         (f, activation)
     }
     /// What a disposal records through the production progress write, per thread.
-    pub fn record_cleanup(&self, owners: GraphDisposalStep, scratch: GraphDisposalStep) {
+    pub fn record_cleanup(&self, scratch: GraphDisposalStep) {
         let control = self.db().recovery_graph_control(MANIFEST).unwrap().unwrap();
         for thread in ["run-a", "run-b"] {
             self.handle()
@@ -216,11 +214,9 @@ impl Fixture {
                         restart_id: TX.into(),
                         capture_id: CAPTURE.into(),
                         thread_id: thread.into(),
-                        owner_generation: 1,
                     },
                     expected_revision: 0,
                     control: control.clone(),
-                    owners,
                     scratch,
                 })
                 .unwrap();

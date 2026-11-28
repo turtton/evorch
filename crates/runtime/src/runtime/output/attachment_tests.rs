@@ -449,7 +449,7 @@ async fn invalid_attachment_delegates_do_not_create_partial_children_in_either_m
 async fn pending_admission_is_not_ready_only_for_its_live_direct_parent() {
     let (runtime, parent, child) = fixture();
     let reserved = "run-90001".parse::<RunId>().unwrap();
-    let execution = runtime.reserve_admission(reserved, Some(parent), None);
+    let execution = runtime.reserve_admission(reserved, Some(parent));
     let source =
         crate::output_attachments::validate(vec![crate::output_attachments::OutputAttachment {
             run_id: reserved.to_string(),

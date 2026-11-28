@@ -2,7 +2,6 @@
 //! Delivery, durable Stop/guard adoption and receipts belong to the common driver.
 use super::policy::eligible_facts;
 use super::{Inner, PullRequestError, PullRequestService, Target};
-use crate::ownership::OwnerPermit;
 use crate::pull_requests::LogRequest;
 use event_bus::{PullRequestAutoFixChange, PullRequestEvent};
 use std::sync::Arc;
@@ -127,16 +126,12 @@ impl PullRequestService {
     }
 
     /// The coordinator's own classification of the thread's current head, for display. It
-    /// reads what auto eligibility reads and decides nothing. Attribution lives in the owning
-    /// process only, so a thread this process does not own, a restart that lost it and a head
-    /// not yet classified all read `Unknown`. Blocks briefly (the ownership registry and the
-    /// database): call it off the async executor and off the UI thread.
+    /// reads what auto eligibility reads and decides nothing. Attribution lives in this process
+    /// only, so a restart that lost it and a head not yet classified both read `Unknown`.
+    /// Blocks briefly (the database): call it off the async executor and off the UI thread.
     #[must_use]
     pub fn head_attribution(&self, thread: &str) -> HeadAttribution {
         let inner = &self.inner;
-        let Some(permit) = inner.ownership.owned_permit(thread) else {
-            return HeadAttribution::Unknown;
-        };
         let Ok(state) = inner.storage.pull_request_thread_state(thread) else {
             return HeadAttribution::Unknown;
         };
@@ -151,7 +146,6 @@ impl PullRequestService {
         };
         let agent = inner.lock().attribution.agent(
             thread,
-            permit.lease.generation,
             link.link_revision,
             snapshot.success_seq,
             &facts.head_sha,
@@ -167,14 +161,13 @@ impl PullRequestService {
     /// Link and policy revisions are independent CAS values.
     ///
     /// # Errors
-    /// Stale revisions, missing ownership/link, or destination confirmation is required.
+    /// Stale revisions, a missing link, or destination confirmation is required.
     pub async fn set_auto_fix(
         &self,
         thread: &str,
         link_revision: u64,
         policy_revision: u64,
         enabled: bool,
-        permit: &OwnerPermit,
     ) -> Result<PrAutoFixState> {
         self.policy_change(
             thread,
@@ -182,7 +175,6 @@ impl PullRequestService {
             policy_revision,
             None,
             PrPolicyAction::SetEnabled(enabled),
-            permit,
         )
         .await
     }
@@ -202,7 +194,6 @@ impl PullRequestService {
         link_revision: u64,
         policy_revision: u64,
         confirmed_previous: Option<String>,
-        permit: &OwnerPermit,
     ) -> Result<PrAutoFixState> {
         self.policy_change(
             thread,
@@ -210,7 +201,6 @@ impl PullRequestService {
             policy_revision,
             confirmed_previous.map(Some),
             PrPolicyAction::ResetBudget,
-            permit,
         )
         .await
     }
@@ -224,7 +214,6 @@ impl PullRequestService {
         link_revision: u64,
         policy_revision: u64,
         confirmed_previous: Option<String>,
-        permit: &OwnerPermit,
     ) -> Result<PrAutoFixState> {
         self.policy_change(
             thread,
@@ -232,7 +221,6 @@ impl PullRequestService {
             policy_revision,
             Some(confirmed_previous),
             PrPolicyAction::SetEnabled(true),
-            permit,
         )
         .await
     }
@@ -243,17 +231,14 @@ impl PullRequestService {
         expected: u64,
         confirmed: Option<Option<String>>,
         action: PrPolicyAction,
-        permit: &OwnerPermit,
     ) -> Result<PrAutoFixState> {
         let inner = &self.inner;
         inner.enabled()?;
-        inner.check_permit(thread, permit).await?;
         let storage = inner.storage.clone();
         let thread_for_event = thread;
         let thread = thread.to_owned();
-        let owned_permit = permit.clone();
         let (result, target) = inner
-            .guarded(permit, move || -> Result<_> {
+            .write(move || -> Result<_> {
                 let link = storage
                     .pull_request_thread_state(&thread)?
                     .active_link
@@ -266,7 +251,6 @@ impl PullRequestService {
                     key: link.key.clone(),
                     link_id: link.link_id,
                     link_revision: link.link_revision,
-                    permit: owned_permit,
                 };
                 let previous = storage.pr_auto_fix_state(link.key.clone())?;
                 let destination = match confirmed {
@@ -310,17 +294,15 @@ impl PullRequestService {
     /// or Resume is conferred by this API.
     ///
     /// # Errors
-    /// Not owner, stale link/head, no known failure, stopped destination, or SHA conflict.
+    /// Stale link/head, no known failure, stopped destination, or SHA conflict.
     pub async fn request_manual_notice(
         &self,
         thread: &str,
         revision: u64,
         expected_head: &str,
-        permit: &OwnerPermit,
     ) -> Result<PrNotice> {
         let inner = &self.inner;
         inner.enabled()?;
-        inner.check_permit(thread, permit).await?;
         let state = inner.thread_state(thread).await?;
         let link = state.active_link.ok_or(PullRequestError::NotLinked)?;
         if link.link_revision != revision {
@@ -331,21 +313,17 @@ impl PullRequestService {
             key: link.key,
             link_id: link.link_id,
             link_revision: revision,
-            permit: permit.clone(),
         };
         let head = expected_head.to_owned();
         let owner = Arc::clone(inner);
         let t = target.clone();
         let notice = inner
-            .guarded(permit, move || {
-                owner.reserve_notice(&t, PrNoticeMode::Manual, Some(&head))
-            })
+            .write(move || owner.reserve_notice(&t, PrNoticeMode::Manual, Some(&head)))
             .await??;
         // An explicit manual retry is an operator decision, not an automatic retry loop.
         inner.lock().attempted.remove(&(
             notice.notice_id.clone(),
             notice.policy_revision,
-            target.permit.lease.generation,
             notice.reservation_revision,
         ));
         inner.spawn_preparation(target, notice.clone());
@@ -440,7 +418,6 @@ impl Inner {
         if auto
             && !self.lock().attribution.agent(
                 &target.thread_id,
-                target.permit.lease.generation,
                 target.link_revision,
                 snapshot.success_seq,
                 &facts.head_sha,
@@ -461,7 +438,7 @@ impl Inner {
             now_ns: self.clock.now_ns(),
         })?)
     }
-    /// Run on every scheduler round: startup, owner changes, Resume, new seq, policy/manual
+    /// Run on every scheduler round: startup, Resume, new seq, policy/manual
     /// requests, and cooldown all reach this path, even when the GUI emitted no transition.
     pub(super) async fn coordinate(self: &Arc<Self>, targets: &[Target]) -> Option<Instant> {
         let mut next = None;
@@ -476,7 +453,6 @@ impl Inner {
                 if !state.flights.contains_key(&target.key) {
                     state.attribution.seed(
                         &target.thread_id,
-                        target.permit.lease.generation,
                         target.link_revision,
                         snapshot.success_seq,
                         &facts.head_sha,
@@ -486,7 +462,7 @@ impl Inner {
             let inner = Arc::clone(self);
             let t = target.clone();
             let scanned = self
-                .guarded(&target.permit, move || -> Result<_> {
+                .write(move || -> Result<_> {
                     let policy = inner.storage.pr_auto_fix_state(t.key.clone())?;
                     let mut cursor = String::new();
                     let mut reserved = Vec::new();
@@ -556,7 +532,6 @@ impl Inner {
                 || state.attempted.contains(&(
                     notice.notice_id.clone(),
                     notice.policy_revision,
-                    target.permit.lease.generation,
                     notice.reservation_revision,
                 ))
             {
@@ -578,12 +553,9 @@ impl Inner {
     async fn prepare_notice(self: &Arc<Self>, target: &Target, notice: &PrNotice) -> Result<()> {
         let mut stopping = self.shutdown.subscribe();
         let _producer = tokio::select! { biased; _ = stopping.wait_for(|stop| *stop) => return Ok(()), permit = self.producers.enter() => { let Some(permit) = permit else { return Ok(()); }; permit } };
-        self.check_permit(&target.thread_id, &target.permit).await?;
         let inner = Arc::clone(self);
         let (t, n) = (target.clone(), notice.clone());
-        let facts = self
-            .guarded(&target.permit, move || valid_notice(&inner, &t, &n))
-            .await??;
+        let facts = self.write(move || valid_notice(&inner, &t, &n)).await??;
         let Some((facts, observed_at_ns)) = facts else {
             return Ok(());
         };
@@ -591,8 +563,8 @@ impl Inner {
         if !self.blocking(move || allowed(&storage, &t)).await?? {
             return Ok(());
         }
-        // No async wait between the final ownership/global check and starting the source.
-        if !self.may_launch([&target.permit])
+        // No async wait between the final global check and starting the source.
+        if !self.may_launch()
             || (notice.mode == PrNoticeMode::Auto && !self.config().auto_fix_enabled)
         {
             return Ok(());
@@ -600,7 +572,6 @@ impl Inner {
         self.lock().attempted.insert((
             notice.notice_id.clone(),
             notice.policy_revision,
-            target.permit.lease.generation,
             notice.reservation_revision,
         ));
         let failed_checks: Vec<_> = facts
@@ -637,7 +608,7 @@ impl Inner {
         );
         let inner = Arc::clone(self);
         let (t, n) = (target.clone(), notice.clone());
-        self.guarded(&target.permit, move || -> Result<()> {
+        self.write(move || -> Result<()> {
             if valid_notice(&inner, &t, &n)?.is_some() {
                 if inner
                     .storage

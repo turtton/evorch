@@ -7,8 +7,7 @@ use crate::{
     },
 };
 use runtime::{
-    AgentRuntime, OwnedThreadCas,
-    ownership::OwnerHost,
+    AgentRuntime,
     runtime::recovery_disposal::{DisposalReservation, DisposalResult},
 };
 use std::{
@@ -16,8 +15,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 use storage::{
-    StorageConfig,
-    recovery::{graph_control::GraphEffectKey, owned_graphs::OwnedGraphSnapshot},
+    StorageConfig, StorageHandle,
+    recovery::{
+        RecoveryGraphHeader, graph_control::GraphEffectKey, owned_graphs::OwnedGraphSnapshot,
+    },
 };
 use workbench_protocol::{
     errors::ErrorCode,
@@ -42,10 +43,17 @@ impl RecoveryAdminPort for DiagnosticsPort {
         self.0.recovery_admin().retry_automatic(manifest_id)
     }
 }
+/// What a confirmation was inspected against.
+enum Target {
+    /// A graph in the current format.
+    Current(Box<OwnedGraphSnapshot>),
+    /// A graph in a format this build does not execute: only its relational
+    /// header is known, and it can only be discarded.
+    Legacy(Box<RecoveryGraphHeader>),
+}
 struct Inspection {
     binding: OwnedGraphBinding,
-    graph: OwnedGraphSnapshot,
-    owners: Vec<OwnedThreadCas>,
+    target: Target,
     connection: VerifiedConnection,
 }
 struct UncertainDisposal {
@@ -63,8 +71,9 @@ impl Drop for FinishedDisposal {
 }
 pub struct OwnedGraphsFacade {
     runtime: AgentRuntime,
-    owner: Arc<OwnerHost>,
     storage: StorageConfig,
+    /// The one storage writer: the explicit discard of a legacy graph.
+    writer: StorageHandle,
     reader: Arc<AdminReader>,
     port: Arc<dyn RecoveryAdminPort>,
     diagnostics: Arc<dyn CoreStartupDiagnostics>,
@@ -76,16 +85,16 @@ pub struct OwnedGraphsFacade {
 impl OwnedGraphsFacade {
     pub fn new(
         runtime: AgentRuntime,
-        owner: Arc<OwnerHost>,
         storage: StorageConfig,
+        writer: StorageHandle,
         reader: Arc<AdminReader>,
         diagnostics: Arc<dyn CoreStartupDiagnostics>,
         collector: Arc<super::LiveGraphCollector>,
     ) -> Arc<Self> {
         Arc::new(Self {
             runtime,
-            owner,
             storage,
+            writer,
             reader,
             port: Arc::new(DiagnosticsPort(diagnostics.clone())),
             diagnostics,
@@ -96,7 +105,7 @@ impl OwnedGraphsFacade {
         })
     }
     /// Original supervisor ONLY, on its blocking worker. A finished original
-    /// job may settle its policy; no new owner or scratch effect starts here.
+    /// job may settle its policy; no new scratch effect starts here.
     pub fn reconcile_disposals(&self) -> Result<usize, AdminFailure> {
         let pending = self
             .uncertain
@@ -145,30 +154,27 @@ impl AdminFacade for OwnedGraphsFacade {
             confirmed.validate().map_err(|_| admin::conflict())?;
             let binding = confirmed.binding.clone();
             let storage = self.storage.clone();
-            let owner = self.owner.clone();
-            let runtime = self.runtime.clone();
+            let live_epoch = self.collector.epoch();
             let verified = connection.clone();
             let inspection = self
                 .reader
                 .read(move || {
-                    let graphs = storage::Database::read_owned_graphs(&storage, |db| {
-                        db.owned_graph_snapshots()
+                    let (graphs, headers) = storage::Database::read_owned_graphs(&storage, |db| {
+                        Ok((db.owned_graph_snapshots()?, db.recovery_graph_headers()?))
                     })
                     .map_err(|_| unavailable())?;
                     let mut selected = None;
                     for graph in graphs {
-                        let (current, owners) = view::binding_for(
-                            &owner,
-                            &graph.cas,
-                            binding.graph.operation_id.clone(),
-                        )?;
+                        let current =
+                            view::binding_for(&graph.cas, binding.graph.operation_id.clone())?;
                         if current.graph.graph_id != binding.graph.graph_id {
                             continue;
                         }
-                        if selected.is_some() || current != binding || owners.len() > 64 {
+                        let thread_count = view::thread_ids(&graph.cas).len();
+                        if selected.is_some() || current != binding || thread_count > 64 {
                             return Err(admin::conflict());
                         }
-                        let detail = view::detail(&runtime, &owner, &graph)?;
+                        let detail = view::detail(&graph, live_epoch)?;
                         let action = if resume {
                             detail.resume
                         } else {
@@ -179,8 +185,30 @@ impl AdminFacade for OwnedGraphsFacade {
                         }
                         selected = Some(Inspection {
                             binding: current,
-                            graph,
-                            owners,
+                            target: Target::Current(Box::new(graph)),
+                            connection: verified.clone(),
+                        });
+                    }
+                    // A legacy graph is only ever discarded, never resumed.
+                    for header in headers.into_iter().filter(view::is_legacy) {
+                        let current =
+                            view::legacy_binding_for(&header, binding.graph.operation_id.clone())?;
+                        if current.graph.graph_id != binding.graph.graph_id {
+                            continue;
+                        }
+                        if selected.is_some()
+                            || resume
+                            || current != binding
+                            || !matches!(
+                                view::legacy_detail(&header)?.release,
+                                ActionAvailability::Available
+                            )
+                        {
+                            return Err(admin::conflict());
+                        }
+                        selected = Some(Inspection {
+                            binding: current,
+                            target: Target::Legacy(Box::new(header)),
                             connection: verified.clone(),
                         });
                     }
@@ -220,14 +248,13 @@ impl AdminFacade for OwnedGraphsFacade {
             }
             let query = query.clone();
             let storage = self.storage.clone();
-            let owner = self.owner.clone();
-            let runtime = self.runtime.clone();
+            let live_epoch = self.collector.epoch();
             let snapshots = self.snapshots.clone();
             let diagnostics = self.diagnostics.clone();
             self.reader
                 .read(move || {
-                    let graphs = storage::Database::read_owned_graphs(&storage, |db| {
-                        db.owned_graph_snapshots()
+                    let (graphs, headers) = storage::Database::read_owned_graphs(&storage, |db| {
+                        Ok((db.owned_graph_snapshots()?, db.recovery_graph_headers()?))
                     })
                     .map_err(|_| unavailable())?;
                     let reply = match query {
@@ -237,13 +264,21 @@ impl AdminFacade for OwnedGraphsFacade {
                         OwnedGraphsQuery::Detail { graph_ref } => {
                             let mut selected = None;
                             for graph in &graphs {
-                                let (binding, _) =
-                                    view::binding_for(&owner, &graph.cas, id("unassigned")?)?;
+                                let binding = view::binding_for(&graph.cas, id("unassigned")?)?;
                                 if binding.graph.graph_id == graph_ref {
                                     if selected.is_some() {
                                         return Err(admin::conflict());
                                     }
-                                    selected = Some(view::detail(&runtime, &owner, graph)?);
+                                    selected = Some(view::detail(graph, live_epoch)?);
+                                }
+                            }
+                            for header in headers.iter().filter(|h| view::is_legacy(h)) {
+                                let binding = view::legacy_binding_for(header, id("unassigned")?)?;
+                                if binding.graph.graph_id == graph_ref {
+                                    if selected.is_some() {
+                                        return Err(admin::conflict());
+                                    }
+                                    selected = Some(view::legacy_detail(header)?);
                                 }
                             }
                             let mut detail = selected.ok_or_else(not_found)?;
@@ -287,8 +322,7 @@ impl AdminFacade for OwnedGraphsFacade {
                                 .iter()
                                 .find(|g| g.cas.manifest.manifest_id == effect.manifest_id)
                                 .ok_or_else(admin::unknown)?;
-                            let (binding, _) =
-                                view::binding_for(&owner, &graph.cas, operation_id.clone())?;
+                            let binding = view::binding_for(&graph.cas, operation_id.clone())?;
                             let progress = view::progress(graph);
                             let succeeded = progress.completion == DisposalCompletion::Complete
                                 || (!effect.revoked
@@ -296,7 +330,7 @@ impl AdminFacade for OwnedGraphsFacade {
                                         c.state == storage::recovery::RecoveryClaimState::Activated
                                     }));
                             let next_action = operation_next_action(
-                                &view::detail(&runtime, &owner, graph)?,
+                                &view::detail(graph, live_epoch)?,
                                 effect.mode.as_str(),
                                 succeeded,
                                 diagnostics.automatic_retry_pending(&effect.manifest_id),
@@ -386,14 +420,58 @@ impl AdminFacade for OwnedGraphsFacade {
         if effect.operation_id != binding.graph.operation_id.as_str() {
             return Err(admin::conflict());
         }
+        let graph = match inspection.target {
+            Target::Current(graph) => *graph,
+            Target::Legacy(header) => {
+                // Only the explicit release of a legacy graph reaches here
+                // (inspection refuses a resume).
+                if !matches!(
+                    intent,
+                    AdminIntent::OwnedGraphs(OwnedGraphsCommand::Release(_))
+                ) {
+                    return Err(admin::conflict());
+                }
+                let writer = self.writer.clone();
+                let collector = self.collector.clone();
+                let header = *header;
+                return Ok(admission.register(Box::pin(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let discarded = writer.discard_legacy_recovery_graph(header);
+                        // The listing must not keep a graph that is gone.
+                        let refreshed = collector.refresh_legacy();
+                        (discarded, refreshed)
+                    })
+                    .await;
+                    let outcome = match result {
+                        Ok((Ok(()), Ok(()))) => AdminOutcome::Succeeded,
+                        // The write is durable; only the listing is stale and
+                        // observation is closed until the next rebuild.
+                        Ok((Ok(()), Err(_))) => AdminOutcome::Unknown,
+                        // The graph changed since it was read, or it is not (or
+                        // no longer) safe to discard. Nothing was written.
+                        Ok((
+                            Err(
+                                storage::StorageError::Serialization(_)
+                                | storage::StorageError::RecoveryGraphConflict(_),
+                            ),
+                            _,
+                        )) => AdminOutcome::Conflict,
+                        // A write that may or may not have reached the database.
+                        // Discarding again is idempotent, so inspect and retry.
+                        Ok((Err(_), _)) | Err(_) => AdminOutcome::Unknown,
+                    };
+                    Ok(AdminExecutionOutcome::Complete(outcome))
+                })));
+            }
+        };
         match intent {
             AdminIntent::OwnedGraphs(OwnedGraphsCommand::Release(_)) => {
                 let reservation = self
                     .runtime
                     .reserve_owned_graph_disposal(
-                        &inspection.graph.cas.manifest.manifest_id,
+                        &graph.cas.manifest.manifest_id,
                         effect.clone(),
-                        inspection.graph.cas.control_revision,
+                        graph.cas.control_revision,
                     )
                     .map_err(|_| admin::busy())?;
                 let runtime = self.runtime.clone();
@@ -411,9 +489,7 @@ impl AdminFacade for OwnedGraphsFacade {
                     let worker_job = job.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         let _finished = FinishedDisposal(worker_job.clone());
-                        let authority = match runtime
-                            .disposal_authority(inspection.graph.cas, inspection.owners)
-                        {
+                        let authority = match runtime.disposal_authority(graph.cas) {
                             Ok(authority) => authority,
                             Err(_) => return Err(runtime::RuntimeError::GraphControlConflict),
                         };
@@ -433,15 +509,15 @@ impl AdminFacade for OwnedGraphsFacade {
                 let reservation = self
                     .runtime
                     .reserve_manual_activation(
-                        &inspection.graph.cas.manifest.manifest_id,
+                        &graph.cas.manifest.manifest_id,
                         effect.clone(),
-                        inspection.graph.cas.control_revision,
+                        graph.cas.control_revision,
                     )
                     .map_err(|_| admin::busy())?;
                 let port = self.port.clone();
                 Ok(admission.register(Box::pin(async move {
                     let result = match port.resume(RecoveryResumeRequest {
-                        manifest_id: inspection.graph.cas.manifest.manifest_id,
+                        manifest_id: graph.cas.manifest.manifest_id,
                         binding,
                         effect,
                         reservation,

@@ -11,14 +11,17 @@ use workbench_protocol::{
     namespaces::ConversationCommand,
 };
 
-fn host() -> CommandHost {
+fn host_over(runtime: runtime::AgentRuntime) -> CommandHost {
     let mut projects = StaticProjects::default();
     projects.insert(&project(), std::path::PathBuf::from("/tmp"));
     CommandHost::new(CommandService::new(
-        runtime(),
+        runtime,
         tokio::runtime::Handle::current(),
     ))
     .with_projects(projects)
+}
+fn host() -> CommandHost {
+    host_over(runtime())
 }
 fn bindings() -> Vec<(String, ThreadBinding)> {
     vec![(
@@ -45,7 +48,10 @@ fn send() -> Command {
 }
 #[tokio::test]
 async fn recovery_fence_rejects_send_retryably_without_creating_or_binding_a_run() {
-    let mut host = host();
+    // The run this test ends is stopped durably, so the runtime needs its store.
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, _storage) = runtime_with_store(dir.path());
+    let mut host = host_over(runtime);
     let guard = host.service().begin_root_recovery(bindings()).unwrap();
     for provenance in [
         web(),

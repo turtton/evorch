@@ -117,10 +117,9 @@ impl RestartCoordinator {
         let mut state = self.0.state.lock().unwrap();
         state.finalization = Some(resources.clone());
         let core = self.clone();
-        let owner_host = host.owner.clone();
         state.worker = Some(
             tokio::spawn(async move {
-                core.drive_finalization(id, resources, begun.0, tx, target, owner_host)
+                core.drive_finalization(id, resources, begun.0, tx, target)
                     .await;
             })
             .abort_handle(),
@@ -165,7 +164,6 @@ impl RestartCoordinator {
         session: Result<runtime::RestartCaptureSession, RuntimeError>,
         tx: RestartTransaction,
         target: Option<FinalizationTarget>,
-        owner_host: Arc<runtime::ownership::OwnerHost>,
     ) {
         let runtime = self.0.runtime.clone();
         // The coordinator mutex is NOT held while SQLite or graph capture runs.
@@ -212,31 +210,27 @@ impl RestartCoordinator {
         };
         let result = match result {
             Ok(()) => {
-                let holds = resources.restart_holds();
+                let transaction = resources.restart_transaction_guard();
                 let owner = self.clone();
                 let metadata = tx.metadata.clone();
-                tokio::task::spawn_blocking(move || owner.six_to_eight(id, target, holds, metadata))
-                    .await
-                    .map_err(|_| "later finalization worker panicked".to_owned())
-                    .and_then(|r| r)
+                tokio::task::spawn_blocking(move || {
+                    owner.six_to_eight(id, target, transaction, metadata)
+                })
+                .await
+                .map_err(|_| "later finalization worker panicked".to_owned())
+                .and_then(|r| r)
             }
             Err(error) => Err(error),
         };
         let result = match result {
             Ok(armed) => {
-                self.nine_to_eleven(
-                    id,
-                    armed,
-                    owner_host,
-                    resources.scratch_archive(),
-                    resources.writer(),
-                )
-                .await
+                self.nine_to_eleven(id, armed, resources.scratch_archive(), resources.writer())
+                    .await
             }
             Err(error) => Err(error),
         };
         // A successful raw exec never returns. Every returned path stays closed;
-        // diagnostic ownership has been restored before invalidating this TX.
+        // scratch cleanup has been restored before invalidating this TX.
         let reason = result
             .err()
             .unwrap_or_else(|| "raw exec returned without replacement".into());
@@ -271,15 +265,6 @@ impl RestartCoordinator {
         .await;
         if !matches!(invalidated, Ok(Ok(()))) {
             tracing::error!("planned exit invalidation unconfirmed; exec remains prohibited");
-        }
-        let holds = resources.restart_holds();
-        if !matches!(
-            tokio::task::spawn_blocking(move || holds.cleanup()).await,
-            Ok(Ok(()))
-        ) {
-            tracing::error!(
-                "planned hold invalidation/removal unconfirmed; shared cleanup retains ownership"
-            );
         }
         {
             let mut state = self.0.state.lock().unwrap();

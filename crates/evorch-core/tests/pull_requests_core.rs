@@ -2,7 +2,7 @@
 //! two clients that race on one thread, a command sent again, an operation the
 //! core does not know, and a fetch that is cut off by the core stopping.
 //!
-//! The real bootstrap, SQLite, ownership and PR service run; only the `gh`
+//! The real single-core bootstrap, SQLite and PR service run; only the `gh`
 //! source is the scripted fake. Nothing waits for time: every step is a gate, a
 //! barrier or an event the core publishes.
 use std::sync::{Arc, Barrier};
@@ -268,10 +268,9 @@ async fn two_clients_racing_to_link_and_unlink_end_with_one_winner_each() {
     f.source.push_ok(&key(8), fetched(8));
     f.source.repeat_last();
     let mut core = f.core().await;
-    let _permit = core.owner.start(THREAD).unwrap();
     let mut events = subscribe(&core);
     let before = read(&core);
-    assert!(before.owned_here && before.link.is_none());
+    assert!(before.link.is_none());
 
     race(
         &core,
@@ -335,7 +334,6 @@ async fn a_command_sent_again_is_one_operation_and_another_request_under_its_id_
     f.source.push_ok(&key(7), fetched(7));
     f.source.repeat_last();
     let mut core = f.core().await;
-    let _permit = core.owner.start(THREAD).unwrap();
     let mut events = subscribe(&core);
     let revision = read(&core).lifecycle_revision;
 
@@ -398,7 +396,6 @@ async fn a_refresh_sent_again_while_a_fetch_runs_joins_one_follow_up() {
     let first = f.source.push_gate(&key(7));
     let follow_up = f.source.push_gate(&key(7));
     let mut core = f.core().await;
-    let _permit = core.owner.start(THREAD).unwrap();
     let mut events = subscribe(&core);
     let revision = read(&core).lifecycle_revision;
     send(
@@ -457,7 +454,6 @@ async fn a_fetch_cut_off_by_the_core_stopping_is_never_committed() {
     let f = Fixture::new();
     let gate = f.source.push_gate(&key(7));
     let mut core = f.core().await;
-    let _permit = core.owner.start(THREAD).unwrap();
     let mut events = subscribe(&core);
     let revision = read(&core).lifecycle_revision;
     send(
@@ -505,7 +501,6 @@ async fn the_limit_stop_is_announced_once_for_every_client_together() {
     f.source.push_ok(&key(7), fetched(7));
     f.source.repeat_last();
     let mut core = f.core().await;
-    let _permit = core.owner.start(THREAD).unwrap();
     let mut desktop = subscribe(&core);
     let mut browser = subscribe(&core);
     let revision = read(&core).lifecycle_revision;
@@ -596,7 +591,6 @@ async fn a_request_sent_again_after_its_operation_left_the_table_does_not_run_ag
     f.source.push_ok(&key(7), fetched(7));
     f.source.repeat_last();
     let mut core = f.core().await;
-    let _permit = core.owner.start(THREAD).unwrap();
     let mut events = subscribe(&core);
     let revision = read(&core).lifecycle_revision;
     send(
@@ -660,7 +654,6 @@ async fn a_full_memory_of_accepted_commands_refuses_new_ids_and_still_answers_kn
     f.source.push_ok(&key(7), fetched(7));
     f.source.repeat_last();
     let mut core = f.core().await;
-    let _permit = core.owner.start(THREAD).unwrap();
     let mut events = subscribe(&core);
     let revision = read(&core).lifecycle_revision;
     send(
@@ -745,7 +738,6 @@ async fn a_planned_restart_waits_for_accepted_commands_and_never_adopts_a_cut_of
     let f = Fixture::new();
     let gate = f.source.push_gate(&key(7));
     let mut core = f.core().await;
-    let _permit = core.owner.start(THREAD).unwrap();
     let mut events = subscribe(&core);
     let restart = core.host.lock().unwrap().service().restart_gate();
     let revision = read(&core).lifecycle_revision;

@@ -4,12 +4,14 @@ use crate::{AgentRuntime, Role, RunConfig, RunId};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// An owner permit is always supplied by the current host and is never
-/// reconstructed from this record.
+/// Memo data only. Current root/project context is rebuilt by the host; no
+/// execution authority is reconstructed from this record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingEscalation {
     pub source_run_id: RunId,
+    /// Legacy memo bit only; never used to grant or refuse execution.
+    #[serde(default)]
     pub requires_ownership: bool,
     /// Preserve source resource caps through committed admission recovery.
     #[serde(default)]
@@ -29,7 +31,6 @@ pub(crate) fn persist_escalation_seed(
     source_run_id: RunId,
     prompt: &str,
     config: &RunConfig,
-    requires_ownership: bool,
     continuity: &crate::continuity::Continuity,
     pending_reference_id: Option<String>,
 ) -> Result<u64, SnapshotError> {
@@ -76,7 +77,7 @@ pub(crate) fn persist_escalation_seed(
         project_root: config.project_root.clone(),
         pending_escalation: Some(PendingEscalation {
             source_run_id,
-            requires_ownership,
+            requires_ownership: false,
             budget: config.budget.clone(),
             trusted_request: runtime.trusted_thread_request(source_run_id),
             trusted_request_complete: true,
@@ -159,4 +160,23 @@ pub(crate) fn persist_escalation_seed(
             )])?;
     }
     Ok(saved.snapshot_revision)
+}
+
+#[cfg(test)]
+mod legacy_seed_tests {
+    use super::*;
+    #[test]
+    fn pending_seed_accepts_legacy_requires_ownership_bit_as_data_only() {
+        let run = RunId::new(7);
+        let seed: PendingEscalation = serde_json::from_value(serde_json::json!({
+            "source_run_id":run, "requires_ownership":true, "trusted_request":null
+        }))
+        .unwrap();
+        assert_eq!(seed.source_run_id, run);
+        assert!(seed.requires_ownership);
+        assert!(
+            !seed.trusted_request_complete,
+            "old memo cannot mint thread access"
+        );
+    }
 }

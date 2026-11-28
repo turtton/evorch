@@ -11,7 +11,7 @@ fn conversation_has_one_capability_and_rejects_client_authority_and_paths() {
     let wire = serde_json::json!({"type":"conversation","payload":{"type":"begin_attachment","payload":{"project":"p","thread":"t","filename":"a.png","media_type_hint":"image/png","byte_length":1,"client_upload_id":"draft","path":"/etc/passwd"}}});
     assert!(serde_json::from_value::<Command>(wire).is_err());
     for extra in ["provenance", "trust", "force", "owner_id"] {
-        let mut wire = serde_json::json!({"type":"conversation","payload":{"type":"prepare_existing_thread","payload":{"project":"p","thread":"t"}}});
+        let mut wire = serde_json::json!({"type":"conversation","payload":{"type":"resolve_project","payload":{"root":"/work/project"}}});
         wire["payload"]["payload"][extra] = serde_json::json!(true);
         assert!(serde_json::from_value::<Command>(wire).is_err(), "{extra}");
     }

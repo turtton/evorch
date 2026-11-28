@@ -70,7 +70,7 @@ async fn restore_failure_suppression_and_resume_reuse_the_sent_wire_prefix() {
     host.fail.store(false, Ordering::SeqCst);
     f.h.mock.enqueue(vec![text_response("one recovered batch")]);
     f.h.runtime
-        .resume_lane_deliveries("cache-delivery-lead", f.lead, None)
+        .resume_lane_deliveries("cache-delivery-lead", f.lead)
         .unwrap();
     // Explicit Resume schedules the real driver. Its provider event is the
     // completion signal; we do not race a second manual driver against it.

@@ -82,15 +82,11 @@ fn dropped_operation_aborts_but_commit_does_not_publish_a_second_success() {
     );
 }
 #[test]
-fn terminal_cleanup_survives_revocation_but_text_is_fenced_and_events_roundtrip() {
+fn terminal_cleanup_aborts_and_events_roundtrip() {
     let bus = Arc::new(EventBus::new(32));
     let mut receiver = bus.subscribe();
-    bus.register_mutation_fence("run".into(), Arc::new(|| false));
     let mut operation = Operation::new(bus.clone(), "run".into());
     operation.started = true;
-    operation
-        .path(CompactionMode::ModelSummary)
-        .text("rejected");
     drop(operation);
     let event = receiver.drain_pending_snapshot().pop().unwrap();
     assert_eq!(event.kind.primary_run_id(), Some("run"));

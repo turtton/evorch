@@ -2619,6 +2619,72 @@ fn complete_approval_input_chunks_bind_identity_and_recheck_resolution() {
 }
 
 #[test]
+fn approval_input_and_decisions_preserve_the_shared_thread_and_run_tombstone_fences() {
+    for thread_deleted in [true, false] {
+        let mut f = current_thread_fixture();
+        let registry = ApprovalRegistry::for_bus(&f.runtime.event_bus());
+        let ticket = registry.register(
+            ApprovalRequest {
+                run_id: "run-1",
+                thread_id: Some("thread-1"),
+                tool_name: "shell",
+                call_id: "thread-deletion",
+                input: Some(serde_json::json!({"command":"must not execute"})),
+            },
+            Duration::from_secs(3600),
+        );
+        let mut tombstones = storage::thread_retention::TombstoneSet::default();
+        if thread_deleted {
+            tombstones.threads.insert("thread-1".into());
+        } else {
+            tombstones.runs.insert("run-1".into());
+        }
+        f.runtime
+            .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))
+            .unwrap();
+        let request = approval_input_request(&ticket);
+        assert_eq!(
+            query_error(
+                &f,
+                Query::Approvals(ApprovalsQuery::GetApprovalInput(request.clone()))
+            ),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            f.host
+                .full_approval_input(
+                    &request.approval_id,
+                    request.core_epoch,
+                    request.approval_revision,
+                    &common::web()
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            f.host
+                .handle_command(
+                    Command::Approvals(ApprovalsCommand::DecideToolApproval(DecideToolApproval {
+                        approval_id: request.approval_id,
+                        core_epoch: request.core_epoch,
+                        approval_revision: request.approval_revision,
+                        decision: ApprovalDecision::Approve,
+                    })),
+                    common::web()
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            registry.get(ticket.id()).unwrap().state,
+            ApprovalState::Pending
+        );
+    }
+}
+
+#[test]
 fn approval_input_rejects_expired_cancelled_oversized_and_deleted_entries() {
     let f = current_thread_fixture();
     let registry = ApprovalRegistry::for_bus(&f.runtime.event_bus());

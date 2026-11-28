@@ -1,4 +1,4 @@
-//! Production wire ingress over real runtime/SQLite/ownership, including restart.
+//! Production wire ingress over real runtime/SQLite, including restart.
 mod common;
 use runtime::{AgentRuntime, Role, RunConfig, RunId};
 use serde_json::json;
@@ -18,7 +18,6 @@ struct Fixture {
     dir: test_socket_dir::SplitDir,
     storage: storage::Storage,
     runtime: AgentRuntime,
-    owner: Arc<runtime::ownership::OwnerHost>,
     host: CommandHost,
     lead: RunId,
     lane: runtime::lanes::LaneOpened,
@@ -39,10 +38,6 @@ impl Fixture {
             model.clone(),
         )
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
-        let owner = Arc::new(
-            runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus).unwrap(),
-        );
-        let permit = owner.start("lead").unwrap();
         let lead = runtime
             .delegate_chat(
                 "lead",
@@ -52,7 +47,6 @@ impl Fixture {
                     conversation: true,
                     interactive: true,
                     keep_alive: true,
-                    ownership: Some(permit),
                     project_root: Some(dir.path().into()),
                     ..Default::default()
                 },
@@ -80,8 +74,7 @@ impl Fixture {
             r#"{"version":2,"families":[]}"#,
         )
         .unwrap();
-        let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
-            .with_ownership(owner.clone());
+        let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current());
         service.bind_lane_delivery();
         let host = CommandHost::new(service)
             .with_lane_sidebar_path(dir.path().join("sidebar.json"))
@@ -93,7 +86,6 @@ impl Fixture {
             dir,
             storage,
             runtime,
-            owner,
             host,
             lead,
             lane,
@@ -222,11 +214,10 @@ async fn wire_roundtrip_replay_stale_revision_and_restart_use_one_delivery_runti
         CommandDisposition::AlreadyApplied
     );
     f.stop().await;
-    // A second incarnation over the same durable store renews the current owner,
+    // A second incarnation over the same durable store resumes the same lead thread,
     // without fabricating a live lead or waking a root for a management operation.
     let restored = common::runtime_on_store(f.dir.path(), &f.storage);
-    let service = CommandService::new(restored.clone(), tokio::runtime::Handle::current())
-        .with_ownership(f.owner.clone());
+    let service = CommandService::new(restored.clone(), tokio::runtime::Handle::current());
     service.bind_lane_delivery();
     f.host = CommandHost::new(service).with_lane_sidebar_path(f.dir.path().join("sidebar.json"));
     let detach = f.command("after-restart", 5, LaneManagementAction::Detach);
@@ -249,7 +240,7 @@ async fn wire_roundtrip_replay_stale_revision_and_restart_use_one_delivery_runti
     );
 }
 #[tokio::test]
-async fn foreign_missing_owner_agent_and_unmirrored_pin_are_rejected() {
+async fn agent_and_unmirrored_pin_are_rejected() {
     let mut f = Fixture::new().await;
     let command = f.command(
         "policy",
@@ -261,40 +252,9 @@ async fn foreign_missing_owner_agent_and_unmirrored_pin_are_rejected() {
     assert_eq!(
         f.host
             .handle_command(
-                command.clone(),
+                command,
                 Provenance::agent(workbench_protocol::ids::RunId::new(f.lead.to_string()).unwrap())
             )
-            .unwrap_err()
-            .code,
-        ErrorCode::PermissionDenied
-    );
-    let foreign = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            f.dir.sockets(),
-            Default::default(),
-            f.runtime.event_bus(),
-        )
-        .unwrap(),
-    );
-    let service = CommandService::new(
-        common::runtime_on_store(f.dir.path(), &f.storage),
-        tokio::runtime::Handle::current(),
-    )
-    .with_ownership(foreign);
-    let mut host = CommandHost::new(service);
-    assert_eq!(
-        host.handle_command(command.clone(), common::web())
-            .unwrap_err()
-            .code,
-        ErrorCode::PermissionDenied
-    );
-    let mut no_owner = CommandHost::new(CommandService::new(
-        f.runtime.clone(),
-        tokio::runtime::Handle::current(),
-    ));
-    assert_eq!(
-        no_owner
-            .handle_command(command, common::web())
             .unwrap_err()
             .code,
         ErrorCode::PermissionDenied

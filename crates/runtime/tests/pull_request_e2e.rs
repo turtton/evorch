@@ -126,11 +126,7 @@ async fn a_shell_review_carries_the_facts_only_while_the_thread_is_linked() {
         .pull_request_thread_state(THREAD)
         .unwrap()
         .lifecycle_revision;
-    world
-        .service
-        .unlink(THREAD, revision, &world.permit())
-        .await
-        .unwrap();
+    world.service.unlink(THREAD, revision).await.unwrap();
     let second = world
         .runtime
         .delegate_background_as_child(root, Role::Worker, DELEGATION, RunConfig::default())
@@ -206,11 +202,7 @@ async fn an_approval_decided_while_the_link_ended_does_not_run_the_command() {
             .pull_request_thread_state(THREAD)
             .unwrap()
             .lifecycle_revision;
-        world
-            .service
-            .unlink(THREAD, revision, &world.permit())
-            .await
-            .unwrap();
+        world.service.unlink(THREAD, revision).await.unwrap();
         release.notify_one();
         model.wait_for_request(2).await;
         release.notify_one();
@@ -275,9 +267,6 @@ async fn flow(settings: PullRequestsConfig) -> Flow {
     let enabled = settings.enabled;
     let bus = Arc::new(EventBus::new(4096));
     let world = world_with(model.clone(), executor(&bus), bus, settings);
-    // Observing output is an owned mutation, just like Link. Keep identical
-    // authority for the enabled/disabled sides of the cache comparison.
-    let _permit = world.permit();
     let mut pull_request_events = 0;
 
     let echo = world
@@ -305,7 +294,7 @@ async fn flow(settings: PullRequestsConfig) -> Flow {
     }
     let linking = world
         .service
-        .link(THREAD, "turtton/evorch#7", 0, &world.permit())
+        .link(THREAD, "turtton/evorch#7", 0)
         .await
         .map(|_| ());
     if enabled {
@@ -316,11 +305,7 @@ async fn flow(settings: PullRequestsConfig) -> Flow {
             .pull_request_thread_state(THREAD)
             .unwrap()
             .lifecycle_revision;
-        world
-            .service
-            .unlink(THREAD, revision, &world.permit())
-            .await
-            .unwrap();
+        world.service.unlink(THREAD, revision).await.unwrap();
     }
 
     let merge = world

@@ -144,7 +144,7 @@ fn fixture_for_runtime(
         task: RunTask {
             startup_failure: None,
             recovery_model: None,
-            publication: crate::runtime::ExecutionControl::new(false).publication(),
+            publication: runtime.execution_snapshot(parent).unwrap().publication(),
             ancestry: Default::default(),
             turn: providers::RequestTurnContext::unattributed(false),
             run_id: parent,
@@ -189,7 +189,6 @@ fn fixture_for_runtime(
         plan_notice: Default::default(),
         boundary_context_deferred: false,
         model_switches: 0,
-        owner_turn_open: false,
         current_activity: std::sync::Mutex::new(event_bus::RunActivity::Idle),
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),

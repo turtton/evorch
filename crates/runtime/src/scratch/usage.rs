@@ -1,5 +1,4 @@
 use super::*;
-use crate::ownership::Lease;
 #[cfg(test)]
 #[path = "usage_tests.rs"]
 pub(crate) mod tests;
@@ -18,7 +17,7 @@ pub(super) struct Usage {
 /// Read-only disposal observation. Unknown must not become a sharing proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DisposalScratchUse {
-    Unused { epoch: u64, lease: Lease },
+    Unused { epoch: u64 },
     InUse,
     Unknown,
 }
@@ -39,9 +38,6 @@ impl ThreadScratch {
         {
             return DisposalScratchUse::Unknown;
         }
-        let Some(lease) = state.leases.get(thread) else {
-            return DisposalScratchUse::Unknown;
-        };
         if state
             .usage
             .get(&key)
@@ -49,10 +45,7 @@ impl ThreadScratch {
         {
             DisposalScratchUse::InUse
         } else {
-            DisposalScratchUse::Unused {
-                epoch,
-                lease: lease.clone(),
-            }
+            DisposalScratchUse::Unused { epoch }
         }
     }
     pub(crate) fn set_archive_wake(&self, wake: std::sync::mpsc::SyncSender<()>) {
@@ -60,9 +53,6 @@ impl ThreadScratch {
             .archive_wake
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wake);
-    }
-    pub(crate) fn record_scratch_lease(&self, thread: &str, lease: &Lease) {
-        self.lock().leases.insert(thread.into(), lease.clone());
     }
     /// Publication may not fail at epoch exhaustion. Saturation permanently
     /// makes unused snapshots unavailable instead of wrapping to an old epoch.
@@ -189,7 +179,7 @@ impl ThreadScratch {
             let _ = wake.try_send(());
         }
     }
-    pub(crate) fn archive_snapshot(&self, thread: &str) -> Option<(u64, Lease)> {
+    pub(crate) fn archive_snapshot(&self, thread: &str) -> Option<u64> {
         let state = self.lock();
         let key = ScratchKey::Thread(thread.into());
         let epoch = match state.usage.get(&key) {
@@ -197,23 +187,15 @@ impl ThreadScratch {
             Some(usage) => usage.epoch,
             None => 0,
         };
-        Some((epoch, state.leases.get(thread)?.clone()))
+        Some(epoch)
     }
-    pub(crate) fn detach_archived(
-        &self,
-        thread: &str,
-        epoch: u64,
-        lease: &Lease,
-    ) -> io::Result<Option<bool>> {
+    pub(crate) fn detach_archived(&self, thread: &str, epoch: u64) -> io::Result<Option<bool>> {
         let mut state = self.lock();
         let key = ScratchKey::Thread(thread.into());
         if state
             .usage
             .get(&key)
             .is_some_and(|u| !u.users.is_empty() || u.epoch != epoch || u.epoch == u64::MAX)
-            || state.leases.get(thread).is_none_or(|current| {
-                current.owner_id != lease.owner_id || current.generation != lease.generation
-            })
         {
             return Ok(None);
         }

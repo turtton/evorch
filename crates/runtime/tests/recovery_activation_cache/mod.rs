@@ -653,17 +653,10 @@ async fn recover_case(
     restarted
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
-    let owner = runtime::ownership::OwnerHost::open(
-        h._directory.sockets(),
-        Default::default(),
-        Arc::new(EventBus::new(64)),
-    )
-    .unwrap();
     let authority = CurrentRecoveryAuthority {
         members: BTreeMap::from([(
             run,
             RunConfig {
-                ownership: Some(owner.start("wire-recovery-thread").unwrap()),
                 conversation: plan_schema,
                 interactive: true,
                 keep_alive: true,
@@ -673,7 +666,7 @@ async fn recover_case(
     };
     if plan_schema {
         // The core renews the trusted thread binding before activation
-        // (recovery_startup.rs); a current permit alone is not that binding.
+        // (recovery_startup.rs); saved metadata alone is not that binding.
         restarted
             .bind_thread_root("wire-recovery-thread", run)
             .unwrap();

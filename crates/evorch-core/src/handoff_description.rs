@@ -7,7 +7,7 @@ pub fn describe() -> Result<HandoffDescription, BootstrapError> {
     let identity =
         storage::recovery::restart::restart_digest(&runtime::compiled_standard_tool_catalog())?;
     Ok(HandoffDescription::for_running(
-        1,
+        core_instance::handoff::HANDOFF_FORMAT_VERSION,
         1,
         SchemaRange {
             minimum: *schema.start(),

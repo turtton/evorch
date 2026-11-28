@@ -13,7 +13,7 @@ impl LoopState {
         }
         self.mcp_cancellation.take();
         // Cancelled tool futures may leave a supervisor reaping its child.
-        // Every terminal path waits before shell, ownership or workspace teardown.
+        // Every terminal path waits before shell or workspace teardown.
         self.shared.executor.drain_post_edit_hooks().await;
         let drained = match self.shared.executor.drain_shell_jobs(&run_id).await {
             Ok(()) => true,
@@ -40,33 +40,15 @@ impl LoopState {
         ))
         .await;
         let dropped = self.drain_undelivered_inbox();
-        let authority = if let Some(permit) = self.task.config.ownership.clone() {
-            // Teardown must drain even after Stop/Cancel. Contention is waited
-            // out (it never revokes authority); a real fence fails closed.
-            match self
-                .await_ownership(
-                    permit.validate_generation_off_thread(self.ownership_retry(), || false),
-                )
-                .await
-            {
-                Ok(()) => true,
-                Err(error) => {
-                    self.finalization_error(crate::lanes::ownership_failure_reason(self, &error));
-                    false
-                }
-            }
-        } else {
-            true
-        };
         let uncertain = self.shared.executor.has_unobserved_shell_jobs(&run_id);
         // ADR 0027 §5: drain -> persist uncertainty/terminal history -> release
-        // handles -> publish terminal. Ownership references commit after history.
-        let (snapshot, saved) = if authority {
+        // handles -> publish terminal.
+        let (_snapshot, saved) = {
             match crate::restore::persist_terminal_snapshot(self, &dropped) {
                 Ok(snapshot) => {
                     let saved = matches!(
                         snapshot,
-                        crate::ownership::SnapshotReference::RunContext { .. }
+                        crate::checkpoint::SnapshotReference::RunContext { .. }
                     );
                     if saved {
                         self.snapshot_saved_diagnostic();
@@ -88,72 +70,27 @@ impl LoopState {
                         ));
                     }
                     (
-                        crate::ownership::SnapshotReference::none(
-                            crate::ownership::SnapshotNoneReason::WriteFailed,
+                        crate::checkpoint::SnapshotReference::none(
+                            crate::checkpoint::SnapshotNoneReason::WriteFailed,
                         ),
                         false,
                     )
                 }
             }
-        } else {
-            self.settle_unsaved_host_inputs(&dropped, "ownership_not_held");
-            (
-                crate::ownership::SnapshotReference::none(
-                    crate::ownership::SnapshotNoneReason::Skipped,
-                ),
-                false,
-            )
         };
         if uncertain && !saved {
             self.finalization_error(
-                "unobserved shell effects require a durable terminal snapshot; ownership retained"
+                "unobserved shell effects require a durable terminal snapshot; resources retained"
                     .into(),
             );
         }
         // Never clear active authority when shell effects cannot be recorded.
-        if drained
-            && authority
-            && (saved || !uncertain)
-            && let Some(permit) = self.task.config.ownership.clone()
-            && let Err(error) = self
-                .await_ownership(permit.checkpoint_off_thread(
-                    crate::ownership::CheckpointBoundary::Terminal,
-                    snapshot,
-                    self.ownership_retry(),
-                    || false,
-                ))
-                .await
-        {
-            // Teardown ignores interrupts and waits out contention like the run.
-            if let crate::ownership::RegistryError::Database {
-                operation, phase, ..
-            } = &error
-            {
-                tracing::warn!(
-                    target: crate::ownership::DB_TRACE_TARGET,
-                    run_id = %run_id,
-                    stage = "finalization",
-                    operation = operation.as_str(),
-                    phase = phase.as_str(),
-                    sqlite_code = ?error.sqlite_code(),
-                    "ownership checkpoint failed during finalization"
-                );
-            }
-            self.finalization_error(error.to_string());
-            // The initial terminal phase was provisional. No reference committed;
-            // best-effort correction preserves Error for recovery (Q3).
-            if let Err(error) = crate::restore::persist_terminal_snapshot(self, &dropped) {
-                self.snapshot_diagnostic(&error);
-            }
-        }
-        if authority
-            && self.run_state.phase() == event_bus::AgentRunPhase::Error
+        if self.run_state.phase() == event_bus::AgentRunPhase::Error
             && let Some(runtime) = self.runtime()
             && let Err(error) = runtime.record_lane_harness_failure(
                 self.task.run_id,
                 &self.lane_failure_episode,
                 "runtime_failed",
-                self.task.config.ownership.as_ref(),
             )
         {
             runtime.lane_delivery_diagnostic(
@@ -164,7 +101,7 @@ impl LoopState {
         }
         // Without unknown shell effects, snapshot failure remains a non-fatal
         // diagnostic and does not suppress ordinary completion or workspace cleanup.
-        let released = if drained && authority && (saved || !uncertain) {
+        let released = if drained && (saved || !uncertain) {
             // Releasing handles erases their snapshots. Consume confirmed
             // teardown first, even if the asynchronous monitor has not run yet.
             self.sync_scratch_shell_users();
@@ -198,7 +135,7 @@ impl LoopState {
         }
         if let Some(runtime) = self.runtime()
             && runtime.shared.quiesce.strict_restart_accounting()
-            && (!drained || !authority || !saved || !released)
+            && (!drained || !saved || !released)
         {
             // Ordinary completion keeps ADR 0027's non-fatal snapshot policy,
             // but a restart may not turn failed teardown/persistence into success.

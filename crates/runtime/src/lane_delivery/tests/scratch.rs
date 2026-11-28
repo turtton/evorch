@@ -41,25 +41,10 @@ impl AgentModel for HeldLaneModel {
 
 #[tokio::test]
 async fn lane_delivery_registers_and_recreates_reclaimed_scratch_before_the_model_runs() {
-    let mut f = Fixture::new();
+    let (mut f, scratch, archive) = archive_fixture();
     f.runtime = f.runtime.with_sandbox_root(f._dir.path().to_path_buf());
     Arc::get_mut(&mut f.runtime.shared).unwrap().sandbox_factory = Some(Arc::new(DirectFactory));
-    let sockets = test_socket_dir::SocketDir::new();
-    let host = crate::ownership::OwnerHost::open_with_scratch(
-        sockets.path(),
-        Default::default(),
-        Arc::new(EventBus::new(32)),
-        true,
-        Some(crate::scratch::ThreadScratch::at(
-            f._dir.path().join("scratch"),
-        )),
-    )
-    .unwrap();
-    host.start("delivery-lead").unwrap();
-    let scratch = host.thread_scratch();
-    f.runtime.set_thread_scratch(scratch.clone());
     let (consulted, mut received) = tokio::sync::mpsc::unbounded_channel();
-    let archive = runtime_archive(&host);
     archive.set_checker(Arc::new(move |_| {
         consulted.send(()).unwrap();
         Ok(true)
@@ -108,7 +93,7 @@ async fn lane_delivery_registers_and_recreates_reclaimed_scratch_before_the_mode
 
 #[tokio::test]
 async fn active_lane_thread_scratch_is_kept_until_its_execution_ends() {
-    let mut f = Fixture::new();
+    let (mut f, scratch, archive) = archive_fixture();
     f.runtime = f.runtime.with_sandbox_root(f._dir.path().to_path_buf());
     let model = Arc::new(HeldLaneModel {
         base: f.model.clone(),
@@ -120,23 +105,8 @@ async fn active_lane_thread_scratch_is_kept_until_its_execution_ends() {
         shared.sandbox_factory = Some(Arc::new(DirectFactory));
         shared.model = model.clone();
     }
-    let sockets = test_socket_dir::SocketDir::new();
-    let host = crate::ownership::OwnerHost::open_with_scratch(
-        sockets.path(),
-        Default::default(),
-        Arc::new(EventBus::new(32)),
-        true,
-        Some(crate::scratch::ThreadScratch::at(
-            f._dir.path().join("scratch"),
-        )),
-    )
-    .unwrap();
-    let scratch = host.thread_scratch();
-    f.runtime.set_thread_scratch(scratch.clone());
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "archive-busy-lane").await;
-    host.start(&lane.thread_id).unwrap();
-    let archive = runtime_archive(&host);
     archive.set_checker(Arc::new(|_| Ok(true)));
     // Opening an attached lane may also wake the lead. Only this lane's
     // invocation proves that its scratch registration has resumed.
@@ -171,10 +141,68 @@ async fn active_lane_thread_scratch_is_kept_until_its_execution_ends() {
     f.runtime.wait(lead).await.unwrap();
 }
 
-fn runtime_archive(host: &crate::ownership::OwnerHost) -> crate::scratch::archive::ArchiveService {
-    crate::scratch::archive::ArchiveService::new(
-        &host.thread_scratch(),
-        host.scratch_archive_authority(),
+/// Uses the same root writer and two-way binding as production, without owners.db.
+fn archive_fixture() -> (
+    Fixture,
+    Arc<crate::scratch::ThreadScratch>,
+    crate::scratch::archive::ArchiveService,
+) {
+    let dir = test_socket_dir::SplitDir::new();
+    let root = dir.path().join("threads");
+    std::fs::create_dir_all(&root).unwrap();
+    let sidebar = dir.path().join("sidebar.json");
+    std::fs::write(&sidebar, "{}").unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("delivery.db"),
+        ..Default::default()
+    };
+    let leases =
+        Arc::new(storage::WriterLeases::acquire(&config.db_path, &root, Duration::ZERO).unwrap());
+    let shared = storage::shared_with_wait(&config.db_path, &root, Duration::ZERO).unwrap();
+    let storage = storage::Storage::open_with_writer_lease(
+        config.clone(),
+        shared.db_lease().unwrap(),
+        leases.db_lease(),
     )
-    .unwrap()
+    .unwrap();
+    crate::thread_retention::binding::ensure_binding(
+        &storage::Database::open(&config).unwrap(),
+        &storage.handle(),
+        &leases.authority().unwrap(),
+        crate::thread_retention::BindingPaths {
+            ownership_root: &root,
+            sidebar_path: &sidebar,
+        },
+        &config.db_path,
+        1,
+    )
+    .unwrap();
+    let scratch = Arc::new(crate::scratch::ThreadScratch::for_ownership_root(&root).unwrap());
+    let archive = crate::scratch::archive::ArchiveService::new(
+        &scratch,
+        crate::scratch::archive::authority(config.clone(), root, sidebar, leases, scratch.clone()),
+    )
+    .unwrap();
+    let model = Arc::new(Model::default());
+    let bus = Arc::new(EventBus::new(16384));
+    let events = bus.subscribe();
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        model.clone(),
+    )
+    .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    runtime.set_thread_scratch(scratch.clone());
+    (
+        Fixture {
+            runtime,
+            storage,
+            config,
+            model,
+            events,
+            _dir: dir,
+        },
+        scratch,
+        archive,
+    )
 }

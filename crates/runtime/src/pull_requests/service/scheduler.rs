@@ -1,10 +1,9 @@
 //! The loop that decides when each tracked pull request is fetched.
 //!
-//! It plans from the database and the ownership registry, never from a copy: the links of
-//! unarchived threads, the ones this process owns, and the pending inheritances of owned
-//! children. It sleeps until the earliest due time or until something it plans from changes
-//! (a link, an unlink, an archive, a settings change, an ownership change, a refresh, the end
-//! of a command that publishes), and wakes through [`Notify`](tokio::sync::Notify) and watch
+//! It plans from the database, never from a copy: the links of unarchived threads and the
+//! pending inheritances of derived threads. It sleeps until the earliest due time or until
+//! something it plans from changes (a link, an unlink, an archive, a settings change, a
+//! refresh, the end of a command that publishes), and wakes through [`Notify`](tokio::sync::Notify) and watch
 //! channels, never by polling at a fixed rate.
 
 use std::collections::{HashMap, HashSet};
@@ -19,7 +18,6 @@ use tokio::time::Instant;
 
 use super::flight::{Flight, Interest, Target};
 use super::{Inner, KeyState, Stage};
-use crate::ownership::OwnerPermit;
 
 #[cfg(test)]
 mod tests;
@@ -34,9 +32,8 @@ struct Plan {
     targets: Vec<Target>,
     /// For each key with stored facts: their `success_seq`, and whether they say merged or closed.
     stored: HashMap<PullRequestKey, (u64, bool)>,
-    /// Pending inheritances of children this process owns: the child, the pull request it waits
-    /// for, and its permit.
-    children: Vec<(String, PullRequestKey, OwnerPermit)>,
+    /// Pending inheritances: the child and the pull request it waits for.
+    children: Vec<(String, PullRequestKey)>,
 }
 
 pub(super) async fn run(inner: Arc<Inner>) {
@@ -100,19 +97,7 @@ fn earlier(current: Option<Instant>, candidate: Instant) -> Option<Instant> {
     Some(current.map_or(candidate, |current| current.min(candidate)))
 }
 
-fn owned(
-    inner: &Inner,
-    cache: &mut HashMap<String, Option<OwnerPermit>>,
-    thread_id: &str,
-) -> Option<OwnerPermit> {
-    cache
-        .entry(thread_id.to_owned())
-        .or_insert_with(|| inner.ownership.owned_permit(thread_id))
-        .clone()
-}
-
 fn plan_blocking(inner: &Inner) -> Result<Plan, StorageError> {
-    let mut cache = HashMap::new();
     let mut targets = Vec::new();
     let mut after = 0;
     loop {
@@ -120,15 +105,12 @@ fn plan_blocking(inner: &Inner) -> Result<Plan, StorageError> {
         let full = page.len() == PAGE;
         for link in page {
             after = link.link_id;
-            if let Some(permit) = owned(inner, &mut cache, &link.thread_id) {
-                targets.push(Target {
-                    thread_id: link.thread_id,
-                    key: link.key,
-                    link_id: link.link_id,
-                    link_revision: link.link_revision,
-                    permit,
-                });
-            }
+            targets.push(Target {
+                thread_id: link.thread_id,
+                key: link.key,
+                link_id: link.link_id,
+                link_revision: link.link_revision,
+            });
         }
         if !full {
             break;
@@ -156,9 +138,7 @@ fn plan_blocking(inner: &Inner) -> Result<Plan, StorageError> {
             .pending_pull_request_inheritances(cursor.take(), PAGE)?;
         let full = page.len() == PAGE;
         for record in &page {
-            if let Some(permit) = owned(inner, &mut cache, &record.child_thread_id) {
-                children.push((record.child_thread_id.clone(), record.key.clone(), permit));
-            }
+            children.push((record.child_thread_id.clone(), record.key.clone()));
         }
         if !full || children.len() >= MAX_CHILDREN_PER_ROUND {
             break;
@@ -238,8 +218,7 @@ impl Inner {
             }
         };
         self.run_stage_hook(Stage::Planned);
-        // Planning waited on the database and the ownership registry: tracking may have been
-        // switched off meanwhile, and then nothing is started from this plan.
+        // Planning waited on the database: tracking may have been switched off meanwhile, and then nothing is started from this plan.
         if !self.config().enabled {
             return None;
         }
@@ -257,7 +236,7 @@ impl Inner {
             // for it: the failure state of a pull request is one, whoever asks.
             let mut needed: HashSet<PullRequestKey> = state.flights.keys().cloned().collect();
             needed.extend(groups.keys().cloned());
-            needed.extend(plan.children.iter().map(|(_, key, _)| key.clone()));
+            needed.extend(plan.children.iter().map(|(_, key)| key.clone()));
             state.keys.retain(|key, _| needed.contains(key));
             for (key, targets) in groups {
                 let forced = targets
@@ -268,8 +247,8 @@ impl Inner {
                     .keys
                     .entry(key.clone())
                     .or_insert_with(|| KeyState::new(now, terminal, stored_seq));
-                // The shared snapshot is the other processes' word too: a merge or a reopening they
-                // stored is honoured when it is newer than what this entry has adopted. An older
+                // The stored snapshot is the word of every fetch: a merge or a reopening stored
+                // meanwhile is honoured when it is newer than what this entry has adopted. An older
                 // read (the plan is older than a fetch this process finished meanwhile) is not.
                 if stored_seq > entry.adopted_seq {
                     entry.adopted_seq = stored_seq;
@@ -296,11 +275,11 @@ impl Inner {
             state.forced.clear();
             let pending = Duration::from_secs(config.pending_poll_seconds);
             let live_children: HashSet<&String> =
-                plan.children.iter().map(|(child, _, _)| child).collect();
+                plan.children.iter().map(|(child, _)| child).collect();
             state
                 .inheritance_due
                 .retain(|child, _| live_children.contains(child));
-            for (child, key, permit) in plan.children {
+            for (child, key) in plan.children {
                 if state.resolving.contains(&child) {
                     continue;
                 }
@@ -322,36 +301,35 @@ impl Inner {
                 }
                 state.resolving.insert(child.clone());
                 state.inheritance_due.insert(child.clone(), now + pending);
-                resolve.push((child, key, permit));
+                resolve.push((child, key));
             }
         }
         // One fetch per pull request, started with every party that waits for it.
         let mut fetches: HashMap<PullRequestKey, Vec<Interest>> = start.into_iter().collect();
-        for (child, key, permit) in &resolve {
+        for (child, key) in &resolve {
             fetches
                 .entry(key.clone())
                 .or_default()
                 .push(Interest::Child {
                     child: child.clone(),
-                    permit: permit.clone(),
                 });
         }
         let flights: HashMap<PullRequestKey, Arc<Flight>> = fetches
             .into_iter()
             .map(|(key, interests)| (key.clone(), self.start_or_join(key, interests)))
             .collect();
-        for (child, key, permit) in resolve {
+        for (child, key) in resolve {
             if let Some(flight) = flights.get(&key) {
-                self.spawn_resolution(child, permit, Arc::clone(flight));
+                self.spawn_resolution(child, Arc::clone(flight));
             }
         }
         earliest
     }
 
-    fn spawn_resolution(self: &Arc<Self>, child: String, permit: OwnerPermit, flight: Arc<Flight>) {
+    fn spawn_resolution(self: &Arc<Self>, child: String, flight: Arc<Flight>) {
         let inner = Arc::clone(self);
         self.tasks.spawn(async move {
-            let result = inner.resolve_child_in(child.clone(), permit, flight).await;
+            let result = inner.resolve_child_in(child.clone(), flight).await;
             let pending = Duration::from_secs(inner.config().pending_poll_seconds);
             {
                 let mut state = inner.lock();

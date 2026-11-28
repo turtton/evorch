@@ -145,7 +145,6 @@ async fn restart_busy_rejects_lane_producers_before_any_ledger_write_and_allows_
                             },
                         ),
                         None,
-                        &[],
                     )
                     .map(|_| None),
             }
@@ -644,19 +643,19 @@ async fn wake_gate_rechecks_management_and_claim_after_the_host_callback_starts(
                     .delivery_store()
                     .unwrap()
                     .handle
-                    .nack_lane_delivery(claim, LaneDeliveryNack::OwnershipLost, self.now_ns())
+                    .nack_lane_delivery(claim, LaneDeliveryNack::BindingConflict, self.now_ns())
                     .unwrap();
             }
             assert!(matches!(
                 runtime.wake_chat(target.root_run_id, target.authority.clone()),
                 Err(crate::RuntimeError::RunRestoreFailed {
                     reason: crate::RunRestoreFailure::LaneDeliveryFenced(
-                        LaneDeliveryNack::OwnershipLost
+                        LaneDeliveryNack::BindingConflict
                     ),
                     ..
                 })
             ));
-            Err(LaneDeliveryNack::OwnershipLost)
+            Err(LaneDeliveryNack::BindingConflict)
         }
     }
     for management_changes in [false, true] {
@@ -680,7 +679,7 @@ async fn wake_gate_rechecks_management_and_claim_after_the_host_callback_starts(
                 .drive_lane_deliveries("delivery-lead")
                 .await
                 .unwrap(),
-            LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost)
+            LaneDeliveryOutcome::Nacked(LaneDeliveryNack::BindingConflict)
         );
         assert_eq!(host.callbacks.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -790,7 +789,7 @@ async fn report_and_detach_commit_orders_cannot_save_under_the_new_management() 
         let lane = f.lane(lead, "report-cas").await;
         if report_first {
             f.runtime
-                .append_lane_agent_report(lane.root_run_id, None, report())
+                .append_lane_agent_report(lane.root_run_id, report())
                 .unwrap();
             detach(&f, &lane, 1);
         } else {
@@ -803,7 +802,7 @@ async fn report_and_detach_commit_orders_cannot_save_under_the_new_management() 
             });
             assert!(
                 f.runtime
-                    .append_lane_agent_report(lane.root_run_id, None, report())
+                    .append_lane_agent_report(lane.root_run_id, report())
                     .is_err()
             );
         }
@@ -816,14 +815,10 @@ async fn report_and_detach_commit_orders_cannot_save_under_the_new_management() 
         assert!(reports.iter().all(|r| r.management_revision == 1));
         assert!(
             f.runtime
-                .append_lane_agent_report(lane.root_run_id, None, report())
+                .append_lane_agent_report(lane.root_run_id, report())
                 .is_err()
         );
-        assert!(
-            f.runtime
-                .append_lane_agent_report(lead, None, report())
-                .is_err()
-        );
+        assert!(f.runtime.append_lane_agent_report(lead, report()).is_err());
         shutdown(&f, &[lead, lane.root_run_id]).await;
     }
 }
@@ -930,32 +925,17 @@ async fn new_lead_replaces_old_authority_and_host_guard_rejects_pin_archive_and_
 }
 
 #[tokio::test]
-async fn report_rejects_replaced_root_and_original_execution_authority_loss() {
+async fn report_rejects_replaced_root() {
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "report-authority").await;
-    let host = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        f.runtime.shared.bus.clone(),
-    )
-    .unwrap();
-    let mut stale = host.start(&lane.thread_id).unwrap();
-    stale.lease.generation += 1;
-    assert_eq!(
-        f.runtime
-            .append_lane_agent_report(lane.root_run_id, Some(&stale), report())
-            .unwrap_err()
-            .code,
-        "ownership_lost"
-    );
     f.sql(&format!(
         "UPDATE lanes SET root_run_id='{lead}',generation=generation+1 WHERE lane_id='{}'",
         lane.lane_id
     ));
     assert_eq!(
         f.runtime
-            .append_lane_agent_report(lane.root_run_id, None, report())
+            .append_lane_agent_report(lane.root_run_id, report())
             .unwrap_err()
             .code,
         "lane_unavailable"
@@ -1103,7 +1083,7 @@ async fn accepted_answer_receipt_orders() {
                 .unwrap();
             assert_eq!(
                 outcome,
-                LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost)
+                LaneDeliveryOutcome::Nacked(LaneDeliveryNack::BindingConflict)
             );
             f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
             assert_eq!(f.receipts(), 1);
@@ -1232,7 +1212,7 @@ async fn detached_runtime_restart_restores_same_root_scope_and_durable_user_ques
     );
     assert!(
         fresh
-            .append_lane_agent_report(lane.root_run_id, None, report())
+            .append_lane_agent_report(lane.root_run_id, report())
             .is_err()
     );
     assert!(

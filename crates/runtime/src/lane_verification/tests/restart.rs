@@ -32,7 +32,6 @@ async fn closes_are_effect_free_while_preparing_or_sealed_and_require_explicit_r
                             surface: "test-host".into(),
                             client_id: None,
                         },
-                        &[],
                     )
                 }
             };

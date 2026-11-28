@@ -1,5 +1,5 @@
 //! Read adapters of the execution and lanes areas over a real runtime, SQLite
-//! and ownership: live and saved runs merge, a lane listing pages without
+//! and lead thread: live and saved runs merge, a lane listing pages without
 //! repeats, the lane ledger decides what is shown, and operations aimed at an
 //! older revision, lead or run are refused without changing anything.
 mod common;
@@ -40,10 +40,8 @@ use workbench_protocol::wire::Revision;
 
 struct Fixture {
     dir: test_socket_dir::SplitDir,
-    _owners: test_socket_dir::SocketDir,
     storage: storage::Storage,
     runtime: AgentRuntime,
-    owner: Arc<runtime::ownership::OwnerHost>,
     host: CommandHost,
     model: Arc<common::HeldModel>,
     lead: RunId,
@@ -62,9 +60,6 @@ fn brief(objective: &str) -> event_bus::LaneBrief {
 impl Fixture {
     async fn new(lane_count: usize) -> Self {
         let dir = test_socket_dir::SplitDir::new();
-        // The owner's Unix socket lives below this directory: keep it under SUN_LEN whatever
-        // TMPDIR is.
-        let owners = test_socket_dir::SocketDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("host.db"),
             ..Default::default()
@@ -78,10 +73,6 @@ impl Fixture {
             model.clone(),
         )
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
-        let owner = Arc::new(
-            runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus).unwrap(),
-        );
-        let permit = owner.start("lead").unwrap();
         let lead = runtime
             .delegate_chat(
                 "lead",
@@ -91,7 +82,6 @@ impl Fixture {
                     conversation: true,
                     interactive: true,
                     keep_alive: true,
-                    ownership: Some(permit),
                     project_root: Some(dir.path().into()),
                     ..Default::default()
                 },
@@ -127,18 +117,15 @@ impl Fixture {
             r#"{"version":2,"families":[]}"#,
         )
         .unwrap();
-        let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
-            .with_ownership(owner.clone());
+        let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current());
         service.bind_lane_delivery();
         let host = CommandHost::new(service)
             .with_lane_sidebar_path(dir.path().join("sidebar.json"))
             .with_areas(areas(&runtime));
         Self {
             dir,
-            _owners: owners,
             storage,
             runtime,
-            owner,
             host,
             model,
             lead,
@@ -354,7 +341,9 @@ async fn a_live_run_and_its_saved_record_are_one_run_and_history_outlives_the_ru
 fn a_stop_names_one_thread_and_never_reaches_a_run_of_another() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let mut host = common::host_with_project(&rt, common::runtime(), dir.path());
+    // A Stop of a conversation is durable, so the runtime needs its store.
+    let (runtime, _storage) = common::runtime_with_store(dir.path());
+    let mut host = common::host_with_project(&rt, runtime, dir.path());
     let started: Vec<_> =
         ["thread-1", "thread-2"]
             .iter()
@@ -600,7 +589,7 @@ async fn a_held_delivery_is_resumed_only_for_the_current_revision_lead_and_root(
     assert_eq!(detached.code, ErrorCode::PermissionDenied);
     // The lead keeps running through all of it.
     assert!(f.runtime.list_agents().iter().any(|a| a.run_id == f.lead));
-    let _ = (&f.owner, &f.model);
+    let _ = &f.model;
     f.stop().await;
 }
 
@@ -678,7 +667,6 @@ async fn a_run_that_only_belongs_to_the_thread_cannot_resume_deliveries_of_its_s
                 conversation: true,
                 interactive: true,
                 keep_alive: true,
-                ownership: Some(f.owner.owned_permit("lead").unwrap()),
                 project_root: Some(f.dir.path().into()),
                 ..Default::default()
             },
@@ -823,7 +811,6 @@ async fn a_stopped_lead_holds_its_notices_and_is_resumed_only_after_it_was_conti
 
     // The operator continues the lead: its conversation gets a new root, and that clears the
     // stop, so the held notices are free. The stopped root stays refused.
-    let permit = f.owner.owned_permit("lead").unwrap();
     let continued = f
         .runtime
         .delegate_chat(
@@ -834,7 +821,6 @@ async fn a_stopped_lead_holds_its_notices_and_is_resumed_only_after_it_was_conti
                 conversation: true,
                 interactive: true,
                 keep_alive: true,
-                ownership: Some(permit.clone()),
                 project_root: Some(f.dir.path().into()),
                 ..Default::default()
             },
@@ -842,7 +828,7 @@ async fn a_stopped_lead_holds_its_notices_and_is_resumed_only_after_it_was_conti
         .unwrap();
     f.model.reached.notified().await;
     f.runtime
-        .explicitly_resume_lane_delivery(continued, Some(&permit))
+        .explicitly_resume_lane_delivery(continued)
         .unwrap();
     assert!(!f.lane_detail(&f.lanes[0].lane_id).delivery.held);
     let old_root = f

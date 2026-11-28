@@ -54,16 +54,8 @@ async fn only_proven_unstarted_queued_disposals_release_their_own_incarnation() 
         let key = ScratchKey::Thread("thread".into());
         let dir = scratch.prepare(&key).unwrap();
         std::fs::write(dir.join("keep"), "keep").unwrap();
-        scratch.record_scratch_lease(
-            "thread",
-            &crate::ownership::Lease {
-                owner_id: "owner".into(),
-                generation: 1,
-                expires_at: u64::MAX,
-            },
-        );
         let run = RunId::new(41);
-        let execution = runtime.reserve_admission(run, None, None);
+        let execution = runtime.reserve_admission(run, None);
         let incarnation = execution.publication().incarnation();
         scratch.register_execution(&key, run, &incarnation).unwrap();
         runtime

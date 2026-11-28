@@ -7,8 +7,8 @@ use std::sync::Arc;
 use config::PullRequestsConfig;
 
 use super::{
-    DerivedThreadKind, OwnershipView, PrNoticeDelivery, PullRequestService, PullRequestSource,
-    ServiceParts, SystemWallClock, ThreadEnvironment,
+    DerivedThreadKind, PrNoticeDelivery, PullRequestService, PullRequestSource, ServiceParts,
+    SystemWallClock, ThreadEnvironment,
 };
 use crate::{AgentRuntime, WeakAgentRuntime};
 
@@ -99,20 +99,17 @@ impl AgentRuntime {
     /// observer and the inheritance of derived threads. Call once, inside a Tokio runtime,
     /// after the run store is connected. A repeated call keeps the first service.
     ///
-    /// `ownership` decides which threads this process may act for; `source` fetches the
-    /// facts (the `gh` CLI in production). While `settings.enabled` is false nothing is
+    /// `source` fetches the facts (the `gh` CLI in production). While `settings.enabled` is false nothing is
     /// fetched or observed, and a later [`PullRequestService::update_settings`] enables it.
     ///
     /// # Errors
     /// The settings are outside their documented ranges, or the runtime has no run store.
     pub fn start_pull_requests(
         &self,
-        ownership: Arc<dyn OwnershipView>,
         source: Arc<dyn PullRequestSource>,
         settings: PullRequestsConfig,
     ) -> Result<PullRequestService, String> {
         self.start_pull_requests_with_log_source(
-            ownership,
             source,
             settings,
             Arc::new(super::GhLogSource::new()),
@@ -126,7 +123,6 @@ impl AgentRuntime {
     /// As [`Self::start_pull_requests`].
     pub fn start_pull_requests_with_log_source(
         &self,
-        ownership: Arc<dyn OwnershipView>,
         source: Arc<dyn PullRequestSource>,
         settings: PullRequestsConfig,
         logs: Arc<dyn super::PullRequestLogSource>,
@@ -145,7 +141,6 @@ impl AgentRuntime {
             ServiceParts {
                 storage,
                 source,
-                ownership,
                 environment: Arc::new(RuntimeEnvironment {
                     runtime: self.downgrade(),
                 }),
@@ -191,7 +186,6 @@ mod tests {
     use providers::{ChatResponse, FinishReason, Message, Role as MessageRole, ToolSpec, Usage};
     use storage::pull_requests::{InheritanceState, PullRequestKey};
 
-    use crate::ownership::OwnerHost;
     use crate::pull_requests::FakePullRequestSource;
     use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunStore, RuntimeError};
 
@@ -240,17 +234,8 @@ mod tests {
             Arc::new(NoModel),
         )
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-        let host = Arc::new(
-            OwnerHost::open(
-                directory.sockets(),
-                config::OwnershipConfig::default(),
-                Arc::clone(&runtime.shared.bus),
-            )
-            .unwrap(),
-        );
         let service = runtime
             .start_pull_requests(
-                Arc::clone(&host) as Arc<dyn crate::pull_requests::OwnershipView>,
                 Arc::new(FakePullRequestSource::new()),
                 PullRequestsConfig {
                     enabled: true,
@@ -258,15 +243,11 @@ mod tests {
                 },
             )
             .unwrap();
-        let permit = host.start("parent").unwrap();
-        let linked = service
-            .link("parent", "turtton/evorch#1", 0, &permit)
-            .await
-            .unwrap();
+        let linked = service.link("parent", "turtton/evorch#1", 0).await.unwrap();
 
         runtime.inherit_pull_request(Some("parent".into()), "escalation-run-9");
         service
-            .unlink("parent", linked.lifecycle_revision, &permit)
+            .unlink("parent", linked.lifecycle_revision)
             .await
             .unwrap();
         for _ in 0..50 {

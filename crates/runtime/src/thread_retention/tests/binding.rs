@@ -121,8 +121,8 @@ fn a_root_binding_is_never_overwritten() {
 // Two databases (A and B) share one ownership root, as two profiles can.
 //
 // (a) while B runs, A cannot take the root exclusively;
-// (b) A confirmed T and went on; B starts later and owns T; A's reclaim executor runs
-//     but T's scratch directory and owner row stay (the executor never touches either);
+// (b) A confirmed T and went on; B starts later and uses scratch T; A's executor runs
+//     but T's scratch directory stays (the executor never touches it);
 // (c) while B runs, a restart of A cannot take the root exclusively either, so A's
 //     startup phase never removes T's scratch;
 // (d) once B is the only starter, B sees the root bound to A's database and neither
@@ -150,9 +150,8 @@ fn two_databases_sharing_a_root_never_delete_each_others_state() {
         storage::Storage::open_with_lease(a.storage_config(), a_leases.db_lease().unwrap())
             .unwrap();
 
-    // (b) B starts later (it can share the root) and owns a thread called T of its own.
+    // (b) B starts later (it can share the root) with an otherwise unproven scratch T.
     let b_running = storage::shared_with_wait(&b.db_path, &b.root, Duration::ZERO).unwrap();
-    b.owner_row("T", true, u64::MAX / 2);
     let b_scratch = b.scratch_dir("T");
     let mut worker = ReclaimWorker::new(ExecutorConfig::new(
         a_storage.handle(),
@@ -164,7 +163,6 @@ fn two_databases_sharing_a_root_never_delete_each_others_state() {
         assert!(cycle.holds_lease && cycle.errors.is_empty(), "{cycle:?}");
     }
     assert!(b_scratch.is_dir(), "the executor must never remove scratch");
-    assert_eq!(b.owner_rows(), ["T"], "nor owner rows");
 
     // (c) A restarts while B runs: no exclusive locks, hence no phase at all.
     drop(worker);
@@ -192,7 +190,6 @@ fn two_databases_sharing_a_root_never_delete_each_others_state() {
     ));
     assert!(b.tombstones().is_empty());
     assert!(b_scratch.is_dir());
-    assert_eq!(b.owner_rows(), ["T"]);
 }
 
 // Given: a crash at each boundary of the first confirmation (after the root side of the

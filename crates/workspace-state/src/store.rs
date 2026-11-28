@@ -1,16 +1,14 @@
 //! The shared `sidebar.json` as a locked read-modify-write document.
 //!
-//! The file is shared with desktops that still write it themselves. They take
-//! an exclusive lock on `<file>.lock` for every save and merge what they find on
-//! disk into their own state; a writer using this module takes **the same lock**,
-//! re-reads the file while holding it, applies its edit to what it read and writes
-//! the result atomically. Nothing is written from a stale copy, so another
-//! writer's change is never overwritten, and nothing is written when the file
+//! The core is the only writer of the file. Every edit takes an exclusive lock on
+//! `<file>.lock` (it serialises the core's own services), re-reads the file while
+//! holding it, applies its edit to what it read and writes the result atomically.
+//! Nothing is written from a stale copy, and nothing is written when the file
 //! cannot be read (an unreadable file is not "no file").
 //!
 //! The file also carries fields this crate does not interpret (sent messages and
-//! composer drafts of a desktop). They are kept byte-for-byte as values; only the
-//! sidebar part is edited here.
+//! composer drafts). They are kept byte-for-byte as values; only the sidebar part
+//! is edited here.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

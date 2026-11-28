@@ -58,8 +58,6 @@ fn expected(id: &str) -> RestartExpectedMember {
         thread_id: Some(format!("thread/{id}")),
         intent_revision: 0,
         snapshot: None,
-        owner_id: Some("owner".into()),
-        owner_generation: Some(7),
         lane_id: Some(id.into()),
     }
 }
@@ -69,7 +67,7 @@ fn seed(db: &Database, id: &str) {
 fn component(id: &str) -> RecoveryManifestRecord {
     RecoveryManifestRecord {
         manifest_id: format!("component/{id}"),
-        schema_version: 1,
+        schema_version: 2,
         committed: false,
         superseded: false,
         edges: vec![],
@@ -161,20 +159,6 @@ fn restart_component_owner_and_terminal_cas_are_atomic() {
         RestartMutation::SaveComponent(component("run"))
     });
     let t = step(&db, t, RestartMutation::Commit);
-    let t = lost_ack(&db, Some(t.revision), || {
-        RestartMutation::OwnerProgress(RestartOwnerProgress {
-            thread_id: "thread/run".into(),
-            old_owner_id: "owner".into(),
-            old_generation: 7,
-            active_runs: BTreeSet::from(["run".into()]),
-            parked_runs: BTreeSet::new(),
-            hold_saved: true,
-            hold_read_back: true,
-            worker_joined: false,
-            socket_unlinked: false,
-            hold_removed: false,
-        })
-    });
     let t = step(
         &db,
         t,

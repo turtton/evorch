@@ -1,5 +1,3 @@
-#![cfg_attr(doctest, doc = include_str!("../physical-ownership-contract.md"))]
-
 //! ロール実行ランタイム (role-execution runtime)。
 //!
 //! ADR 0002 の capability boundary を持つロール (Orchestrator / Explorer / Worker /
@@ -48,13 +46,10 @@ pub mod learning;
 pub mod learning_jobs;
 pub mod learning_suspend;
 pub use memory_lifecycle::ResumedLearning;
+pub use runtime::DisposalAuthority;
 pub use runtime::{
     ActivatedReservation, ActivationFailure, ActivationReservation, ActivationReservationProblem,
     AutomaticActivationReservation, ManualActivationReservation,
-};
-pub use runtime::{
-    DisposalAuthority, OwnedGraphOwnershipDiagnostic, OwnedGraphOwnershipState, OwnedThreadCas,
-    PhysicalClaimReport,
 };
 mod conversation_plan;
 pub mod mailbox;
@@ -68,7 +63,6 @@ pub mod model_grouping;
 pub mod model_resolve;
 pub mod network;
 mod output_attachments;
-pub mod ownership;
 pub mod panic_capture;
 pub mod policy;
 pub mod producer;

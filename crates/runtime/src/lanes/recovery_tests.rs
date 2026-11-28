@@ -12,7 +12,6 @@ fn seed_lane(f: &Fixture, lead: RunId, index: usize, run: RunId) -> LaneRecord {
             start_seed: serde_json::to_string(&StartSeed {
                 run_id: run,
                 project_root: None,
-                requires_ownership: false,
             })
             .unwrap(),
             project_id: None,
@@ -60,7 +59,7 @@ async fn restart_busy_preserves_stopped_lane_until_explicit_retry() {
     let attempt = f.runtime.begin_restart_quiesce().unwrap();
     assert_eq!(
         f.runtime
-            .resume_stopped_lane(&lane.lane_id, None)
+            .resume_stopped_lane(&lane.lane_id)
             .unwrap_err()
             .code,
         "restart_busy"
@@ -75,7 +74,7 @@ async fn restart_busy_preserves_stopped_lane_until_explicit_retry() {
     );
     f.runtime.cancel_restart_quiesce(&attempt).unwrap();
     assert_eq!(
-        f.runtime.resume_stopped_lane(&lane.lane_id, None).unwrap(),
+        f.runtime.resume_stopped_lane(&lane.lane_id).unwrap(),
         Some(run)
     );
     f.phase(run, AgentRunPhase::Waiting).await;
@@ -107,7 +106,7 @@ async fn graph_exclusion_precedes_limit_and_only_the_201st_lane_is_admitted() {
             .lane_id,
         "recovery-200"
     );
-    assert_eq!(f.runtime.recover_unstarted_lanes(None).unwrap(), [run]);
+    assert_eq!(f.runtime.recover_unstarted_lanes().unwrap(), [run]);
     f.phase(run, AgentRunPhase::Waiting).await;
     assert_eq!(
         &f.model.admissions.lock().unwrap()[before..],
@@ -120,20 +119,12 @@ async fn graph_exclusion_precedes_limit_and_only_the_201st_lane_is_admitted() {
             .unwrap()
             .is_empty()
     );
-    assert!(f.runtime.recover_unstarted_lanes(None).unwrap().is_empty());
-    let owner = Arc::new(
-        crate::ownership::OwnerHost::open(
-            f._dir.sockets(),
-            Default::default(),
-            Arc::new(EventBus::new(32)),
-        )
-        .unwrap(),
-    );
+    assert!(f.runtime.recover_unstarted_lanes().unwrap().is_empty());
     let admissions = f.model.admissions.lock().unwrap().len();
     let requests = f.model.requests.lock().unwrap().len();
     // The owned retry future must terminate despite 200 excluded pending rows.
     // Await its semantic completion; runner-level hang detection catches regressions.
-    f.runtime.prepare_lane_recovery(&owner).unwrap().await;
+    f.runtime.prepare_lane_recovery().unwrap().await;
     assert_eq!(f.model.admissions.lock().unwrap().len(), admissions);
     assert_eq!(f.model.requests.lock().unwrap().len(), requests);
     assert_eq!(
@@ -151,7 +142,7 @@ async fn graph_exclusion_precedes_limit_and_only_the_201st_lane_is_admitted() {
     f.cancel(lead).await;
 }
 #[tokio::test]
-async fn stopped_graph_lane_is_rejected_before_ownership_or_ledger_changes() {
+async fn stopped_graph_lane_is_rejected_before_admission_or_ledger_changes() {
     let mut f = Fixture::new();
     let lead = f.lead().await;
     let run = f.runtime.shared.run_ids.next();
@@ -163,43 +154,23 @@ async fn stopped_graph_lane_is_rejected_before_ownership_or_ledger_changes() {
         .unwrap();
     f.runtime.fence_graph_lane_recovery().unwrap();
     let before = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
-    let owner = Arc::new(
-        crate::ownership::OwnerHost::open(
-            f._dir.sockets(),
-            Default::default(),
-            Arc::new(EventBus::new(32)),
-        )
-        .unwrap(),
-    );
     assert_eq!(
         f.runtime
-            .resume_stopped_lane(&lane.lane_id, Some(&owner))
+            .resume_stopped_lane(&lane.lane_id)
             .unwrap_err()
             .code,
         "graph_recovery_required"
     );
-    assert!(matches!(
-        owner.attach(&lane.thread_id),
-        Err(crate::ownership::RegistryError::Absent)
-    ));
     assert_eq!(
         f.storage.handle().lane(&lane.lane_id).unwrap().unwrap(),
         before
     );
     let seed = serde_json::from_str(&lane.start_seed).unwrap();
     assert_eq!(
-        f.runtime
-            .start_recovered(&lane, &seed, None)
-            .unwrap_err()
-            .code,
+        f.runtime.start_recovered(&lane, &seed).unwrap_err().code,
         "graph_recovery_required"
     );
-    assert!(
-        f.runtime
-            .recover_unstarted_lanes(Some(&owner))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(f.runtime.recover_unstarted_lanes().unwrap().is_empty());
     assert_eq!(
         f.storage.handle().lane(&lane.lane_id).unwrap().unwrap(),
         before
@@ -253,24 +224,15 @@ async fn deleting_a_manifest_keeps_its_orphan_lane_recoverable() {
     );
     f.runtime.fence_graph_lane_recovery().unwrap();
     assert!(f.runtime.lane_recovery_exclusions().is_empty());
-    assert_eq!(f.runtime.recover_unstarted_lanes(None).unwrap(), [run]);
+    assert_eq!(f.runtime.recover_unstarted_lanes().unwrap(), [run]);
     f.phase(run, AgentRunPhase::Waiting).await;
     f.cancel(run).await;
     f.cancel(lead).await;
 }
 
 #[tokio::test]
-async fn idempotent_open_of_a_graph_lane_never_creates_an_owner_or_admits() {
+async fn idempotent_open_of_a_graph_lane_never_admits() {
     let mut f = Fixture::new();
-    let owner = Arc::new(
-        crate::ownership::OwnerHost::open(
-            f._dir.sockets(),
-            Default::default(),
-            Arc::new(EventBus::new(32)),
-        )
-        .unwrap(),
-    );
-    let permit = owner.start("lead").unwrap();
     let lead = f
         .runtime
         .delegate_chat(
@@ -278,7 +240,6 @@ async fn idempotent_open_of_a_graph_lane_never_creates_an_owner_or_admits() {
             Role::Orchestrator,
             "coordinate".into(),
             RunConfig {
-                ownership: Some(permit),
                 interactive: true,
                 keep_alive: true,
                 conversation: true,
@@ -304,10 +265,6 @@ async fn idempotent_open_of_a_graph_lane_never_creates_an_owner_or_admits() {
             "graph_recovery_required"
         );
     }
-    assert!(matches!(
-        owner.attach(&lane.thread_id),
-        Err(crate::ownership::RegistryError::Absent)
-    ));
     assert_eq!(
         f.storage.handle().lane(&lane.lane_id).unwrap().unwrap(),
         before

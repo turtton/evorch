@@ -25,8 +25,7 @@ pub enum BootStage {
     PhysicalAdopted,
     StorageOpened,
     Adopted,
-    FirstOwnerClaimed,
-    OwnersClaimed,
+    TransactionPrepared,
     HostComposed,
     ControlReady,
     SandboxProbed,
@@ -52,7 +51,6 @@ pub struct PendingPlannedHost {
     boot: PlannedBoot,
     writer: storage::StorageHandle,
     database: storage::StorageConfig,
-    pub blocked_threads: Vec<String>,
 }
 impl PlannedBoot {
     /// Must run at the single-threaded entry after FD inspection. There is no
@@ -285,23 +283,20 @@ impl PlannedBoot {
         self.mark(BootStage::Adopted);
         self.observe_signals(inbox, Some(&runtime));
         let restart_id = self.receipt.transaction_id.clone();
-        let claimed = match stage
-            .claim_with_progress(&restart_id, || self.mark(BootStage::FirstOwnerClaimed))
-        {
-            Ok(claimed) => claimed,
+        let adopted = match stage.prepare_adopted(&restart_id) {
+            Ok(adopted) => adopted,
             Err(_) => self.fail(BootFailure::AdoptedBeforeReady, Some(&runtime)),
         };
-        self.mark(BootStage::OwnersClaimed);
+        self.mark(BootStage::TransactionPrepared);
         // The endpoint publishes the receipt's epoch and the host answers hello
         // from its projection: both must be the epoch the transaction fixed.
-        if claimed.successor_epoch() != self.receipt.successor_epoch {
+        if adopted.successor_epoch() != self.receipt.successor_epoch {
             self.fail(BootFailure::AdoptedBeforeReady, Some(&runtime));
         }
-        let blocked_threads = claimed.blocked_threads.clone();
-        let writer = claimed.storage_writer();
-        let database = claimed.database().clone();
+        let writer = adopted.storage_writer();
+        let database = adopted.database().clone();
         self.observe_signals(inbox, Some(&runtime));
-        let host = match BootstrappedHost::open_claimed_for_core(claimed).await {
+        let host = match BootstrappedHost::open_adopted_for_core(adopted).await {
             Ok(host) => host,
             Err(_) => self.fail(BootFailure::AdoptedBeforeReady, Some(&runtime)),
         };
@@ -312,7 +307,6 @@ impl PlannedBoot {
             boot: self,
             writer,
             database,
-            blocked_threads,
         }
     }
 }
@@ -426,7 +420,6 @@ impl PendingPlannedHost {
         let guard = self.boot.guard;
         match guard.ready() {
             Ok(instance) => {
-                self.host.owner.enable_normal_shutdown();
                 self.boot.measurements.0.push((
                     BootStage::Ready,
                     self.boot.entry_elapsed + self.boot.started.elapsed(),

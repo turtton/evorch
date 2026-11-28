@@ -1,20 +1,9 @@
 //! Narrow successor adapters. Production composition/Ready and cancel decisions belong to 4b-D.
 use super::*;
-use crate::ownership::{AdoptedOwnershipEvidence, OwnershipError, PlannedHold};
 use std::collections::BTreeSet;
 use storage::recovery::restart::{handoff::*, tools::*, *};
 
 /// Holds the runtime's physical proof; a DB row or serialized hold cannot construct it.
-pub struct RestartOwnershipEvidence {
-    pub(super) runtime: AgentRuntime,
-}
-impl AdoptedOwnershipEvidence for RestartOwnershipEvidence {
-    fn validate_hold(&self, hold: &PlannedHold) -> Result<(), OwnershipError> {
-        self.runtime
-            .validate_adopted_hold(hold)
-            .map_err(|_| OwnershipError::PlannedMismatch)
-    }
-}
 /// One-use tool replacement only. No history replacement, model/settings/permission grant.
 pub struct PlannedToolSchemaBoundary {
     old: crate::quiesce::ProviderInput,
@@ -133,76 +122,6 @@ impl AgentRuntime {
     /// The physical proof and canonical DB readback identify the same adopted transaction.
     pub fn adopted_restart_transaction(&self) -> Result<RestartTransaction, RuntimeError> {
         self.read_adopted_restart(true)
-    }
-    pub fn adopted_restart_ownership_evidence(
-        &self,
-    ) -> Result<RestartOwnershipEvidence, RuntimeError> {
-        self.read_adopted_restart(false)?;
-        Ok(RestartOwnershipEvidence {
-            runtime: self.clone(),
-        })
-    }
-    fn validate_adopted_hold(&self, hold: &PlannedHold) -> Result<(), RuntimeError> {
-        let tx = self.read_adopted_restart(false)?;
-        if hold.orphaned
-            || hold.transaction_id != tx.metadata.restart_id
-            || hold.capture_id != tx.metadata.capture_id
-        {
-            return Err(error("hold transaction mismatch"));
-        }
-        let progress = tx
-            .owner_progress
-            .iter()
-            .find(|p| p.thread_id == hold.thread_id)
-            .ok_or_else(|| error("hold absent from full owner inventory"))?;
-        if progress.old_owner_id != hold.owner_id
-            || progress.old_generation != hold.generation
-            || progress.active_runs != hold.active_runs
-            || progress.parked_runs != hold.parked_runs
-            || !hold.active_runs.is_disjoint(&hold.parked_runs)
-            || !progress.hold_saved
-            || !progress.hold_read_back
-            || progress.hold_removed
-        {
-            return Err(error("hold inventory mismatch"));
-        }
-        let members = tx
-            .expected
-            .iter()
-            .filter(|m| m.thread_id.as_deref() == Some(&hold.thread_id))
-            .collect::<Vec<_>>();
-        if members
-            .iter()
-            .map(|m| m.run_id.clone())
-            .collect::<BTreeSet<_>>()
-            != hold.active_runs.union(&hold.parked_runs).cloned().collect()
-            || members.iter().any(|m| {
-                m.owner_id.as_deref() != Some(&hold.owner_id)
-                    || m.owner_generation != Some(hold.generation)
-            })
-        {
-            return Err(error("hold capture membership mismatch"));
-        }
-        let store = self
-            .shared
-            .run_store
-            .get()
-            .ok_or_else(|| error("no run store"))?;
-        for member in members {
-            let current = store
-                .with_database(|db| db.resume_intent(&member.run_id))
-                .map_err(error)?
-                .ok_or_else(|| error("hold run missing"))?;
-            if current.incarnation != member.incarnation
-                || store
-                    .with_database(|db| db.resume_intent_revision(&member.run_id))
-                    .map_err(error)?
-                    != Some(member.intent_revision)
-            {
-                return Err(error("hold run incarnation changed"));
-            }
-        }
-        Ok(())
     }
     /// Call once the final learning cohort has normally returned and capture expected
     /// membership is persisted. Includes all eligible Pending, without fake attempts.

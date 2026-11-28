@@ -26,7 +26,7 @@ fn project_directory_preserves_sidebar_ids_without_writing_sidebar_state() {
 }
 
 #[tokio::test]
-async fn bootstrap_drains_before_releasing_its_owner() {
+async fn bootstrap_drains_services_without_creating_an_owner_registry() {
     let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
@@ -36,25 +36,46 @@ async fn bootstrap_drains_before_releasing_its_owner() {
     })
     .await
     .unwrap();
-    let _permit = boot.owner.start("owned").unwrap();
-    let owner = boot.owner.clone();
     let (stopped, completed) = tokio::sync::oneshot::channel();
     boot.services.start("test-service", |stop| async move {
         stop.await?;
-        assert_eq!(
-            owner.attach("owned")?.state,
-            runtime::ownership::OwnerState::Quiescing
-        );
         stopped.send(()).unwrap();
         Ok(())
     });
     assert!(!boot.busy());
     boot.shutdown().await.unwrap();
     completed.await.unwrap();
+    assert!(!dir.sockets().join("owners.db").exists());
+}
+
+#[tokio::test]
+async fn fresh_state_root_is_private_and_ready_without_owner_artifacts() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = test_socket_dir::SplitDir::new();
+    let state = dir.sockets().join("fresh/nested/threads");
+    assert!(!state.exists());
+    let mut boot = BootstrappedHost::open(BootstrapOptions {
+        config_dir: dir.path().into(),
+        project_root: dir.path().into(),
+        ownership_root: state.clone(),
+    })
+    .await
+    .unwrap();
     assert_eq!(
-        boot.owner.attach("owned").unwrap().state,
-        runtime::ownership::OwnerState::Released
+        std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+        0o700
     );
+    assert!(!state.join("owners.db").exists());
+    assert!(
+        std::fs::read_dir(&state).unwrap().all(|e| e
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|e| e != "sock"))
+    );
+    assert!(state.join(".ownership-lock").is_file());
+    assert!(state.join(".ownership-writer-lock").is_file());
+    boot.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -228,7 +249,7 @@ async fn core_catalog_prices_usage_and_diagnostics_are_flushed_once() {
 }
 
 #[tokio::test]
-async fn restart_quiesce_keeps_owner_alive_until_explicit_operator_shutdown() {
+async fn restart_quiesce_and_shutdown_preserve_thread_scratch() {
     let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
@@ -238,22 +259,18 @@ async fn restart_quiesce_keeps_owner_alive_until_explicit_operator_shutdown() {
     })
     .await
     .unwrap();
-    let permit = boot.owner.start("restart").unwrap();
+    let scratch = boot.scratch.thread_dir("restart");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let marker = scratch.join("keep.txt");
+    std::fs::write(&marker, b"survives shutdown").unwrap();
     boot.quiesce_for_restart().await.unwrap();
     assert_eq!(
         boot.runtime.quiesce_state(),
         runtime::quiesce::QuiesceState::Checkpointed
     );
-    assert_ne!(
-        boot.owner.attach("restart").unwrap().state,
-        runtime::ownership::OwnerState::Released
-    );
-    permit.validate_generation().unwrap();
+    assert!(marker.exists());
     boot.shutdown().await.unwrap();
-    assert_eq!(
-        boot.owner.attach("restart").unwrap().state,
-        runtime::ownership::OwnerState::Released
-    );
+    assert!(marker.exists());
 }
 
 #[tokio::test]
@@ -291,7 +308,7 @@ async fn area_tasks_are_stopped_and_drained_by_the_bootstrap_shutdown() {
 }
 
 #[tokio::test]
-async fn a_failing_area_task_is_reported_but_the_drain_flush_and_owner_release_still_happen() {
+async fn a_failing_area_task_is_reported_but_the_drain_and_flush_still_happen() {
     let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
@@ -301,7 +318,6 @@ async fn a_failing_area_task_is_reported_but_the_drain_flush_and_owner_release_s
     })
     .await
     .unwrap();
-    let _permit = boot.owner.start("owned").unwrap();
     let (drained, completed) = tokio::sync::oneshot::channel();
     boot.area_tasks
         .spawn("failing", |mut stop| async move {
@@ -331,7 +347,7 @@ async fn a_failing_area_task_is_reported_but_the_drain_flush_and_owner_release_s
 
     let error = boot.shutdown().await.unwrap_err().to_string();
     assert_eq!(error, "failing: area failed");
-    // The other task was joined, the bridge flushed, and the owner released.
+    // The other task was joined and the bridge flushed.
     completed.await.unwrap();
     let db = storage::Database::open(&boot.composition.storage).unwrap();
     assert_eq!(
@@ -345,8 +361,5 @@ async fn a_failing_area_task_is_reported_but_the_drain_flush_and_owner_release_s
             .count(),
         1
     );
-    assert_eq!(
-        boot.owner.attach("owned").unwrap().state,
-        runtime::ownership::OwnerState::Released
-    );
+    assert!(!dir.sockets().join("owners.db").exists());
 }

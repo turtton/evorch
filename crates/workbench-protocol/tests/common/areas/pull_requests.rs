@@ -49,7 +49,6 @@ pub fn thread_view() -> ThreadPullRequest {
     ThreadPullRequest {
         thread: thread(),
         tracking_enabled: true,
-        owned_here: true,
         lifecycle_revision: Revision(7),
         transition_seq: Sequence(3),
         link: Some(LinkView {

@@ -189,10 +189,10 @@ async fn run_scale() {
         .resume_chat(lead, old.target.authority.clone())
         .unwrap();
     f.phase(lead, AgentRunPhase::Waiting).await;
-    *host.deny.lock().unwrap() = Some(LaneDeliveryNack::OwnershipLost);
+    *host.deny.lock().unwrap() = Some(LaneDeliveryNack::BindingConflict);
     assert_eq!(
         drive(&f, "delivery-lead").await,
-        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost)
+        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::BindingConflict)
     );
     assert_eq!(
         attention(&f)
@@ -249,7 +249,7 @@ async fn run_scale() {
                 .all(|q| q.answer.as_deref() == Some("agent task-scope decision"))
         );
     }
-    // Reuse the real monitor, ownership permit and driver after all forwarded
+    // Reuse the real monitor and driver after all forwarded
     // questions resolve. Only the injected host clock advances: no wall-time wait.
     let lane = &lanes[0];
     let mut phase = f.runtime.lane_delivery_phase(lane.root_run_id).unwrap();
@@ -257,20 +257,6 @@ async fn run_scale() {
         .wait_for(|p| *p == AgentRunPhase::Waiting)
         .await
         .unwrap();
-    let owner = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        f.runtime.shared.bus.clone(),
-    )
-    .unwrap();
-    let permit = owner.start(&lane.thread_id).unwrap();
-    host.targets
-        .lock()
-        .unwrap()
-        .get_mut(&lane.thread_id)
-        .unwrap()
-        .authority
-        .ownership = Some(permit);
     f.runtime.start_lane_monitor();
     f.runtime.monitor_lanes().unwrap();
     host.now.fetch_add(60 * 60_000_000_000, Ordering::SeqCst);

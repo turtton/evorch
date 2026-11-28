@@ -148,7 +148,7 @@ pub(super) async fn cell(mode: Mode) {
     // execve ENOENT instead of replacing the worker with the describe-only mock.
     let entry_path = dir.path().join("target");
     target.after = Some(Arc::new(move |now| {
-        if now == ExitStage::OwnerStopped {
+        if now == ExitStage::WorkersStopped {
             std::fs::remove_file(&entry_path).unwrap();
         }
     }));
@@ -167,7 +167,7 @@ pub(super) async fn cell(mode: Mode) {
             *reached.lock().unwrap(),
             [
                 ExitStage::TargetChecked,
-                ExitStage::OwnersHeld,
+                ExitStage::TransactionChecked,
                 ExitStage::Armed,
                 ExitStage::ExecPrepared
             ]
@@ -205,14 +205,13 @@ pub(super) async fn cell(mode: Mode) {
         }
         if mode != Mode::Release {
             before_owner();
-            heartbeat(&host).await;
         } else {
             assert_eq!(
                 core.0.state.lock().unwrap().completed_stage,
-                Some(ExitStage::OwnerStopped)
+                Some(ExitStage::WorkersStopped)
             );
         }
-        reclaimed(&host, &core, true).await;
+        reclaimed(&host, &core).await;
         assert_eq!(
             core.snapshot().phase,
             if mode == Mode::Shutdown {

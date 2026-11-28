@@ -686,18 +686,7 @@ pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -
             caption: args.caption,
             artifacts,
         };
-        // Match plan_update: keep the ownership generation fixed until the event is emitted.
-        let _guard = state
-            .run_config()
-            .ownership
-            .as_ref()
-            .map(|permit| {
-                permit
-                    .validate_mutation()
-                    .map_err(|error| error.to_string())?;
-                permit.mutation_guard().map_err(|error| error.to_string())
-            })
-            .transpose()?;
+        runtime.validate_artifact_mutation(caller)?;
         let references = presentation
             .artifacts
             .iter()

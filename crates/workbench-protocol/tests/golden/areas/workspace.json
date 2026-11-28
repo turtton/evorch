@@ -218,6 +218,20 @@
               "type": "blocked"
             },
             "thread": "thr-1"
+          },
+          {
+            "state": {
+              "payload": {
+                "block": {
+                  "payload": {
+                    "reason": "a runtime-use gate holds the thread"
+                  },
+                  "type": "safety_hold"
+                }
+              },
+              "type": "blocked"
+            },
+            "thread": "thr-1"
           }
         ],
         "snapshot_revision": "5"

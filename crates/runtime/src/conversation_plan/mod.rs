@@ -19,7 +19,7 @@ pub(crate) fn conversation_root(state: &crate::agent_loop::LoopState) -> bool {
             crate::Role::Worker | crate::Role::Orchestrator
         )
 }
-use crate::{AgentRuntime, RunId, ownership::OwnerPermit};
+use crate::{AgentRuntime, RunId};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
@@ -48,7 +48,6 @@ impl AuthorityGates {
 pub(crate) struct Caller<'a> {
     pub(crate) run: RunId,
     pub(crate) mailbox: &'a Arc<crate::mailbox::RunMailbox>,
-    pub(crate) permit: Option<&'a OwnerPermit>,
 }
 impl AgentRuntime {
     pub(crate) fn plan_store(&self) -> Result<&StorageHandle, StorageError> {
@@ -65,18 +64,13 @@ impl AgentRuntime {
     ) -> Result<T, String> {
         let thread = self
             .goal_thread(caller.run)
-            .ok_or("ownership_lost: no current conversation root")?;
+            .ok_or("binding_conflict: no current conversation root")?;
         let gate = self.shared.plan_authority.get(&thread);
         let _gate = gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _registry = caller
-            .permit
-            .map(OwnerPermit::mutation_guard)
-            .transpose()
-            .map_err(|_| "ownership_lost: owner generation changed")?;
         if self.goal_thread(caller.run).as_deref() != Some(&thread) {
-            return Err("ownership_lost: root was replaced".into());
+            return Err("binding_conflict: root was replaced".into());
         }
         {
             let runs = self
@@ -86,16 +80,14 @@ impl AgentRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let run = runs
                 .get(&caller.run)
-                .ok_or("ownership_lost: run is no longer live")?;
+                .ok_or("binding_conflict: run is no longer live")?;
             if run.parent.is_some()
                 || !run.config.conversation
                 || run.config.purpose != crate::RunPurpose::General
                 || !matches!(run.role, crate::Role::Worker | crate::Role::Orchestrator)
                 || !Arc::ptr_eq(&run.mailbox, caller.mailbox)
-                || run.config.ownership.as_ref() != caller.permit
-                || caller.permit.is_some_and(|p| p.thread_id != thread)
             {
-                return Err("ownership_lost: not the current conversation root execution".into());
+                return Err("binding_conflict: not the current conversation root execution".into());
             }
         }
         // The DB transaction checks tombstones/binding; no goal/runs lock is held here.
@@ -232,7 +224,6 @@ impl crate::agent_loop::LoopState {
             runtime.reconcile_plan_or_report(&Caller {
                 run: self.caller_run_id(),
                 mailbox: &self.task.mailbox,
-                permit: self.run_config().ownership.as_ref(),
             });
         }
     }

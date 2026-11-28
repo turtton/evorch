@@ -1,4 +1,4 @@
-//! Owned graph startup and reason-specific retries. Legacy hosts never call it.
+//! Graph startup and bounded activation jobs.
 use crate::recovery_startup::*;
 use std::{
     collections::BTreeSet,
@@ -160,7 +160,7 @@ fn start_recovery<'a>(
         let (ready, started) = tokio::sync::oneshot::channel();
         services.start("graph-recovery", |mut stop| async move {
                 let coordinator = match StartupCoordinator::new(StartupInputs {
-                    runtime: &inputs.runtime, owner: &inputs.owner,
+                    runtime: &inputs.runtime,
                     storage: &inputs.storage, writer: &inputs.writer,
                     options: &inputs.options, projects: &inputs.projects,
                 }, inputs.startup, catalog) {
@@ -170,10 +170,6 @@ fn start_recovery<'a>(
                         return Ok(());
                     }
                 };
-                if let Err(reason) = workbench_host::bootstrap::recovery::authority::claim_planned_owner_threads(&inputs.runtime, &inputs.owner) {
-                    let _ = ready.send(Err(format!("planned owner adoption: {reason:?}")));
-                    return Ok(());
-                }
                 let scan = match coordinator.scan() {
                     Ok(scan) => scan,
                     Err(reason) => {
@@ -191,7 +187,7 @@ fn start_recovery<'a>(
                     drop(job);
                     match outcome {
                         AutomaticAttempt::Finished(outcome) => {
-                            if outcome.state == RecoveryState::Blocked { retry.insert(component.manifest_id.clone()); }
+
                             report.components.push(outcome);
                         }
                         AutomaticAttempt::Capacity => { retry.insert(component.manifest_id.clone()); }
@@ -203,8 +199,8 @@ fn start_recovery<'a>(
                 inputs.work_changed.notify_one();
                 tracing::info!(report = %serde_json::to_string(&report)?, "core graph startup recovery");
                 let _ = ready.send(Ok(()));
-                // External-process death/lease expiry cannot notify our EventBus.
-                // Only owner-blocked components enter this owned retry loop.
+                // Only process-local capacity contention is retried. There is
+                // no external owner/lease to poll or adopt.
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
                 tick.tick().await;
                 let mut manual_tick = tokio::time::interval(Duration::from_secs(1));
@@ -261,7 +257,7 @@ fn start_recovery<'a>(
                                 }
                             };
                             // Retention or an external writer may remove a component
-                            // while it is owner-blocked. Do not retain a phantom retry
+                            // while it is waiting for capacity. Do not retain a phantom retry
                             // or imply that its old receipt is still executable.
                             for id in retry.iter().filter(|id| !scan.components.iter().any(|c| c.manifest_id == **id)).cloned().collect::<Vec<_>>() {
                                 retry.remove(&id);
@@ -429,9 +425,6 @@ pub(crate) fn attempt_observed(
                     }))
                 }) {
                 Ok(_) => (RecoveryState::Activated, None),
-                Err(StartupBlocked::OwnerBlocked) => {
-                    (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))
-                }
                 // Missing metadata must hold even Prepared claims: no adoption,
                 // activation, provider admission, or conditional release.
                 Err(StartupBlocked::CatalogUnavailable) => (
@@ -442,9 +435,6 @@ pub(crate) fn attempt_observed(
                     observe(AutomaticAttemptEvent::BeforeDecline(reason));
                     match coordinator.decline(&component.manifest_id) {
                         Ok(()) => (RecoveryState::Released, Some(reason)),
-                        Err(StartupBlocked::OwnerBlocked) => {
-                            (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))
-                        }
                         Err(_) => {
                             let reason = if coordinator
                                 .cleanup_activated(&component.manifest_id)

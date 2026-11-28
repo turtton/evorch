@@ -1,6 +1,6 @@
 //! Archiving a family through the production host collects its scratch: the
-//! command hints the owner once the archive is saved, the checker `bootstrap`
-//! installed reads the shared sidebar, and the owner's archive pass renames the
+//! command hints the worker once the archive is saved, the checker `bootstrap`
+//! installed reads the sidebar, and the archive pass renames the
 //! directory. Only the model and the per-run sandbox are replaced.
 
 use super::*;
@@ -102,7 +102,6 @@ async fn world(threads: &[&str]) -> World {
 impl World {
     /// A scratch directory with content under the owner's identity-marked root.
     fn scratch(&self, thread: &str) -> PathBuf {
-        self.boot.owner.start(thread).unwrap();
         let dir = self.boot.scratch.clone().thread_dir(thread);
         let canonical = self.owners.canonicalize().unwrap();
         let digest = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
@@ -187,16 +186,13 @@ async fn archiving_through_the_host_collects_the_scratch() {
 }
 
 #[tokio::test]
-async fn shutdown_releases_ownership_and_detaches_the_scratch() {
+async fn shutdown_joins_the_archive_worker_and_detaches_archived_scratch() {
     let mut w = world(&["t"]).await;
     let dir = w.scratch("t");
     w.archive("t");
     w.boot.shutdown().await.unwrap();
     assert!(!dir.exists());
-    assert_eq!(
-        w.boot.owner.attach("t").unwrap().state,
-        runtime::ownership::OwnerState::Released
-    );
+    assert!(!w.owners.join("owners.db").exists());
 }
 
 #[tokio::test]

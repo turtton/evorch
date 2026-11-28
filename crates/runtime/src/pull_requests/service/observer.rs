@@ -256,16 +256,7 @@ impl Observer {
             false
         };
         if success && let Some(thread) = inner.thread_for_run(run).await {
-            let ownership = Arc::clone(&inner.ownership);
-            let t = thread.clone();
-            if let Ok(Some(permit)) = inner.blocking(move || ownership.owned_permit(&t)).await
-                && inner.check_permit(&thread, &permit).await.is_ok()
-            {
-                inner
-                    .lock()
-                    .attribution
-                    .succeeded(&thread, permit.lease.generation);
-            }
+            inner.lock().attribution.succeeded(&thread);
         }
         inner.force_run(run).await;
     }
@@ -284,7 +275,6 @@ impl Observer {
                 to: AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped,
                 ..
             }) => self.forget_run(run_id),
-            EventKind::Ownership(_) => inner.wake.notify_one(),
             EventKind::Tool(tool) if inner.config().enabled => self.tool(inner, tool).await,
             _ => {}
         }
@@ -485,13 +475,6 @@ impl Inner {
         run_id: &str,
         source_call: &str,
     ) -> Result<(), PullRequestError> {
-        let (ownership, thread) = (Arc::clone(&self.ownership), thread_id.to_owned());
-        let Some(permit) = self
-            .blocking(move || ownership.owned_permit(&thread))
-            .await?
-        else {
-            return Ok(());
-        };
         let state = self.thread_state(thread_id).await?;
         if state
             .active_link
@@ -517,7 +500,7 @@ impl Inner {
             },
         );
         let (bus, thread) = (Arc::clone(&self.bus), thread_id.to_owned());
-        self.guarded(&permit, move || -> Result<(), StorageError> {
+        self.write(move || -> Result<(), StorageError> {
             let presented = storage.present_pull_request_candidate(new)?;
             if presented.created {
                 bus.emit(Event::new(PullRequestEvent::CandidateChanged {
@@ -610,7 +593,6 @@ mod attribution_tests {
     async fn read_only_pr_commands_still_refresh_without_crediting_sync_or_job_success() {
         let world = World::new();
         let process = world.process(enabled());
-        let permit = process.permit("t");
         process.environment.bind("run", "t");
         let mut observer = Observer::default();
         for (seq, command, expected) in [
@@ -635,7 +617,7 @@ mod attribution_tests {
                     false,
                 )
                 .await;
-            assert_eq!(is_agent(&process, &permit, seq), expected, "{command}");
+            assert_eq!(is_agent(&process, seq), expected, "{command}");
             assert!(process.service.inner().lock().forced.remove("t"));
         }
         observer.started("run", "job-call", "gh pr list");
@@ -663,19 +645,15 @@ mod attribution_tests {
                 },
             )
             .await;
-        assert!(!is_agent(&process, &permit, 6));
+        assert!(!is_agent(&process, 6));
         assert!(process.service.inner().lock().forced.contains("t"));
     }
-    fn is_agent(process: &Process, permit: &crate::ownership::OwnerPermit, seq: u64) -> bool {
+    fn is_agent(process: &Process, seq: u64) -> bool {
         let inner = process.service.inner();
         let mut state = inner.lock();
         let head = seq.to_string();
-        state
-            .attribution
-            .adopt("t", permit.lease.generation, 1, seq, &head, Some(&head));
-        state
-            .attribution
-            .agent("t", permit.lease.generation, 1, seq, &head)
+        state.attribution.adopt("t", 1, seq, &head, Some(&head));
+        state.attribution.agent("t", 1, seq, &head)
     }
     #[test]
     fn dry_run_abbreviations_never_grant_publishing_attribution() {
@@ -695,7 +673,6 @@ mod attribution_tests {
         for command in ["gh pr view", "git push"] {
             let world = World::new();
             let process = world.process(enabled());
-            let permit = process.permit("t");
             process.environment.bind("run", "t");
             let mut observer = Observer::default();
             for seq in 1..=u64::try_from(MAX_TRACKED + 1).unwrap() {
@@ -711,7 +688,7 @@ mod attribution_tests {
                     )
                     .await;
                 // Each adopted head consumes this interval; old successes cannot mask the bug.
-                let _ = is_agent(&process, &permit, seq);
+                let _ = is_agent(&process, seq);
             }
             if command == "gh pr view" {
                 assert!(
@@ -730,7 +707,7 @@ mod attribution_tests {
                 )
                 .await;
             let seq = u64::try_from(MAX_TRACKED + 2).unwrap();
-            assert!(is_agent(&process, &permit, seq), "after {command}");
+            assert!(is_agent(&process, seq), "after {command}");
             // Replaying even the full start/complete pair within the run is not a new push.
             start(&mut observer, "run", "new-push");
             observer
@@ -742,7 +719,7 @@ mod attribution_tests {
                     false,
                 )
                 .await;
-            assert!(!is_agent(&process, &permit, seq + 1));
+            assert!(!is_agent(&process, seq + 1));
         }
     }
 
@@ -756,7 +733,6 @@ mod attribution_tests {
         ] {
             let world = World::new();
             let process = world.process(enabled());
-            let permit = process.permit("t");
             process.environment.bind("run", "t");
             let mut observer = Observer::default();
             start(&mut observer, "run", "done");
@@ -769,7 +745,7 @@ mod attribution_tests {
                     false,
                 )
                 .await;
-            assert!(is_agent(&process, &permit, 1));
+            assert!(is_agent(&process, 1));
             start(&mut observer, "run", "job");
             observer
                 .shell_returned(
@@ -815,10 +791,7 @@ mod attribution_tests {
                     },
                 )
                 .await;
-            assert!(
-                !is_agent(&process, &permit, 2),
-                "late success after {phase:?}"
-            );
+            assert!(!is_agent(&process, 2), "late success after {phase:?}");
         }
     }
 
@@ -826,7 +799,6 @@ mod attribution_tests {
     async fn synchronous_exit_code_wins_over_is_error_and_missing_completion_never_succeeds() {
         let world = World::new();
         let process = world.process(enabled());
-        let permit = process.permit("t");
         process.environment.bind("run", "t");
         let mut observer = Observer::default();
         for (i, detail, error, expected) in [
@@ -846,10 +818,10 @@ mod attribution_tests {
                     error,
                 )
                 .await;
-            assert_eq!(is_agent(&process, &permit, i), expected);
+            assert_eq!(is_agent(&process, i), expected);
         }
         start(&mut observer, "run", "missing");
-        assert!(!is_agent(&process, &permit, 5));
+        assert!(!is_agent(&process, 5));
         // No matching start is not evidence even with a zero exit code.
         observer
             .shell_returned(
@@ -860,14 +832,13 @@ mod attribution_tests {
                 false,
             )
             .await;
-        assert!(!is_agent(&process, &permit, 6));
+        assert!(!is_agent(&process, 6));
     }
     #[tokio::test(start_paused = true)]
     async fn jobs_require_completed_zero_and_duplicate_terminal_events_do_not_credit_the_next_head()
     {
         let world = World::new();
         let process = world.process(enabled());
-        let permit = process.permit("t");
         process.environment.bind("run", "t");
         let mut o = Observer::default();
         for (i, status, exit_code) in [
@@ -883,7 +854,7 @@ mod attribution_tests {
             o.shell_returned(process.service.inner(), "run", &call,
                 Some(&json!({"shell_job":{"job_id":format!("j{i}"),"status":status,"exit_code":exit_code}})), false).await;
             assert_eq!(
-                is_agent(&process, &permit, i),
+                is_agent(&process, i),
                 status == "completed" && exit_code == Some(0)
             );
         }
@@ -896,7 +867,7 @@ mod attribution_tests {
             false,
         )
         .await;
-        assert!(!is_agent(&process, &permit, 7));
+        assert!(!is_agent(&process, 7));
         start(&mut o, "run", "background");
         o.shell_returned(
             process.service.inner(),
@@ -906,7 +877,7 @@ mod attribution_tests {
             false,
         )
         .await;
-        assert!(!is_agent(&process, &permit, 8));
+        assert!(!is_agent(&process, 8));
         let event = ToolEvent::ShellJobOutput {
             job_uid: None,
             job_id: "job".into(),
@@ -918,8 +889,8 @@ mod attribution_tests {
             exit_code: Some(0),
         };
         o.tool(process.service.inner(), &event).await;
-        assert!(is_agent(&process, &permit, 9));
+        assert!(is_agent(&process, 9));
         o.tool(process.service.inner(), &event).await;
-        assert!(!is_agent(&process, &permit, 10));
+        assert!(!is_agent(&process, 10));
     }
 }

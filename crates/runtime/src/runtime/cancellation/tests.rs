@@ -203,7 +203,7 @@ async fn lane_admission_drain_preserves_stop_after_registration() {
         Arc::new(AdmissionModel),
     );
     let run = runtime.reserve_run_id();
-    runtime.reserve_admission(run, None, None);
+    runtime.reserve_admission(run, None);
     let execution = runtime.execution_snapshot(run).unwrap();
     let (reached, release) = pause(&runtime, HookPoint::AdmissionRegistered, &execution);
     runtime
@@ -229,7 +229,10 @@ async fn lane_admission_drain_preserves_stop_after_registration() {
     assert_eq!(*execution.cancel_tx.borrow(), RunInterrupt::None);
     release.send(()).unwrap();
     drain.await.unwrap();
-    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    assert!(
+        runtime.stop(run, StopScope::SelfOnly).is_err(),
+        "a lane without storage cannot acknowledge its durable delivery Stop"
+    );
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Stopped);
 }
 
@@ -242,7 +245,7 @@ async fn ac15_cancel_after_registration_notifies_same_execution() {
         Arc::new(AdmissionModel),
     );
     let run = runtime.reserve_run_id();
-    runtime.reserve_admission(run, None, None);
+    runtime.reserve_admission(run, None);
     let execution = runtime.execution_snapshot(run).unwrap();
     let token = execution.publication();
     let (reached, release) = pause(&runtime, HookPoint::AdmissionRegistered, &execution);
@@ -362,7 +365,7 @@ async fn ac15_inherited_cancel_preserves_spawn_results_and_fences_publication_be
             Arc::new(NeverCalledModel { admission }),
         );
         let root = runtime.reserve_run_id();
-        runtime.reserve_admission(root, None, None);
+        runtime.reserve_admission(root, None);
         runtime.cancel_subtree(root).unwrap();
         let child = runtime.reserve_run_id();
         runtime

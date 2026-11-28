@@ -1,5 +1,7 @@
-//! Real exec + sealed-ticket + inherited-OFD bootstrap shared by I-6 tests.
-//! No inherited-proof/evidence/authority constructor is used here.
+//! Real exec + sealed-ticket + inherited-OFD bootstrap shared by the recovery-graph tests.
+//! No inherited-proof/evidence/authority constructor is used here, and no process
+//! ownership exists: the graph is adopted through the planned-handoff proof, and
+//! disposal runs under the current writer leases and the thread binding.
 use core_instance::handoff::{
     BlockedShutdownSignals, HandoffRecord,
     boot::BootDeadline,
@@ -8,9 +10,9 @@ use core_instance::handoff::{
 };
 use core_instance::{ConfigIdentity, Instance, LaunchGuard};
 use event_bus::EventBus;
-use runtime::{AgentRuntime, OwnedThreadCas, RunStore, ownership::*, quiesce::*};
+use runtime::{AgentRuntime, RunStore, quiesce::*, scratch::ThreadScratch};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -49,9 +51,13 @@ impl runtime::AgentModel for NeverModel {
 pub struct Fixture {
     pub root: PathBuf,
     pub runtime: AgentRuntime,
-    pub owner: Arc<OwnerHost>,
     pub storage: Storage,
     pub config: StorageConfig,
+    /// The scratch the runtime and its disposal share (one `Arc`).
+    pub scratch: Arc<ThreadScratch>,
+    /// The existing writer leases the disposal context retains.
+    pub leases: Arc<storage::WriterLeases>,
+    _maintenance: storage::SharedLeases,
     _instance: Instance,
 }
 impl Fixture {
@@ -66,51 +72,9 @@ impl Fixture {
             .recovery_graph_cas(TX, &format!("graph-{thread}"))
             .unwrap()
     }
-    pub fn owners(&self, thread: &str) -> Vec<OwnedThreadCas> {
-        let owner = self.owner.attach(thread).unwrap();
-        vec![OwnedThreadCas {
-            thread_id: thread.into(),
-            owner_identity: Some(owner.lease.owner_id),
-            owner_generation: Some(owner.lease.generation),
-        }]
-    }
-    pub fn denied(&self, thread: &str) {
-        assert!(
-            self.runtime
-                .disposal_authority(self.cas(thread), self.owners(thread))
-                .is_err(),
-            "{thread}: ordinary ownership must not become retained physical authority"
-        );
-    }
-    pub fn allowed(&self, thread: &str) {
-        self.runtime
-            .disposal_authority(self.cas(thread), self.owners(thread))
-            .unwrap_or_else(|e| {
-                panic!("{thread}: validated sealed bootstrap must grant disposal: {e}")
-            });
-    }
-    pub fn retain(&self) {
-        let report = self
-            .runtime
-            .claim_physical_bootstrap_owners(
-                &self.owner,
-                self.runtime.adopted_restart_ownership_evidence().unwrap(),
-                || {},
-            )
-            .unwrap();
-        assert!(report.blocked_threads.is_empty());
-    }
-    pub fn registry(&self) -> Registry {
-        Registry::open_existing(&self.root.join("owners/owners.db")).unwrap()
-    }
-    pub fn hold(&self, thread: &str) -> PlannedHold {
-        self.owner
-            .attach(thread)
-            .unwrap()
-            .handoff_hold
-            .unwrap()
-            .as_ref()
-            .clone()
+    /// Whether disposal authority is granted for this graph right now.
+    pub fn authority(&self, thread: &str) -> bool {
+        self.runtime.disposal_authority(self.cas(thread)).is_ok()
     }
     pub fn step(&self, mutation: RestartMutation) {
         let tx = self.tx();
@@ -118,11 +82,6 @@ impl Fixture {
             .handle()
             .mutate_restart(TX.into(), Some(tx.revision), mutation)
             .unwrap();
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.owner.stop_worker_for_exec().unwrap();
     }
 }
 pub fn recovery_record(root: &Path, thread: &str) -> RunRecoveryRecord {
@@ -167,13 +126,19 @@ fn storage_config(root: &Path) -> StorageConfig {
         ..Default::default()
     }
 }
+/// The shared state root: the one the writer leases and the thread binding name.
+fn state_root(root: &Path) -> PathBuf {
+    root.join("state")
+}
+fn sidebar_path(root: &Path) -> PathBuf {
+    root.join("sidebar.json")
+}
 fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
     std::fs::create_dir_all(root.join("project")).unwrap();
+    std::fs::create_dir_all(state_root(root)).unwrap();
+    std::fs::write(sidebar_path(root), "{}").unwrap();
     let storage = Storage::open(storage_config(root)).unwrap();
     let handle = storage.handle();
-    let bus = Arc::new(EventBus::new(64));
-    let owner = OwnerHost::open_planned(&root.join("owners"), Default::default(), bus).unwrap();
-    let mut permits = BTreeMap::new();
     let mut expected = vec![];
     let threads: Vec<String> = if matches!(case, "diagnostic-64" | "diagnostic-oversize") {
         let extra = if case == "diagnostic-64" { 62 } else { 63 };
@@ -186,10 +151,22 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
         THREADS.into_iter().map(str::to_owned).collect()
     };
     for thread in threads.iter().map(String::as_str) {
-        let mut permit = owner.start(thread).unwrap();
-        permit.run_id = Some(run_id(thread).to_string());
-        permit.begin_turn().unwrap();
         let run = run_id(thread).to_string();
+        // The thread's current binding: the proof that disposal may touch its scratch.
+        handle
+            .upsert_thread_runtime(&storage::threads::ThreadUpsert {
+                thread_id: thread.into(),
+                root_run_id: Some(run.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        rusqlite::Connection::open(&storage_config(root).db_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES(?1,?2,?1,0)",
+                rusqlite::params![run, thread],
+            )
+            .unwrap();
         let intent = ResumeIntent {
             version: 1,
             run_id: run_id(thread),
@@ -233,13 +210,18 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
             thread_id: Some(thread.into()),
             intent_revision: 0,
             snapshot: None,
-            owner_id: Some(owner.owner_id().into()),
-            owner_generation: Some(permit.lease.generation),
             lane_id: None,
         });
-        permits.insert(thread, permit);
     }
     let build = running_elf_identity().unwrap();
+    // The schema the DB really has, as the production finalization records it.
+    let schema = u32::try_from(
+        Database::open(&storage_config(root))
+            .unwrap()
+            .pragma_i64("user_version")
+            .unwrap(),
+    )
+    .unwrap();
     let metadata = RestartMetadata {
         restart_id: TX.into(),
         capture_id: CAPTURE.into(),
@@ -249,9 +231,9 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
         old_build: build.clone(),
         successor_build: build,
         target_identity: "self".into(),
-        handoff_version: 1,
+        handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_version: 1,
-        storage_version: 71,
+        storage_version: schema,
         old_builtin_tool_names: BTreeSet::new(),
         old_compiled_catalog_fingerprint: None,
         new_compiled_catalog_fingerprint: None,
@@ -276,7 +258,7 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
         let thread = members[0].thread_id.as_deref().unwrap();
         step(RestartMutation::SaveComponent(RecoveryManifestRecord {
             manifest_id: format!("graph-{thread}"),
-            schema_version: 1,
+            schema_version: RECOVERY_SCHEMA_VERSION,
             committed: false,
             superseded: false,
             edges: vec![],
@@ -298,46 +280,16 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
         }));
     }
     step(RestartMutation::Commit);
-    let active = permits
-        .iter()
-        .map(|(thread, p)| {
-            (
-                thread.to_string(),
-                ExpectedThreadRuns {
-                    generation: p.lease.generation,
-                    active_runs: BTreeSet::from([p.run_id.clone().unwrap()]),
-                },
-            )
-        })
-        .collect();
-    let holds = owner.hold_for_restart(TX, CAPTURE, &active).unwrap();
-    owner.stop_worker_for_exec().unwrap();
-    for hold in holds {
-        step(RestartMutation::OwnerProgress(RestartOwnerProgress {
-            thread_id: hold.thread_id,
-            old_owner_id: hold.owner_id,
-            old_generation: hold.generation,
-            active_runs: hold.active_runs,
-            parked_runs: hold.parked_runs,
-            hold_saved: true,
-            hold_read_back: true,
-            worker_joined: true,
-            socket_unlinked: true,
-            hold_removed: false,
-        }));
-    }
     step(RestartMutation::Arm {
         nonce_hash: "i6-nonce".into(),
     });
-    drop(permits);
-    drop(owner);
     drop(handle);
     storage.close();
 }
 #[path = "physical_test_harness.rs"]
 mod harness;
 
-/// Each case is a fresh process: physical adoption must precede all DB/owner/runtime threads.
+/// Each case is a fresh process: physical adoption must precede all DB/runtime threads.
 /// Child exit is the completion event; no sleeps, polling, or test-local timeout.
 pub type RuntimeSetup = (
     Arc<::tools::ToolExecutor>,
@@ -420,26 +372,58 @@ pub fn run_with(cases: &[&str], check: fn(&Fixture, &str), factory: RuntimeFacto
         .unwrap();
     executor.block_on(async {
         let config = storage_config(&root);
-        let storage = Storage::open(config.clone()).unwrap();
-        let bus = Arc::new(EventBus::new(64));
-        let owner = Arc::new(
-            OwnerHost::open_planned(&root.join("owners"), Default::default(), bus.clone()).unwrap(),
+        let state = state_root(&root);
+        let sidebar = sidebar_path(&root);
+        // The existing exclusion, not a new registry: shared maintenance and the
+        // writer leases the disposal context retains.
+        let maintenance =
+            storage::shared_with_wait(&config.db_path, &state, std::time::Duration::ZERO).unwrap();
+        let leases = Arc::new(
+            storage::WriterLeases::acquire(&config.db_path, &state, std::time::Duration::ZERO)
+                .unwrap(),
         );
+        let storage = Storage::open_with_writer_lease(
+            config.clone(),
+            maintenance.db_lease().unwrap(),
+            leases.db_lease(),
+        )
+        .unwrap();
+        assert_eq!(
+            runtime::thread_retention::binding::ensure_binding(
+                &Database::open(&config).unwrap(),
+                &storage.handle(),
+                &leases.authority().unwrap(),
+                runtime::thread_retention::BindingPaths {
+                    ownership_root: &state,
+                    sidebar_path: &sidebar,
+                },
+                &config.db_path,
+                1,
+            )
+            .unwrap(),
+            runtime::thread_retention::BindingStatus::Bound
+        );
+        let bus = Arc::new(EventBus::new(64));
         let (tools, model, sandbox) = factory(&case, bus.clone());
         let runtime = match sandbox {
             Some(factory) => AgentRuntime::with_sandbox_factory(bus, tools, model, factory),
             None => AgentRuntime::new(bus, tools, model),
         }
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        let scratch = Arc::new(ThreadScratch::at(root.join("scratch")));
+        runtime.set_thread_scratch(scratch.clone());
+        runtime.set_disposal_context(leases.clone(), state, sidebar);
         runtime
             .adopt_restart_handoff(proof)
             .unwrap_or_else(|e| panic!("DB Adopt failed: {}", e.error));
         let f = Fixture {
             root,
             runtime,
-            owner,
             storage,
             config,
+            scratch,
+            leases,
+            _maintenance: maintenance,
             _instance: instance,
         };
         assert_eq!(f.tx().phase, RestartPhase::Adopted);

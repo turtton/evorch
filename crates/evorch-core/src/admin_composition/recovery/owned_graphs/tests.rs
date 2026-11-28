@@ -1,7 +1,7 @@
 //! Q2 installed by the composition root, over a real `BootstrappedHost` that
 //! has run its cold recovery and a real Unix listener served by
 //! `unix::connection`. The facade is the one `install` builds from the host's
-//! own runtime, owner, storage, reader, diagnostics and live collector; the
+//! own runtime, storage, reader, diagnostics and live collector; the
 //! cold graph it observes is read back from the host's database.
 //! Synchronization is by replies and joined request slots only. It lives in the
 //! tree because the publish-boundary check names `admin_composition` only there.
@@ -170,11 +170,9 @@ fn any_binding(epoch: u64) -> OwnedGraphBinding {
             capture_id: id("capture.any"),
             expected_revision: Revision(1),
             expected_core_epoch: InstanceEpoch(epoch),
-            owner_identity: None,
-            owner_generation: None,
             operation_id: id("op-any"),
         },
-        owners: Vec::new(),
+        threads: Vec::new(),
         expected_control_revision: Revision(0),
     }
 }
@@ -420,8 +418,6 @@ async fn a_cold_graph_is_complete_only_after_every_thread_is_recorded() {
                     capture_id: item.capture_id.clone(),
                     expected_revision: item.revision,
                     expected_core_epoch: InstanceEpoch(epoch),
-                    owner_identity: None,
-                    owner_generation: None,
                     operation_id: id("op-discard"),
                 },
                 confirmed: true,
@@ -458,11 +454,9 @@ async fn a_cold_graph_is_complete_only_after_every_thread_is_recorded() {
             restart_id: TX.into(),
             capture_id: "capture".into(),
             thread_id: thread.into(),
-            owner_generation: 1,
         },
         expected_revision: 0,
         control: control.clone(),
-        owners: GraphDisposalStep::NotApplicable,
         scratch: GraphDisposalStep::Applied,
     };
     core.boot
@@ -482,7 +476,6 @@ async fn a_cold_graph_is_complete_only_after_every_thread_is_recorded() {
     assert!(done.discard_complete());
     let view = detail(&mut conn, "r-detail-done", &item.graph_id).await;
     assert_eq!(view.progress.completion, DisposalCompletion::Complete);
-    assert_eq!(view.progress.owners, StepObservation::NotApplicable);
     assert_eq!(view.progress.scratch, StepObservation::ConfirmedApplied);
     core.shutdown().await;
 }

@@ -12,7 +12,6 @@ mod lanes;
 mod lesson_batch;
 mod memory;
 mod memory_favorite;
-mod ownership;
 mod pull_requests;
 mod thread_index_contracts;
 mod thread_retention;

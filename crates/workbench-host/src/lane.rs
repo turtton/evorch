@@ -164,3 +164,105 @@ mod binding_observation_tests {
         assert!(!table.observe().is_current());
     }
 }
+
+/// Resolve persisted thread identity against the current host's project directory.
+/// Neither a client path nor a saved execution recipe grants project access.
+pub(crate) fn current_thread_project(
+    runtime: &runtime::AgentRuntime,
+    sidebar: Option<&Path>,
+    thread: &str,
+    requested: Option<&Path>,
+) -> Result<Option<PathBuf>, workbench_protocol::errors::WorkbenchError> {
+    use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
+    let fail =
+        |code, message: &str| WorkbenchError::new(code, message, RetryAdvice::UserActionRequired);
+    let stored = runtime
+        .with_storage_reader(|db| {
+            if db.tombstones()?.contains_thread(thread) {
+                return Ok((true, None));
+            }
+            Ok((false, db.thread(thread)?))
+        })
+        .map_err(|_| {
+            fail(
+                ErrorCode::StorageUnavailable,
+                "thread binding is unavailable",
+            )
+        })?;
+    let Some((deleted, stored)) = stored else {
+        return Ok(requested.map(Path::to_path_buf));
+    };
+    if deleted {
+        return Err(fail(ErrorCode::NotFound, "conversation was deleted"));
+    }
+    let requested = requested
+        .map(std::fs::canonicalize)
+        .transpose()
+        .map_err(|_| fail(ErrorCode::NotFound, "project root is unavailable"))?;
+    let Some(stored) = stored else {
+        return Ok(requested);
+    };
+    let root = stored
+        .project_root
+        .as_ref()
+        .map(std::fs::canonicalize)
+        .transpose()
+        .map_err(|_| fail(ErrorCode::NotFound, "stored project root is unavailable"))?
+        .ok_or_else(|| {
+            fail(
+                ErrorCode::Conflict,
+                "conversation has no current project binding",
+            )
+        })?;
+    if requested
+        .as_ref()
+        .is_some_and(|requested| requested != &root)
+    {
+        return Err(fail(
+            ErrorCode::PermissionDenied,
+            "conversation belongs to another project",
+        ));
+    }
+    if let Some(sidebar) = sidebar {
+        let document = workspace_state::SidebarStore::new(sidebar)
+            .read_unlocked()
+            .map_err(|_| {
+                fail(
+                    ErrorCode::PermissionDenied,
+                    "host project trust is unavailable",
+                )
+            })?;
+        let project = document
+            .sidebar
+            .projects
+            .iter()
+            .find(|project| {
+                std::fs::canonicalize(&project.repo_root).is_ok_and(|candidate| candidate == root)
+            })
+            .ok_or_else(|| {
+                fail(
+                    ErrorCode::PermissionDenied,
+                    "project is not registered with this core",
+                )
+            })?;
+        if project.trust != workspace_state::TrustState::Approved {
+            return Err(fail(
+                ErrorCode::PermissionDenied,
+                "project is not approved by the host",
+            ));
+        }
+        if document
+            .sidebar
+            .threads
+            .iter()
+            .find(|record| record.id.to_string() == thread)
+            .is_some_and(|record| record.project_id != project.id)
+        {
+            return Err(fail(
+                ErrorCode::PermissionDenied,
+                "conversation project binding changed",
+            ));
+        }
+    }
+    Ok(Some(root))
+}

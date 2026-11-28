@@ -273,14 +273,7 @@ async fn assert_recovery_cache(human_after_c3: bool) {
     runtime
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
-    let owner = crate::ownership::OwnerHost::open(
-        &dir.sockets().join("owner"),
-        Default::default(),
-        Arc::new(EventBus::new(64)),
-    )
-    .unwrap();
     let current = RunConfig {
-        ownership: Some(owner.start("current").unwrap()),
         ..Default::default()
     };
     let authority = crate::CurrentRecoveryAuthority {

@@ -3,17 +3,12 @@ use super::current::{CurrentTeamProblem, CurrentTeamSource};
 use crate::lane::{BindingTable, memory_boundary};
 use runtime::{
     AgentRuntime, CurrentRecoveryAuthority, RunConfig, RunId,
-    ownership::{OwnerHost, OwnershipError, RegistryError},
     quiesce::{CORE_RECOVERY_SETTINGS_REFERENCE, ResumePolicy, RunRecoveryRecord},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurrentAuthorityProblem {
-    OwnerBlocked,
     CurrentBindingRequired,
     CurrentSettingsRequired,
     CliContinuityRequired,
@@ -26,96 +21,36 @@ pub enum CurrentAuthorityProblem {
 /// directory before resolving a component; recipes never populate this table.
 pub struct CurrentAuthorityProvider<'a> {
     pub runtime: &'a AgentRuntime,
-    pub owner: &'a Arc<OwnerHost>,
     pub bindings: &'a BindingTable,
     pub storage: &'a storage::StorageConfig,
     pub writer: &'a storage::StorageHandle,
     pub config_dir: &'a std::path::Path,
 }
 
-/// Ownership exclusion is distinct from execution/binding authority. Transfer
-/// every exact same-TX hold, including parked and non-resumable graphs, without activating
-/// any run, changing the saved checkpoint, or granting a command binding.
-pub fn claim_planned_owner_threads(
-    runtime: &AgentRuntime,
-    owner: &OwnerHost,
-) -> Result<(), CurrentAuthorityProblem> {
-    if !runtime.has_planned_restart_handoff() {
-        return Ok(());
-    }
-    let tx = runtime
-        .adopted_restart_transaction()
-        .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?;
-    // Physical bootstrap claims its complete inventory before Ready. With no
-    // runnable components, Ready can already complete the transaction. Never
-    // mint fresh ownership evidence from that terminal transaction: a blocked
-    // foreign owner must remain foreign, and earlier successful claims already
-    // participate in normal shutdown.
-    if tx.phase == storage::recovery::restart::RestartPhase::Completed {
-        return Ok(());
-    }
-    let evidence = runtime
-        .adopted_restart_ownership_evidence()
-        .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?;
-    for progress in &tx.owner_progress {
-        let current = owner
-            .attach(&progress.thread_id)
-            .map_err(|_| CurrentAuthorityProblem::OwnerBlocked)?;
-        let hold = current
-            .handoff_hold
-            .as_deref()
-            .or(current.planned_claim.as_deref())
-            .ok_or(CurrentAuthorityProblem::CurrentBindingRequired)?;
-        if hold.transaction_id != tx.metadata.restart_id
-            || hold.capture_id != tx.metadata.capture_id
-        {
-            tracing::warn!(thread = %progress.thread_id, "planned owner hold transaction/capture mismatch");
-            return Err(CurrentAuthorityProblem::CurrentBindingRequired);
-        }
-        owner
-            .claim_planned(hold, &evidence)
-            .inspect_err(|error| tracing::warn!(thread = %progress.thread_id, %error, "planned owner hold proof/claim rejected"))
-            .map_err(|_| CurrentAuthorityProblem::OwnerBlocked)?;
-    }
-    Ok(())
-}
 impl CurrentAuthorityProvider<'_> {
-    pub fn resolve(
+    pub fn resolve_current(
         &self,
         records: &[RunRecoveryRecord],
         resume: &BTreeSet<RunId>,
     ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
-        self.resolve_current(records, resume, true, false)
+        self.resolve_impl(records, resume, true)
     }
 
-    /// Release grants no execution capability. Current binding/team/owner checks
+    /// Release grants no execution capability. Current binding/team checks
     /// still apply, but a rejected continuation selector is itself a release reason.
     pub fn resolve_for_release(
         &self,
         records: &[RunRecoveryRecord],
         resume: &BTreeSet<RunId>,
     ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
-        self.resolve_current(records, resume, false, false)
+        self.resolve_impl(records, resume, false)
     }
 
-    /// Resolve execution authority from an already-owned Running thread only.
-    /// Unlike automatic startup, this never starts or claims an owner, including
-    /// a foreign owner that would otherwise be safely claimable. The caller must
-    /// independently validate the retained physical generation and graph CAS.
-    pub fn resolve_owned(
-        &self,
-        records: &[RunRecoveryRecord],
-        resume: &BTreeSet<RunId>,
-    ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
-        self.resolve_current(records, resume, true, true)
-    }
-
-    fn resolve_current(
+    fn resolve_impl(
         &self,
         records: &[RunRecoveryRecord],
         resume: &BTreeSet<RunId>,
         execution: bool,
-        owned_only: bool,
     ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
         let mut roots = BTreeMap::new();
         for record in records
@@ -146,10 +81,14 @@ impl CurrentAuthorityProvider<'_> {
             if roots.contains_key(&binding.root) {
                 continue;
             }
-            let project = binding
-                .project_root
-                .as_ref()
-                .ok_or(CurrentAuthorityProblem::CurrentBindingRequired)?;
+            let project = crate::lane::current_thread_project(
+                self.runtime,
+                Some(&self.config_dir.join("sidebar.json")),
+                thread,
+                binding.project_root.as_deref(),
+            )
+            .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?
+            .ok_or(CurrentAuthorityProblem::CurrentBindingRequired)?;
             let config = config::Config::load_strict(&config::LoadOptions {
                 user_config_dir: Some(self.config_dir.to_path_buf()),
                 project_dir: Some(project.clone()),
@@ -162,7 +101,7 @@ impl CurrentAuthorityProvider<'_> {
                 interactive: true,
                 keep_alive: true,
                 conversation: true,
-                memory: memory_boundary(self.runtime, Some(self.storage), Some(project)),
+                memory: memory_boundary(self.runtime, Some(self.storage), Some(&project)),
                 ..Default::default()
             };
             // Scope comes from the current lane ledger, not recipe.lane.
@@ -197,45 +136,6 @@ impl CurrentAuthorityProvider<'_> {
                     _ => CurrentAuthorityProblem::TeamReconciliationRequired,
                 })?;
             }
-            authority.ownership = Some(
-                (if owned_only {
-                    self.owner.owned_permit(thread)
-                } else {
-                    match self.owner.attach(thread) {
-                        Ok(owner) if owner.lease.owner_id == self.owner.owner_id() => {
-                            self.owner.owned_permit(thread)
-                        }
-                        Ok(owner) if owner.handoff_hold.is_some() => {
-                            // A retained planned hold is deliberately not normal-claimable.
-                            // Only the inherited physical adoption proof grants this CAS.
-                            let evidence = self
-                                .runtime
-                                .adopted_restart_ownership_evidence()
-                                .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?;
-                            self.owner
-                                .claim_planned(owner.handoff_hold.as_deref().unwrap(), &evidence)
-                        }
-                        Ok(owner) => self.owner.claim(&owner),
-                        Err(RegistryError::Absent) => self.owner.start(thread),
-                        Err(error) => Err(error),
-                    }
-                })
-                .map_err(|error| match error {
-                    RegistryError::Ownership(
-                        OwnershipError::NotClaimable
-                        | OwnershipError::OwnerResponsive
-                        | OwnershipError::Fenced
-                        | OwnershipError::Active
-                        | OwnershipError::Quiescing,
-                    )
-                    | RegistryError::Exists => CurrentAuthorityProblem::OwnerBlocked,
-                    RegistryError::Absent if owned_only => CurrentAuthorityProblem::OwnerBlocked,
-                    RegistryError::ThreadDeleted(_) => {
-                        CurrentAuthorityProblem::CurrentBindingRequired
-                    }
-                    _ => CurrentAuthorityProblem::StorageUnavailable,
-                })?,
-            );
             roots.insert(binding.root, authority);
         }
         let members = records
@@ -273,6 +173,7 @@ mod tests {
     use super::*;
     use crate::lane::ThreadBinding;
     use runtime::quiesce::RecoveryRecipe;
+    use std::sync::Arc;
     fn record(run: RunId, root: &std::path::Path) -> RunRecoveryRecord {
         RunRecoveryRecord {
             version: 1,
@@ -309,7 +210,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn recipes_cannot_create_a_binding_or_a_current_owner() {
+    async fn recipes_cannot_create_a_binding_or_current_execution_authority() {
         let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("current.db"),
@@ -320,16 +221,12 @@ mod tests {
         let bus = Arc::new(event_bus::EventBus::new(32));
         let runtime = AgentRuntime::new(
             bus.clone(),
-            Arc::new(tools::ToolExecutor::new(bus.clone())),
+            Arc::new(tools::ToolExecutor::new(bus)),
             Arc::new(runtime::compose::UnconfiguredModel),
-        );
-        let owner = Arc::new(
-            OwnerHost::open(&dir.sockets().join("owner"), Default::default(), bus).unwrap(),
         );
         let bindings = BindingTable::default();
         let provider = CurrentAuthorityProvider {
             runtime: &runtime,
-            owner: &owner,
             bindings: &bindings,
             storage: &config,
             writer: &writer,
@@ -339,10 +236,12 @@ mod tests {
         let mut record = record(run, dir.path());
         let resume = BTreeSet::from([run]);
         assert_eq!(
-            provider.resolve(&[record.clone()], &resume).err().unwrap(),
+            provider
+                .resolve_current(&[record.clone()], &resume)
+                .err()
+                .unwrap(),
             CurrentAuthorityProblem::CurrentBindingRequired
         );
-        assert!(matches!(owner.attach("thread"), Err(RegistryError::Absent)));
         bindings.replace(BTreeMap::from([(
             "thread".into(),
             ThreadBinding {
@@ -353,86 +252,31 @@ mod tests {
         )]));
         record.recipe.settings_reference = "unknown".into();
         assert_eq!(
-            provider.resolve(&[record.clone()], &resume).err().unwrap(),
+            provider
+                .resolve_current(&[record.clone()], &resume)
+                .err()
+                .unwrap(),
             CurrentAuthorityProblem::CurrentSettingsRequired
         );
-        assert!(matches!(owner.attach("thread"), Err(RegistryError::Absent)));
         record.recipe.settings_reference = CORE_RECOVERY_SETTINGS_REFERENCE.into();
         record.recipe.policy = ResumePolicy::CliInvocation {
             invocation_id: "invocation".into(),
             planned_handoff: Some("handoff".into()),
         };
         assert_eq!(
-            provider.resolve(&[record.clone()], &resume).err().unwrap(),
-            CurrentAuthorityProblem::CliContinuityRequired
-        );
-        assert!(matches!(owner.attach("thread"), Err(RegistryError::Absent)));
-        record.recipe.policy = ResumePolicy::CoreOwned;
-        // Explicit Resume must not acquire the absent owner, even though the
-        // current directory/settings are sufficient for automatic startup.
-        assert_eq!(
             provider
-                .resolve_owned(&[record.clone()], &resume)
+                .resolve_current(&[record.clone()], &resume)
                 .err()
                 .unwrap(),
-            CurrentAuthorityProblem::OwnerBlocked
+            CurrentAuthorityProblem::CliContinuityRequired
         );
-        assert!(matches!(owner.attach("thread"), Err(RegistryError::Absent)));
-        let authority = provider.resolve(&[record.clone()], &resume).unwrap();
+        record.recipe.policy = ResumePolicy::CoreOwned;
+        let authority = provider.resolve_current(&[record], &resume).unwrap();
         assert_eq!(
             authority.members[&run].project_root.as_deref(),
             Some(dir.path())
         );
-        assert_eq!(
-            authority.members[&run]
-                .ownership
-                .as_ref()
-                .unwrap()
-                .thread_id,
-            "thread"
-        );
         assert!(authority.members[&run].interactive && authority.members[&run].keep_alive);
-        let owned = provider.resolve_owned(&[record.clone()], &resume).unwrap();
-        assert_eq!(
-            owned.members[&run].ownership,
-            authority.members[&run].ownership
-        );
-
-        // A Released foreign owner is deliberately reclaimable by automatic
-        // startup. Checking this case kills a fallback-to-resolve mutant, unlike
-        // a responsive Running foreign owner whose claim would simply fail.
-        assert!(!owner.begin_quiesce().unwrap());
-        assert!(!owner.release_ready().unwrap());
-        let released = owner.attach("thread").unwrap();
-        let successor = Arc::new(
-            OwnerHost::open(
-                &dir.sockets().join("owner"),
-                Default::default(),
-                runtime.event_bus().clone(),
-            )
-            .unwrap(),
-        );
-        let successor_provider = CurrentAuthorityProvider {
-            owner: &successor,
-            ..provider
-        };
-        assert_eq!(
-            successor_provider
-                .resolve_owned(&[record.clone()], &resume)
-                .err()
-                .unwrap(),
-            CurrentAuthorityProblem::OwnerBlocked
-        );
-        assert_eq!(successor.attach("thread").unwrap(), released);
-        let automatic = successor_provider.resolve(&[record], &resume).unwrap();
-        assert_eq!(
-            automatic.members[&run]
-                .ownership
-                .as_ref()
-                .unwrap()
-                .lease
-                .owner_id,
-            successor.owner_id()
-        );
+        assert!(!dir.sockets().join("owners.db").exists());
     }
 }

@@ -61,10 +61,9 @@ fn start(boot: &BootstrappedHost) -> runtime::RunId {
 }
 
 #[tokio::test]
-async fn failed_drain_still_flushes_bridge_without_releasing_owner() {
+async fn failed_drain_still_flushes_bridge_and_keeps_leases() {
     let dir = tempfile::tempdir().unwrap();
     let (_owners, mut boot) = open(dir.path()).await;
-    let _permit = boot.owner.start("owned").unwrap();
     let bus = boot.runtime.event_bus().clone();
     boot.services.start("failing-drain", |stop| async move {
         let _ = stop.await;
@@ -92,10 +91,7 @@ async fn failed_drain_still_flushes_bridge_without_releasing_owner() {
         boot.bridge.is_none(),
         "failed drain must not skip bridge acknowledgement and shutdown"
     );
-    assert_ne!(
-        boot.owner.attach("owned").unwrap().state,
-        runtime::ownership::OwnerState::Released
-    );
+    assert!(boot.writer_leases.has_root_writer());
     let db = storage::Database::open(&boot.composition.storage).unwrap();
     assert_eq!(db.events_all_ordered().unwrap().iter().filter(|event|
         matches!(&event.event.kind, event_bus::EventKind::Diagnostic(d) if d.code == "06a.failed-drain")
@@ -106,7 +102,6 @@ async fn failed_drain_still_flushes_bridge_without_releasing_owner() {
 async fn original_restart_safe_point_still_allows_explicit_operator_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let (_owners, mut boot) = open(dir.path()).await;
-    let _permit = boot.owner.start("owned").unwrap();
     let run = start(&boot);
     boot.quiesce_for_restart().await.unwrap();
     assert_eq!(boot.runtime.quiesce_state(), QuiesceState::Checkpointed);
@@ -115,10 +110,7 @@ async fn original_restart_safe_point_still_allows_explicit_operator_shutdown() {
         boot.runtime.wait(run).await.unwrap(),
         event_bus::AgentRunPhase::Stopped
     );
-    assert_eq!(
-        boot.owner.attach("owned").unwrap().state,
-        runtime::ownership::OwnerState::Released
-    );
+    assert!(!boot.scratch.parent().join("owners.db").exists());
 }
 #[tokio::test]
 async fn capture_without_explicit_restart_fence_cannot_commit_or_close_dispatch() {

@@ -35,7 +35,7 @@ impl Fixture {
     fn manifest(&self, id: &str, runs: &[&str]) -> RecoveryManifestRecord {
         RecoveryManifestRecord {
             manifest_id: id.into(),
-            schema_version: 1,
+            schema_version: 2,
             committed: false,
             superseded: false,
             edges: runs
@@ -575,6 +575,8 @@ fn fresh_upgrade_and_undo_v61_preserve_previous_intents() {
     let sql = rusqlite::Connection::open(&f.config.db_path).unwrap();
     let package = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let undo_latest = [
+        "undo/undo_v81.sql",
+        "undo/undo_v80.sql",
         "undo/undo_v79.sql",
         "undo/undo_v78.sql",
         "undo/undo_v77.sql",

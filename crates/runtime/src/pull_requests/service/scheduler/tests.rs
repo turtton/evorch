@@ -15,7 +15,6 @@ async fn refresh_during_a_fetch(failed: bool) {
     process.service.shutdown_and_drain().await.unwrap();
     process.service.inner().shutdown.send_replace(false);
     process.link_directly("t1", 1);
-    let permit = process.permit("t1");
     let inner = process.service.inner();
     let old_answer = process.source.push_gate(&key(1));
     let new_answer = process.source.push_gate(&key(1));
@@ -25,7 +24,7 @@ async fn refresh_during_a_fetch(failed: bool) {
     old_answer.arrived().await;
     // Repeated button presses during one fetch coalesce into one follow-up, not concurrent I/O.
     for _ in 0..2 {
-        process.service.refresh("t1", &permit).await.unwrap();
+        process.service.refresh("t1").await.unwrap();
     }
     inner.round().await;
     assert_eq!(
@@ -85,7 +84,6 @@ async fn explicit_refresh_survives_an_in_flight_failure() {
 async fn repeated_producer_notifications_resume_one_pending_fetch_without_self_retriggering() {
     let world = World::new();
     let process = world.process(enabled());
-    let _owner = process.permit("t1");
     let producers = process.service.producer_gate();
     let mut pause = producers.pause();
     process.link_directly("t1", 1);

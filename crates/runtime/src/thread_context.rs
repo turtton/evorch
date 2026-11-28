@@ -125,4 +125,50 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[tokio::test]
+    async fn deleted_bound_thread_blocks_unnamed_root_and_child_before_registration() {
+        for child in [false, true] {
+            let bus = Arc::new(event_bus::EventBus::new(128));
+            let runtime = AgentRuntime::new(
+                bus.clone(),
+                Arc::new(tools::ToolExecutor::new(bus)),
+                Arc::new(Model),
+            );
+            let root = runtime.reserve_run_id();
+            runtime.bind_thread_root("deleted", root).unwrap();
+            if child {
+                runtime
+                    .spawn_reserved(root, None, Role::Worker, "root", RunConfig::default())
+                    .unwrap();
+                runtime.wait(root).await.unwrap();
+            }
+            runtime
+                .set_tombstone_guard(crate::thread_retention::TombstoneGuard::new(
+                    storage::thread_retention::TombstoneSet {
+                        threads: HashSet::from(["deleted".to_owned()]),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+            let run = if child {
+                runtime.reserve_run_id()
+            } else {
+                root
+            };
+            assert!(matches!(
+                runtime.spawn_reserved(
+                    run,
+                    child.then_some(root),
+                    Role::Worker,
+                    "must not start",
+                    RunConfig::default(),
+                ),
+                Err(RuntimeError::ThreadDeleted(
+                    crate::thread_retention::ThreadDeleted::Thread(thread)
+                )) if thread == "deleted"
+            ));
+            assert!(runtime.inspect_agent(run).is_err());
+        }
+    }
 }

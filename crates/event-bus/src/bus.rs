@@ -24,7 +24,6 @@ pub struct EventBus {
     next_subscriber_id: AtomicU64,
     persistence: std::sync::Arc<crate::PersistenceNotifications>,
     publish_admission: std::sync::OnceLock<PublishAdmission>,
-    fences: std::sync::Arc<crate::fencing::MutationFences>,
     shared: std::sync::Mutex<
         std::collections::HashMap<
             std::any::TypeId,
@@ -48,7 +47,6 @@ impl EventBus {
             next_subscriber_id: AtomicU64::new(0),
             persistence: std::sync::Arc::default(),
             publish_admission: std::sync::OnceLock::new(),
-            fences: std::sync::Arc::default(),
             shared: std::sync::Mutex::default(),
         }
     }
@@ -86,7 +84,7 @@ impl EventBus {
     /// 受信者がゼロの場合は [`broadcast::SendError`] となるが、これを受信者数
     /// 0 として扱い panic しない。
     /// Installed once by the core. The callback may wait for one memory-only seal,
-    /// never under the bus service lock or an ownership mutation guard.
+    /// never under the bus service lock.
     pub fn install_publish_admission(&self, hook: PublishAdmission) -> bool {
         self.publish_admission.set(hook).is_ok()
     }
@@ -101,17 +99,6 @@ impl EventBus {
         } else {
             None
         };
-        let Some(_guards) = self.fences.acquire(&event) else {
-            // Report through tracing only: emitting a diagnostic event here
-            // would reacquire the guard that just failed for this run.
-            tracing::debug!(
-                target: "evorch::fencing",
-                family = event_family(&event),
-                runs = ?crate::fencing::event_run_ids(std::slice::from_ref(&event)),
-                "event dropped: its mutation fence rejected it or could not be acquired"
-            );
-            return 0;
-        };
         self.persistence
             .notify(&event, crate::PersistenceStage::Published);
         self.tx.send(event).unwrap_or(0)
@@ -120,33 +107,6 @@ impl EventBus {
     /// Internal ACK seam; does not keep the bus or subscriber alive.
     pub fn persistence_notifications(&self) -> std::sync::Arc<crate::PersistenceNotifications> {
         self.persistence.clone()
-    }
-
-    pub fn register_mutation_fence(&self, run: String, check: crate::MutationCheck) -> bool {
-        self.fences.register(run, check)
-    }
-
-    pub fn register_mutation_guard(&self, run: String, check: crate::MutationGuardCheck) -> bool {
-        self.fences.register_guard(run, check)
-    }
-
-    /// Register an ownership guard with a nonblocking acquisition for compound
-    /// events and GUI batches, so partial guards can be released on contention.
-    /// `attempt` must return Busy immediately on lock contention. Synchronous
-    /// consumers use the blocking callback for single-run events or after
-    /// releasing partial guards before waiting on contention.
-    pub fn register_nonblocking_mutation_guard(
-        &self,
-        run: String,
-        blocking: crate::MutationGuardCheck,
-        attempt: crate::MutationGuardTryCheck,
-    ) -> bool {
-        self.fences
-            .register_nonblocking_guard(run, blocking, attempt)
-    }
-
-    pub fn mutation_validator(&self) -> crate::MutationValidator {
-        crate::MutationValidator::new(std::sync::Arc::clone(&self.fences))
     }
 
     /// 新しい受信者を登録し、単調増加する `subscriber_id` を割り当てる。
@@ -160,34 +120,12 @@ impl EventBus {
             tx: self.tx.clone(),
             subscriber_id,
             lag_gate: LagGate::default(),
-            fences: std::sync::Arc::clone(&self.fences),
         }
     }
 
     /// 現在の受信者数を返す。
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
-    }
-}
-
-/// The event's top-level family, which never contains message bodies.
-fn event_family(event: &Event) -> &'static str {
-    use crate::event::EventKind;
-    match &event.kind {
-        EventKind::Lifecycle(_) => "lifecycle",
-        EventKind::Message(_) => "message",
-        EventKind::Tool(_) => "tool",
-        EventKind::Usage(_) => "usage",
-        EventKind::Provider(_) => "provider",
-        EventKind::Fault(_) => "fault",
-        EventKind::AgentMessage(_) => "agent_message",
-        EventKind::Compaction(_) => "compaction",
-        EventKind::Orchestrator(_) => "orchestrator",
-        EventKind::Diagnostic(_) => "diagnostic",
-        EventKind::Ownership(_) => "ownership",
-        EventKind::Ledger(_) => "ledger",
-        EventKind::PullRequest(_) => "pull_request",
-        EventKind::ConversationPlan(_) => "conversation_plan",
     }
 }
 
@@ -207,7 +145,6 @@ pub enum RecvError {
 /// 内部に `Sender` のクローンを保持するため、[`EventBus`] が drop されても
 /// この受信者が生きている限りチャネルは閉じない。
 pub struct EventReceiver {
-    fences: std::sync::Arc<crate::fencing::MutationFences>,
     rx: broadcast::Receiver<Event>,
     /// fault 再 emit 用の送信者クローン。
     tx: broadcast::Sender<Event>,
@@ -237,9 +174,6 @@ impl LagGate {
 }
 
 impl EventReceiver {
-    pub fn mutation_validator(&self) -> crate::MutationValidator {
-        crate::MutationValidator::new(std::sync::Arc::clone(&self.fences))
-    }
     /// この受信者に割り当てられた `subscriber_id` を返す。
     pub fn subscriber_id(&self) -> u64 {
         self.subscriber_id
@@ -247,7 +181,7 @@ impl EventReceiver {
 
     /// Drain only the raw slots pending at entry, without waiting for producers.
     ///
-    /// Later arrivals do not extend the drain, and stale fenced events are omitted.
+    /// Later arrivals do not extend the drain.
     /// Overwritten slots consume the snapshot budget too. No fault events are
     /// emitted during shutdown, avoiding an event-feedback loop while draining.
     pub fn drain_pending_snapshot(&mut self) -> Vec<Event> {
@@ -265,9 +199,7 @@ impl EventReceiver {
                 Ok(event) => {
                     remaining -= 1;
                     self.lag_gate.note_ok();
-                    if self.fences.accepts(&event) {
-                        events.push(event);
-                    }
+                    events.push(event);
                 }
                 Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
                     lagged = lagged.saturating_add(skipped);
@@ -314,9 +246,7 @@ impl EventReceiver {
             match self.rx.recv().await {
                 Ok(event) => {
                     self.lag_gate.note_ok();
-                    if self.fences.accepts(&event) {
-                        return Ok(event);
-                    }
+                    return Ok(event);
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     let (warn, fault) = self.lag_gate.note_lag();
@@ -351,8 +281,6 @@ impl EventReceiver {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicUsize};
-
     use tokio::sync::broadcast;
 
     use super::{EventBus, EventReceiver, LagGate, RecvError};
@@ -368,29 +296,6 @@ mod tests {
         gate.note_ok();
 
         assert_eq!(gate.note_lag(), (true, true));
-    }
-
-    #[test]
-    fn shutdown_snapshot_stops_at_original_raw_slots_even_when_stale() {
-        let bus = EventBus::new(8);
-        let mut receiver = bus.subscribe();
-        bus.emit(Event::new(LifecycleEvent::Started {
-            session_id: "stale".into(),
-        }));
-        let tx = bus.tx.clone();
-        bus.register_mutation_fence(
-            "stale".into(),
-            Arc::new(move || {
-                tx.send(Event::new(LifecycleEvent::Started {
-                    session_id: "later".into(),
-                }))
-                .unwrap();
-                false
-            }),
-        );
-        assert!(receiver.drain_pending_snapshot().is_empty());
-        assert!(matches!(receiver.rx.try_recv().unwrap().kind,
-            EventKind::Lifecycle(LifecycleEvent::Started { session_id }) if session_id == "later"));
     }
 
     #[test]
@@ -433,72 +338,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lag_gate_resets_on_raw_ok_before_fencing() {
-        // Given: a lagged receiver and a buffered event that a newly registered
-        // fence will reject.
+    async fn lag_gate_resets_when_an_event_is_received() {
+        // Given: a receiver that lagged once and whose fault the observer saw.
         let bus = EventBus::new(16);
         let (event_tx, event_rx) = broadcast::channel(2);
-        let fences = Arc::clone(&bus.fences);
         let mut receiver = EventReceiver {
-            fences: Arc::clone(&fences),
             rx: event_rx,
             tx: bus.tx.clone(),
             subscriber_id: 0,
             lag_gate: LagGate::default(),
         };
-        let rejected = Arc::new(AtomicUsize::new(0));
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let rejected_for_fence = Arc::clone(&rejected);
-        let notify_for_fence = Arc::clone(&notify);
-        assert!(fences.register(
-            "blocked".into(),
-            Arc::new(move || {
-                if rejected_for_fence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 1 {
-                    notify_for_fence.notify_one();
-                }
-                false
-            }),
-        ));
-        let events = [
-            Event::new(LifecycleEvent::Started {
-                session_id: "session-1".into(),
-            }),
-            Event::new(LifecycleEvent::Started {
-                session_id: "blocked".into(),
-            }),
-            Event::new(LifecycleEvent::Started {
-                session_id: "blocked".into(),
-            }),
-            Event::new(LifecycleEvent::Started {
-                session_id: "blocked".into(),
-            }),
-        ];
-        for event in events {
-            event_tx.send(event).unwrap();
-        }
         let mut observer = bus.subscribe();
-
-        // When: the receiver enters its first lag episode.
+        let started = |id: &str| {
+            Event::new(LifecycleEvent::Started {
+                session_id: id.into(),
+            })
+        };
+        for index in 0..4 {
+            event_tx.send(started(&index.to_string())).unwrap();
+        }
         assert_eq!(receiver.recv().await, Err(RecvError::Lagged(2)));
         assert!(matches!(
             observer.recv().await.unwrap().kind,
             EventKind::Fault(FaultEvent::SubscriberLagged { .. })
         ));
 
-        // Then: fence-rejected raw Ok events reset the gate before filtering;
-        // the following lag therefore emits a second fault.
-        let sender = async {
-            notify.notified().await;
-            for _ in 0..4 {
-                event_tx
-                    .send(Event::new(LifecycleEvent::Started {
-                        session_id: "blocked".into(),
-                    }))
-                    .unwrap();
-            }
-        };
-        let (result, ()) = tokio::join!(receiver.recv(), sender);
-        assert_eq!(result, Err(RecvError::Lagged(2)));
+        // When: it receives an event and then lags again.
+        assert!(receiver.recv().await.is_ok());
+        for index in 4..8 {
+            event_tx.send(started(&index.to_string())).unwrap();
+        }
+        assert!(matches!(receiver.recv().await, Err(RecvError::Lagged(_))));
+
+        // Then: the new lag episode emits its own fault.
         assert!(matches!(
             observer.rx.try_recv(),
             Ok(Event {

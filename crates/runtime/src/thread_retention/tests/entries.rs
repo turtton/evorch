@@ -28,28 +28,9 @@ const READ_ONLY: &str = "reads storage, whose readers hide tombstoned rows; chan
 
 fn table() -> BTreeMap<&'static str, Guard> {
     BTreeMap::from([
-        ("ownership/host.rs::start", Guarded { via: &[] }),
-        ("ownership/host.rs::attach", Guarded { via: &[] }),
-        ("ownership/host.rs::claim", Guarded { via: &[] }),
-        (
-            "ownership/host.rs::owned_permit",
-            Guarded { via: &["attach"] },
-        ),
-        (
-            "ownership/host.rs::owned_or_claim_abandoned",
-            Guarded { via: &["attach"] },
-        ),
-        (
-            "ownership/registry.rs::start",
-            Exempt("low-level registry write; OwnerHost is the entry and guards"),
-        ),
         (
             "team.rs::claim",
             Exempt("in-memory team task queue of this session; not keyed by threads or runs"),
-        ),
-        (
-            "ownership/registry.rs::attach",
-            Exempt("low-level registry read; OwnerHost is the entry and guards"),
         ),
         (
             "attachments.rs::attachment_read_directories",
@@ -288,7 +269,7 @@ fn every_public_identity_entry_is_guarded_or_exempt_with_a_reason() {
     )
     .unwrap();
     let identity = Regex::new(
-        r"thread_id|thread:|ThreadGoalSnapshot|RunId|run_id|run:|child:|parent:|recipient|ThreadOwner|\bid: &str",
+        r"thread_id|thread:|ThreadGoalSnapshot|RunId|run_id|run:|child:|parent:|recipient|\bid: &str",
     )
     .unwrap();
     let entry =
@@ -349,7 +330,7 @@ fn every_public_identity_entry_is_guarded_or_exempt_with_a_reason() {
 
 // G1..G6 runtime entries. G1 completion also registers before event publication and
 // keeps pending through recorder ACK (gate behavior tests). G7 storage lane writes,
-// G8/G9 pre-save admission through mirror ACK, G10 owner shutdown are inventoried
+// G8/G9 pre-save admission through mirror ACK are inventoried
 // separately at their owning crates; LIVE_ONLY is deliberately not reused here.
 #[test]
 fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() {
@@ -417,34 +398,6 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
     ]);
     let exempt = BTreeMap::from([
         (
-            "ownership/host.rs::start",
-            "owner registry permit only; run admission is separately registered",
-        ),
-        (
-            "ownership/host.rs::attach",
-            "owner registry lease only; not run admission",
-        ),
-        (
-            "ownership/host.rs::claim",
-            "owner registry adoption only; runtime restore admission is registered",
-        ),
-        (
-            "ownership/host.rs::owned_permit",
-            "delegates to owner registry attach; not execution",
-        ),
-        (
-            "ownership/host.rs::owned_or_claim_abandoned",
-            "owner registry adoption only; runtime restore admission is separately registered",
-        ),
-        (
-            "ownership/registry.rs::start",
-            "registry implementation, not archive eligibility or run admission",
-        ),
-        (
-            "ownership/registry.rs::attach",
-            "registry implementation, not archive eligibility or run admission",
-        ),
-        (
             "team.rs::claim",
             "session task queue, not durable thread/run input",
         ),
@@ -493,7 +446,7 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
         );
     }
     let verbs=Regex::new(r"^(restore|resume|wake|continue|bind|create|answer|compact|delegate|handoff|send|deliver|inherit|set_goal|set_thread|persist|spawn|reserve|record_host|start|claim|owned|attach|install|register)").unwrap();
-    let identity=Regex::new(r"thread_id|thread:|ThreadGoalSnapshot|RunId|run_id|run:|child:|parent:|recipient|ThreadOwner|\bid: &str").unwrap();
+    let identity=Regex::new(r"thread_id|thread:|ThreadGoalSnapshot|RunId|run_id|run:|child:|parent:|recipient|\bid: &str").unwrap();
     let entry =
         Regex::new(r"\n[ \t]*pub\s+(?:async\s+)?fn\s+([a-z_0-9]+)\s*(?:<[^>]*>)?\(").unwrap();
     for (path, text) in &all {

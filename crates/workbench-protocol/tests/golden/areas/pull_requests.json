@@ -256,7 +256,6 @@
           }
         },
         "local_head": "0123456789abcdef",
-        "owned_here": true,
         "snapshot": {
           "consecutive_failures": 1,
           "facts": {

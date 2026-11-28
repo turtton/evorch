@@ -1,7 +1,7 @@
 //! The two-way binding between a database and its ownership root.
 //!
-//! Deleting a family also deletes state that lives outside the database: owner
-//! rows and scratch directories under the ownership root. Doing that for a root
+//! Deleting a family also deletes scratch state outside the database under the
+//! shared state root. Doing that for a root
 //! that belongs to another database (or after the sidebar was swapped for another
 //! file) would destroy live state, so the first confirmation records the pairing on
 //! both sides and every later one checks it:
@@ -101,7 +101,6 @@ pub fn check_binding(
     database: &Database,
     paths: BindingPaths<'_>,
 ) -> Result<BindingStatus, RetentionError> {
-    let db_id = database.retention_identity()?;
     let row = database.retention_binding()?;
     let file = match read_root(paths.ownership_root) {
         Ok(file) => file,
@@ -114,6 +113,7 @@ pub fn check_binding(
             BindingStatus::Unbound
         });
     };
+    let db_id = database.retention_identity()?;
     if file.db_id != db_id {
         return Ok(BindingStatus::Mismatch(
             "ownership root is bound to another database".into(),

@@ -73,7 +73,7 @@ pub(super) fn describe_undisposed(graphs: &UndisposedGraphs) -> Vec<String> {
     }
     if graphs.over_limit_count.get() > 0 {
         lines.push(format!(
-            "  {} of them have too many owners to act on here",
+            "  {} of them have too many threads to act on here",
             graphs.over_limit_count.get()
         ));
     }
@@ -105,15 +105,14 @@ pub(super) fn describe_graph(view: &OwnedGraphView) -> Vec<String> {
             view.binding.graph.expected_core_epoch.get()
         ),
         format!(
-            "  restart {}, disposition {}, claim {}, ownership {}, control {}, eligibility {}",
+            "  restart {}, disposition {}, claim {}, control {}, eligibility {}",
             name(&view.restart_phase),
             name(&view.disposition),
             name(&view.claim),
-            name(&view.ownership),
             name(&view.control),
             name(&view.eligibility),
         ),
-        format!("  {} owner thread(s)", view.owner_count.get()),
+        format!("  {} thread(s)", view.thread_count.get()),
         format!("  resume: {}", availability(&view.resume)),
         format!("  release: {}", availability(&view.release)),
     ]

@@ -1,4 +1,4 @@
-//! Leaf E2E: real physical bootstrap -> retained authority -> both databases
+//! Leaf E2E: real physical bootstrap -> current graph CAS and writer leases
 //! -> real scratch. Child exit, not a timeout, is the completion signal.
 #[cfg(target_os = "linux")]
 #[path = "../shared-test-support/physical_ownership.rs"]
@@ -21,7 +21,7 @@ fn main() {
             "release-adopted-released",
             "release-bound-root",
             "release-unknown",
-            "release-owner-conflict",
+            "release-cas-conflict",
             "release-reset-ack-lost",
             "release-executing",
             "release-waiting",

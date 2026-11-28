@@ -193,7 +193,6 @@ impl AgentRuntime {
         let mut candidates = Vec::new();
         let mut endpoints = Vec::new();
         let mut intents = Vec::new();
-        let mut permits = Vec::new();
         let mut snapshots = Vec::new();
         for source in &paused.sources {
             let id = source.record.run_id;
@@ -216,7 +215,6 @@ impl AgentRuntime {
             }
             let mut config = authority.members.remove(&id).expect("membership checked");
             self.validate_recovery_authority(source, &config)?;
-            permits.push(config.ownership.clone().expect("validated ownership"));
             // Resolve before candidate construction: its ordinary registration
             // fallback logs errors, which is not sufficient for atomic recovery.
             if let Some(bundle) = &source.bundle {
@@ -337,7 +335,6 @@ impl AgentRuntime {
         }
         // Hold generation guards across the writer transaction and publication.
         // Never hold the global runs lock while waiting for the writer.
-        let _authority = crate::ownership::OwnerPermit::mutation_guards(&permits).map_err(error)?;
         reservation.validate(self, &paused.claim.manifest_id)?;
         let request = RecoveryActivationRequest {
             reservation: reservation.control(),
@@ -481,16 +478,7 @@ impl AgentRuntime {
                 "current CLI continuity is not supplied by core authority",
             ));
         }
-        let permit = config
-            .ownership
-            .as_ref()
-            .ok_or_else(|| error("current ownership required"))?;
-        permit.validate_generation().map_err(error)?;
-        if record
-            .thread
-            .as_ref()
-            .is_some_and(|thread| *thread != permit.thread_id)
-            || config.project_root != record.project
+        if config.project_root != record.project
             || config.lane_scope != record.recipe.lane
             || config.initial_prompt_id.is_some()
             || config.prompt_origin.is_some()

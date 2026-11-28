@@ -1,6 +1,8 @@
 //! Component-scoped graph receipts and durable, revision-fenced claims (PR 06a).
 //! Payloads are runtime-owned. No method here starts work or grants authority.
 mod activation;
+pub mod format;
+pub use format::{RECOVERY_SCHEMA_VERSION, RecoveryGraphHeader, RestartHeader};
 pub mod cli_continuity;
 pub mod graph_control;
 pub mod graph_progress;
@@ -51,6 +53,7 @@ pub struct RecoveryManifestRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryProblem {
+    UnsupportedFormat,
     CorruptManifest,
     CorruptMember,
     MissingMember,
@@ -97,6 +100,7 @@ pub(crate) enum Write {
     RestartWriteFault {
         after_commit: bool,
     },
+    DiscardLegacy(RecoveryGraphHeader),
     RestartColdQuarantine {
         id: String,
         expected_revision: u64,
@@ -266,6 +270,13 @@ fn load(conn: &Connection, id: &str) -> Result<RecoveryManifestRecord, RecoveryP
     let (schema_version,committed,superseded,count,edge_count,edges):(u32,bool,bool,usize,usize,String)=conn.query_row(
         "SELECT schema_version,committed,superseded,member_count,edge_count,edges_json FROM recovery_manifests WHERE manifest_id=?1",[id],
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|_|CorruptManifest)?;
+    if schema_version != RECOVERY_SCHEMA_VERSION {
+        return Err(UnsupportedFormat);
+    }
+    let restart_format: Option<u32> = conn.query_row("SELECT t.format_version FROM restart_transactions t JOIN restart_components c USING(restart_id) WHERE c.manifest_id=?1", [id], |r| r.get(0)).optional().map_err(|_| CorruptManifest)?;
+    if restart_format.is_some_and(|v| v != restart::RESTART_FORMAT_VERSION) {
+        return Err(UnsupportedFormat);
+    }
     let edges: Vec<RecoveryEdge> = serde_json::from_str(&edges).map_err(|_| CorruptManifest)?;
     if edges.len() != edge_count {
         return Err(MissingEdge);
@@ -391,6 +402,10 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
     let result = (|| {
         let tx = conn.unchecked_transaction()?;
         let result = match command {
+            Write::DiscardLegacy(expected) => {
+                format::discard_legacy(&tx, &expected)?;
+                Written::Saved
+            }
             #[cfg(any(test, feature = "recovery-test-support"))]
             Write::RestartWriteFault { after_commit } => {
                 RESTART_WRITE_FAULT.with(|f| f.set(Some(after_commit)));
@@ -485,7 +500,7 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
     result
 }
 fn prepare(conn: &Connection, record: &RecoveryManifestRecord) -> Result<(), StorageError> {
-    if record.schema_version != 1
+    if record.schema_version != 2
         || record.committed
         || record.superseded
         || record.members.is_empty()

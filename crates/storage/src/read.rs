@@ -592,7 +592,6 @@ impl Database {
                 | EventKind::Compaction(_)
                 | EventKind::Orchestrator(_)
                 | EventKind::Diagnostic(_)
-                | EventKind::Ownership(_)
                 | EventKind::PullRequest(_)
                 | EventKind::ConversationPlan(_) => {
                     return Err(StorageError::Serialization(format!(

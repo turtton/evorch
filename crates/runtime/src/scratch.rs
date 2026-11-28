@@ -2,9 +2,9 @@
 //!
 //! A thread's root run and its descendants share one directory whose path
 //! depends only on the parent directory and the thread, so it survives
-//! restores and root rebinding. Its contents live only while this process
-//! owns the thread (ADR 0024): the ownership host empties it on claim and
-//! deletes it on release.
+//! restores and root rebinding. Normal input, Stop and planned restart retain
+//! its contents. Only an exclusive cold-start sweep or an authorized archive,
+//! retention or explicit disposal may detach them.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -38,7 +38,7 @@ pub(crate) fn scratch_note(dir: &Path) -> String {
 
 pub(crate) fn emptied_notice(dir: &Path) -> String {
     format!(
-        "[runtime temporary files] {} was emptied when this evorch process took ownership of the thread. Files saved there before are gone; recreate any you still need.",
+        "[runtime temporary files] {} was emptied during exclusive cold-start cleanup. Files saved there before are gone; recreate any you still need.",
         dir.display()
     )
 }
@@ -150,14 +150,13 @@ pub struct ThreadScratch {
 
 #[derive(Debug, Default)]
 struct State {
-    /// How many times an ownership transition emptied each directory.
+    /// How many times this process actually detached each scratch directory.
     resets: HashMap<String, u64>,
     /// The directory and reset count each run last observed.
     seen: HashMap<RunId, (String, u64)>,
     /// Unbound root-run directories, which no thread owner releases.
     run_dirs: HashSet<String>,
     usage: HashMap<ScratchKey, usage::Usage>,
-    leases: HashMap<String, crate::ownership::Lease>,
     archived: HashMap<String, u64>,
     archive_seen: HashMap<RunId, (String, u64)>,
     execution_keys: HashMap<(RunId, String), ScratchKey>,
@@ -193,7 +192,7 @@ impl ThreadScratch {
         self
     }
 
-    /// A private parent removed when this value drops, for runtimes without ownership.
+    /// A private parent removed when this value drops, for standalone runtimes.
     ///
     /// # Errors
     /// Propagates directory creation failures.
@@ -244,16 +243,19 @@ impl ThreadScratch {
         self.root.prepare(&name)
     }
 
-    /// Empty `thread_id`'s directory before this process starts using it as the owner.
+    /// Explicit reset for controlled cleanup/tests. Normal Send/Stop never call this.
     pub fn reset_thread(&self, thread_id: &str) {
         let name = thread_dir_name(thread_id);
         let mut state = self.lock();
-        self.discard(&name);
-        *state.resets.entry(name).or_default() += 1;
+        if self.discard(&name) {
+            let count = state.resets.entry(name).or_default();
+            *count = count.saturating_add(1);
+        }
     }
 
-    /// Delete `thread_id`'s directory after this process stops owning the thread.
-    pub fn release_thread(&self, thread_id: &str) {
+    /// Explicit test cleanup, not the production thread lifetime.
+    #[cfg(test)]
+    fn release_thread(&self, thread_id: &str) {
         let name = thread_dir_name(thread_id);
         let mut state = self.lock();
         self.discard(&name);
@@ -316,7 +318,10 @@ impl ThreadScratch {
     /// Delete directories nobody can still be using: discarded trees, threads
     /// outside `live_threads`, and unbound runs unless another process may be live.
     pub fn sweep(&self, live_threads: &HashSet<String>, other_process_may_be_live: bool) {
-        let _state = self.lock();
+        if other_process_may_be_live {
+            return;
+        }
+        let mut state = self.lock();
         if let Err(error) = self.root.purge_trash() {
             tracing::warn!(%error, parent = %self.parent().display(), "scratch trash sweep failed");
         }
@@ -337,8 +342,9 @@ impl ThreadScratch {
             } else {
                 !live.contains(&name)
             };
-            if unused {
-                self.discard(&name);
+            if unused && self.discard(&name) {
+                let count = state.resets.entry(name).or_default();
+                *count = count.saturating_add(1);
             }
         }
     }
@@ -355,9 +361,13 @@ impl ThreadScratch {
             && previous.is_none_or(|(seen, count)| seen != name || count < resets)
     }
 
-    fn discard(&self, name: &str) {
-        if let Err(error) = self.root.discard(name) {
-            tracing::warn!(%error, name, parent = %self.parent().display(), "scratch removal failed");
+    fn discard(&self, name: &str) -> bool {
+        match self.root.discard(name) {
+            Ok(removed) => removed,
+            Err(error) => {
+                tracing::warn!(%error, name, parent = %self.parent().display(), "scratch removal failed");
+                false
+            }
         }
     }
 
@@ -588,8 +598,8 @@ impl AgentRuntime {
         }
     }
 
-    /// Share thread scratch directories with an ownership host, which empties
-    /// and deletes them on ownership transitions (ADR 0024, ADR 0033).
+    /// Share the same scratch instance used by exclusive cold-start cleanup.
+    /// Normal starts, stops and planned restarts preserve thread scratch.
     pub fn set_thread_scratch(&self, scratch: Arc<ThreadScratch>) {
         *self
             .shared
@@ -782,6 +792,7 @@ mod tests {
             0o700
         );
         std::fs::write(dir.join("file"), "old").unwrap();
+        scratch.prepare(&key).unwrap();
         scratch.reset_thread("thread");
         assert!(!dir.exists());
         assert_eq!(scratch.prepare(&key).unwrap(), dir);
@@ -926,11 +937,13 @@ mod tests {
         let key = ScratchKey::Thread("thread".into());
         let (fresh, restored) = (RunId::new(1), RunId::new(2));
         assert!(!scratch.take_emptied_notice(&key, restored, true));
+        scratch.prepare(&key).unwrap();
         scratch.reset_thread("thread");
         assert!(!scratch.take_emptied_notice(&key, fresh, false));
         assert!(!scratch.take_emptied_notice(&key, fresh, true));
         assert!(scratch.take_emptied_notice(&key, restored, true));
         assert!(!scratch.take_emptied_notice(&key, restored, true));
+        scratch.prepare(&key).unwrap();
         scratch.reset_thread("thread");
         assert!(scratch.take_emptied_notice(&key, restored, true));
         let other = ScratchKey::Thread("other".into());
@@ -940,7 +953,7 @@ mod tests {
     // Given: thread, unbound-run and discarded directories / When: sweeping / Then: only
     // live threads stay, and run directories stay while another process may be live
     #[test]
-    fn sweep_keeps_only_directories_a_live_owner_may_use() {
+    fn sweep_requires_exclusion_and_preserves_protected_threads() {
         let base = tempfile::tempdir().unwrap();
         let scratch = ThreadScratch::at(base.path().join("scratch"));
         let live = scratch.prepare(&ScratchKey::Thread("live".into())).unwrap();
@@ -948,9 +961,9 @@ mod tests {
         let run = scratch.prepare(&ScratchKey::Run(RunId::new(9))).unwrap();
         let threads = HashSet::from(["live".to_owned()]);
         scratch.sweep(&threads, true);
-        assert!(live.exists() && run.exists() && !dead.exists());
+        assert!(live.exists() && run.exists() && dead.exists());
         scratch.sweep(&threads, false);
-        assert!(live.exists() && !run.exists());
+        assert!(live.exists() && !run.exists() && !dead.exists());
     }
 
     // Given: new and restored contexts / When: attaching a scratch / Then: new runs get a
@@ -996,3 +1009,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sweep_tests;

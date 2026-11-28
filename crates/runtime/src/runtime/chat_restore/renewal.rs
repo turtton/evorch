@@ -13,13 +13,6 @@ impl AgentRuntime {
             run_id: record.run_id.clone(),
             reason: RunRestoreFailure::UnsupportedConfig(reason),
         };
-        if let Some(permit) = &authority.ownership {
-            permit
-                .validate_generation()
-                .map_err(|_| RuntimeError::StaleOwnership {
-                    run_id: record.run_id.clone(),
-                })?;
-        }
         // Current callers reuse history, not the old execution or tool jobs.
         // Retain the authority/identity gates while reporting lost outcomes to
         // the next model turn instead of refusing the entire conversation.

@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 pub mod handoff;
 pub mod tools;
 
+pub const RESTART_FORMAT_VERSION: u32 = 2;
+
 pub const MAX_BUILTIN_TOOL_NAMES: usize = 4096;
 pub const MAX_BUILTIN_TOOL_NAME_BYTES: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,8 +59,6 @@ pub struct RestartExpectedMember {
     pub thread_id: Option<String>,
     pub intent_revision: u64,
     pub snapshot: Option<RunContextReceipt>,
-    pub owner_id: Option<String>,
-    pub owner_generation: Option<u64>,
     pub lane_id: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,20 +78,6 @@ pub struct RestartComponent {
     pub reason: Option<String>,
     pub revision: u64,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RestartOwnerProgress {
-    pub thread_id: String,
-    pub old_owner_id: String,
-    pub old_generation: u64,
-    pub active_runs: BTreeSet<String>,
-    pub parked_runs: BTreeSet<String>,
-    pub hold_saved: bool,
-    pub hold_read_back: bool,
-    pub worker_joined: bool,
-    pub socket_unlinked: bool,
-    pub hold_removed: bool,
-}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestartTransaction {
     pub metadata: RestartMetadata,
@@ -101,7 +87,6 @@ pub struct RestartTransaction {
     pub expected_digest: Option<String>,
     pub manifest_digest: Option<String>,
     pub components: Vec<RestartComponent>,
-    pub owner_progress: Vec<RestartOwnerProgress>,
     pub ticket_nonce_hash: Option<String>,
     pub adopted_epoch: Option<u64>,
     pub ready_at_ms: Option<u64>,
@@ -153,7 +138,6 @@ pub enum RestartMutation {
         config_identity: String,
         successor_build: String,
     },
-    OwnerProgress(RestartOwnerProgress),
     Dispose {
         manifest_id: String,
         expected_revision: u64,
@@ -276,6 +260,18 @@ pub(super) fn load(
     conn: &Connection,
     id: &str,
 ) -> Result<Option<RestartTransaction>, StorageError> {
+    let version: Option<u32> = conn
+        .query_row(
+            "SELECT format_version FROM restart_transactions WHERE restart_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match version {
+        None => return Ok(None),
+        Some(RESTART_FORMAT_VERSION) => {}
+        Some(_) => return Err(invalid("unsupported restart format")),
+    }
     let row=conn.query_row("SELECT metadata_json,revision,phase,expected_digest,manifest_digest,ticket_nonce_hash,adopted_epoch,ready_at_ms,failure_reason FROM restart_transactions WHERE restart_id=?1",[id],|r|Ok((r.get::<_,String>(0)?,r.get(1)?,r.get::<_,String>(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).optional()?;
     let Some((
         metadata,
@@ -341,15 +337,6 @@ pub(super) fn load(
             })
         })
         .collect::<Result<Vec<_>, StorageError>>()?;
-    let mut q = conn.prepare(
-        "SELECT progress_json FROM restart_owner_progress WHERE restart_id=?1 ORDER BY thread_id",
-    )?;
-    let owner_progress = q
-        .query_map([id], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|s| decode(&s))
-        .collect::<Result<_, _>>()?;
     Ok(Some(RestartTransaction {
         metadata: decode(&metadata)?,
         revision,
@@ -358,7 +345,6 @@ pub(super) fn load(
         expected_digest,
         manifest_digest,
         components,
-        owner_progress,
         ticket_nonce_hash,
         adopted_epoch,
         ready_at_ms,
@@ -403,7 +389,7 @@ pub(super) fn mutate(
             return Err(invalid("previous adopted restart has pending components"));
         }
         exact_json(&encode(&m)?)?;
-        conn.execute("INSERT INTO restart_transactions(restart_id,capture_id,revision,phase,metadata_json,old_builtin_tool_names_json,old_compiled_catalog_fingerprint,new_compiled_catalog_fingerprint,old_effective_tools_fingerprint,new_effective_tools_fingerprint) VALUES(?1,?2,0,'preparing',?3,?4,?5,?6,?7,?8)",params![id,m.capture_id,encode(&m)?,encode(&m.old_builtin_tool_names)?,m.old_compiled_catalog_fingerprint,m.new_compiled_catalog_fingerprint,m.old_effective_tools_fingerprint,m.new_effective_tools_fingerprint])?;
+        conn.execute("INSERT INTO restart_transactions(restart_id,capture_id,format_version,revision,phase,metadata_json,old_builtin_tool_names_json,old_compiled_catalog_fingerprint,new_compiled_catalog_fingerprint,old_effective_tools_fingerprint,new_effective_tools_fingerprint) VALUES(?1,?2,2,0,'preparing',?3,?4,?5,?6,?7,?8)",params![id,m.capture_id,encode(&m)?,encode(&m.old_builtin_tool_names)?,m.old_compiled_catalog_fingerprint,m.new_compiled_catalog_fingerprint,m.old_effective_tools_fingerprint,m.new_effective_tools_fingerprint])?;
         return load(conn, id)?.ok_or_else(|| invalid("restart create missing"));
     }
     let mut tx = load(conn, id)?.ok_or_else(|| invalid("missing restart transaction"))?;
@@ -551,59 +537,6 @@ pub(super) fn mutate(
                 params![id, successor_epoch],
             )?;
             tx.phase = RestartPhase::Adopted;
-        }
-        RestartMutation::OwnerProgress(p) => {
-            if !matches!(
-                tx.phase,
-                RestartPhase::Committed
-                    | RestartPhase::Armed
-                    | RestartPhase::Adopted
-                    | RestartPhase::Invalidated
-            ) {
-                return Err(invalid("owner progress outside handoff"));
-            }
-            if p.thread_id.is_empty()
-                || p.old_owner_id.is_empty()
-                || p.old_generation == 0
-                || (p.hold_read_back && !p.hold_saved)
-                || (p.worker_joined && !p.hold_read_back)
-                || (p.socket_unlinked && !p.worker_joined)
-                || (p.hold_removed && !p.hold_saved)
-            {
-                return Err(invalid("invalid owner progress ordering"));
-            }
-            if !p.active_runs.is_disjoint(&p.parked_runs)
-                || p.active_runs.union(&p.parked_runs).any(|id| {
-                    !tx.expected.iter().any(|e| {
-                        e.run_id == *id
-                            && e.thread_id.as_deref() == Some(&p.thread_id)
-                            && e.owner_id
-                                .as_deref()
-                                .is_none_or(|owner| owner == p.old_owner_id)
-                            && e.owner_generation.is_none_or(|g| g == p.old_generation)
-                    })
-                })
-            {
-                return Err(invalid("owner progress membership mismatch"));
-            }
-            if let Some(old) = tx
-                .owner_progress
-                .iter()
-                .find(|o| o.thread_id == p.thread_id)
-                && (old.old_owner_id != p.old_owner_id
-                    || old.old_generation != p.old_generation
-                    || old.active_runs != p.active_runs
-                    || old.parked_runs != p.parked_runs
-                    || (old.hold_saved && !p.hold_saved)
-                    || (old.hold_read_back && !p.hold_read_back)
-                    || (old.worker_joined && !p.worker_joined)
-                    || (old.socket_unlinked && !p.socket_unlinked)
-                    || (old.hold_removed && !p.hold_removed))
-            {
-                return Err(invalid("owner progress regressed"));
-            }
-            exact_json(&encode(&p)?)?;
-            conn.execute("INSERT INTO restart_owner_progress VALUES(?1,?2,?3) ON CONFLICT(restart_id,thread_id) DO UPDATE SET progress_json=excluded.progress_json",params![id,p.thread_id,encode(&p)?])?;
         }
         RestartMutation::Dispose {
             manifest_id,

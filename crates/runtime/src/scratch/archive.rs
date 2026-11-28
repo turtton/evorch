@@ -186,3 +186,86 @@ pub(crate) fn serve(
         }
     }
 }
+
+/// Construct the real archive authority from the existing root writer lease and
+/// bidirectional retention binding check. Unbound is safe under the root writer
+/// lease; mismatched binding retains scratch and is diagnosed.
+/// The captured Arc keeps writer authority alive through the last worker attempt.
+pub fn authority(
+    storage: storage::StorageConfig,
+    root: std::path::PathBuf,
+    sidebar: std::path::PathBuf,
+    leases: Arc<storage::maintenance::writer_leases::WriterLeases>,
+    scratch: Arc<ThreadScratch>,
+) -> Arc<ArchiveAttempt> {
+    let context = ScratchAuthority {
+        leases,
+        root,
+        sidebar,
+    };
+    Arc::new(move |thread, checker, tombstones| {
+        let attempt = || -> Result<bool, Box<dyn std::error::Error>> {
+            if !context.validate(&storage.db_path)? {
+                return Ok(false);
+            }
+            let Some(epoch) = scratch.archive_snapshot(thread) else {
+                return Ok(false);
+            };
+            let deleted = tombstones.is_some_and(|guard| guard.check_thread(thread).is_err());
+            if !deleted {
+                let Some(checker) = checker else {
+                    return Ok(false);
+                };
+                if !checker(thread)? {
+                    return Ok(true);
+                }
+            }
+            // The epoch and every run/shell user are checked again under the
+            // publication gate, immediately before detaching this one namespace.
+            let result = scratch.detach_archived(thread, epoch)?;
+            if result == Some(true) {
+                scratch.wake_trash()?;
+            }
+            Ok(result.is_some())
+        };
+        attempt().map_err(|error| ArchiveError {
+            contention: false,
+            detail: error.to_string(),
+        })
+    })
+}
+
+/// Process-local composition of existing leases and canonical binding paths.
+/// This is not a registry, nor serialized execution authority.
+pub(crate) struct ScratchAuthority {
+    pub(crate) leases: Arc<storage::maintenance::writer_leases::WriterLeases>,
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) sidebar: std::path::PathBuf,
+}
+impl ScratchAuthority {
+    pub(crate) fn validate(&self, db_path: &std::path::Path) -> io::Result<bool> {
+        let Some(authority) = self.leases.authority() else {
+            return Ok(false);
+        };
+        authority
+            .validate(db_path, &self.root)
+            .map_err(io::Error::other)?;
+        let db = storage::Database::open_read_only(db_path).map_err(io::Error::other)?;
+        let binding = crate::thread_retention::check_binding(
+            &db,
+            crate::thread_retention::BindingPaths {
+                ownership_root: &self.root,
+                sidebar_path: &self.sidebar,
+            },
+        )
+        .map_err(io::Error::other)?;
+        match binding {
+            crate::thread_retention::BindingStatus::Mismatch(reason) => {
+                tracing::warn!(%reason, "scratch cleanup retained: retention binding mismatch");
+                Ok(false)
+            }
+            crate::thread_retention::BindingStatus::Bound
+            | crate::thread_retention::BindingStatus::Unbound => Ok(true),
+        }
+    }
+}

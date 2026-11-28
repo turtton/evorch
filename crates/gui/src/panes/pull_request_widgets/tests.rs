@@ -5,7 +5,6 @@ fn input(limit: u32, used: u32, limit_reached: bool) -> AutoFixInput<'static> {
     AutoFixInput {
         thread: "t1",
         link_revision: 4,
-        tracked: true,
         open: true,
         failing: true,
         checks_pending: false,
@@ -60,19 +59,6 @@ fn the_limit_stop_is_what_the_owner_says_not_a_count_reached() {
     let running = auto_fix_controls_of(&running, 0);
     assert!(running.reset.is_none());
     assert_eq!(chip_texts(&running), ["0 left"]);
-}
-
-#[test]
-fn a_view_without_tracking_offers_nothing_to_press() {
-    let mut untracked = input(3, 3, true);
-    untracked.tracked = false;
-    let controls = auto_fix_controls_of(&untracked, 0);
-    assert!(!controls.toggle.enabled);
-    assert!(!controls.send.enabled);
-    assert_eq!(
-        controls.reset.map(|reset| reset.hover),
-        Some("Not tracked in this window".to_owned())
-    );
 }
 
 #[test]

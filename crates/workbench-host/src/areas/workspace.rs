@@ -26,7 +26,6 @@ use crate::bootstrap::BootstrapError;
 use crate::queries::{Pager, revision};
 pub(crate) use online_retention::OnlineSnapshot;
 use runtime::AgentRuntime;
-use runtime::ownership::Registry;
 use runtime::thread_retention::{
     BindingPaths, StartupPaths, ThreadRetention, check_binding, startup_input,
 };
@@ -1458,15 +1457,15 @@ fn retention_block(block: BlockReason) -> RetentionBlock {
         BlockReason::FamilyMemberNotDue(thread) => RetentionBlock::FamilyMemberNotDue { thread },
         BlockReason::FamilyMemberBlocked(thread) => RetentionBlock::FamilyMemberBlocked { thread },
         BlockReason::FamilyUnresolved(thread) => RetentionBlock::FamilyUnresolved { thread },
-        BlockReason::Owner(reason)
+        BlockReason::SafetyHold(reason)
             if reason == runtime::thread_retention::BINDING_MISMATCH_BLOCK =>
         {
             RetentionBlock::BindingMismatch
         }
-        BlockReason::Owner(reason) if reason == RECOVERY_CLAIM_PENDING => {
+        BlockReason::SafetyHold(reason) if reason == RECOVERY_CLAIM_PENDING => {
             RetentionBlock::Recovery { reason }
         }
-        BlockReason::Owner(reason) => RetentionBlock::Owner { reason },
+        BlockReason::SafetyHold(reason) => RetentionBlock::SafetyHold { reason },
         BlockReason::Exploring => RetentionBlock::Exploring,
         BlockReason::OverBudget => RetentionBlock::OverBudget,
     }
@@ -1521,16 +1520,8 @@ pub fn retention_entries(
         },
     )
     .map_err(|e| error(&e))?;
-    // No registry yet means no owner holds anything.
-    let registry = Registry::open_readonly(&source.ownership_root.join("owners.db")).ok();
-    let statuses = ThreadRetention::schedule(
-        database,
-        &input,
-        &source.policy,
-        &binding,
-        registry.as_ref(),
-    )
-    .map_err(|e| error(&e))?;
+    let statuses = ThreadRetention::schedule(database, &input, &source.policy, &binding)
+        .map_err(|e| error(&e))?;
     let mut entries = Vec::new();
     for (thread, status) in statuses {
         if let Ok(thread) = WireThread::new(thread) {

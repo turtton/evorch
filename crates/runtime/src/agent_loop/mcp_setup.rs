@@ -55,62 +55,26 @@ impl LoopState {
             }
             return true;
         };
-        // Discovery is part of the owned turn: a GUI/core handoff must not
-        // overlap process launch or credentials with the succeeding owner.
-        if let Some(permit) = self.task.config.ownership.clone() {
-            let result = if self.owner_turn_open {
-                self.validate_owner_mutation().await
-            } else {
-                self.await_ownership(
-                    permit.begin_turn_off_thread(self.ownership_retry(), self.interrupt_probe()),
-                )
-                .await
-            };
-            if let Err(error) = result {
-                self.finish_owner_error("MCP preparation", error);
-                return false;
-            }
-            self.owner_turn_open = true;
-        }
         let cancel = CancelContext::default();
         let token = cancel.clone();
-        let fenced = Arc::new(CancelContext::default());
-        if let Some(permit) = &self.task.config.ownership {
-            crate::ownership::authority::watch_mcp(permit, &fenced);
-        }
         let (registered, lease) = tokio::sync::oneshot::channel::<Arc<crate::mcp::RunMcpLease>>();
-        let thread_id = self.thread_id.clone();
-        let bus = self.shared.bus.clone();
         let mut interrupts = self.channels.cancel_rx.clone();
         let bridge = tokio::spawn(async move {
-            let ownership_lost = loop {
+            loop {
                 if interrupts.borrow().kind().is_some() {
-                    break false;
+                    break;
                 }
-                tokio::select! {
-                    _ = fenced.cancelled() => break true,
-                    changed = interrupts.changed() => if changed.is_err() { break false; },
+                if interrupts.changed().await.is_err() {
+                    break;
                 }
-            };
+            }
             token.cancel();
-            // Fencing can occur while Waiting, without another loop turn.
+            // Stop can occur while Waiting, without another loop turn.
             // Close HTTP sessions and await stdio reap rather than just cancel I/O.
             if let Ok(lease) = lease.await {
                 lease
                     .shutdown(tools::mcp::transport::ShutdownReason::Cancelled)
                     .await;
-                if ownership_lost {
-                    // Administrative completion, not a mutation of the fenced run.
-                    bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
-                        source: "mcp".into(),
-                        severity: event_bus::DiagnosticSeverity::Info,
-                        code: event_bus::event::diagnostic_codes::MCP_OWNER_DRAINED.into(),
-                        detail: "Previous owner's MCP sessions drained".into(),
-                        run_id: None,
-                        thread_id,
-                        call_id: None,
-                    }));
-                }
             }
         });
         self.mcp_cancellation = Some(RunMcpCancellation {

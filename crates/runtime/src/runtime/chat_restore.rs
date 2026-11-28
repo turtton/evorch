@@ -126,7 +126,6 @@ impl AgentRuntime {
         &self,
         run: RunId,
         execution: &Arc<ExecutionControl>,
-        ownership: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<(), RuntimeError> {
         execution.commit_resume(run, || {
             if !Arc::ptr_eq(execution, &self.execution_snapshot(run)?) {
@@ -134,7 +133,7 @@ impl AgentRuntime {
                     run_id: run.to_string(),
                 });
             }
-            self.explicitly_resume_lane_delivery(run, ownership)?;
+            self.explicitly_resume_lane_delivery(run)?;
             self.lift_operator_stops(run);
             Ok(())
         })
@@ -224,7 +223,6 @@ impl AgentRuntime {
         after_stop: Option<ResumeFence>,
     ) -> Result<RunId, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
-        let resume_ownership = authority.ownership.clone();
         let update = match &continuation {
             ChatContinuation::Followup(_, update) => update.clone(),
             _ => crate::ModelPreferenceUpdate::Keep,
@@ -329,11 +327,7 @@ impl AgentRuntime {
         ) {
             let Some(prompt) = prompt else {
                 if operator_resume {
-                    self.commit_chat_resume(
-                        run_id,
-                        &self.execution_snapshot(run_id)?,
-                        resume_ownership.as_ref(),
-                    )?;
+                    self.commit_chat_resume(run_id, &self.execution_snapshot(run_id)?)?;
                 }
                 return Ok(run_id);
             };
@@ -351,11 +345,7 @@ impl AgentRuntime {
                 update,
             )?;
             if operator_resume {
-                self.commit_chat_resume(
-                    run_id,
-                    &self.execution_snapshot(run_id)?,
-                    resume_ownership.as_ref(),
-                )?;
+                self.commit_chat_resume(run_id, &self.execution_snapshot(run_id)?)?;
             }
             return Ok(run_id);
         }
@@ -491,19 +481,10 @@ impl AgentRuntime {
                 (None, None) => None,
             }
         });
-        if let Some(pending) = &pending_handoff {
-            let child = event_bus::escalation_thread_id(&run_id.to_string());
-            if role != Role::Orchestrator
-                || authority
-                    .ownership
-                    .as_ref()
-                    .is_some_and(|permit| permit.thread_id != child)
-                || (pending.requires_ownership && authority.ownership.is_none())
-            {
-                return Err(fail(RunRestoreFailure::UnsupportedConfig(
-                    "current child-thread ownership is required to retry escalation".into(),
-                )));
-            }
+        if pending_handoff.is_some() && role != Role::Orchestrator {
+            return Err(fail(RunRestoreFailure::UnsupportedConfig(
+                "handoff requires orchestrator role".into(),
+            )));
         }
         if let (Some(prompt), Some(sent)) = (prompt, sent) {
             // Save accepted human input even when no provider is registered.
@@ -612,12 +593,6 @@ impl AgentRuntime {
             let reference = prompt
                 .and(pending_reference.as_ref())
                 .map(|p| p.reference_id.as_str());
-            let _recovery_authority = recovery_continue
-                .as_ref()
-                .and(authority.ownership.as_ref())
-                .map(|permit| permit.mutation_guard())
-                .transpose()
-                .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
             let (saved, reconciled) = if let Some(recovery) = &recovery_continue {
                 store.handle.save_recovery_continue(
                     &write,
@@ -760,12 +735,6 @@ impl AgentRuntime {
         // Resuming the root is the operator's go-ahead for the tree they
         // stopped. A wake requested by the runtime is not.
         if operator_resume {
-            let _authority = config
-                .ownership
-                .as_ref()
-                .map(|p| p.mutation_guard())
-                .transpose()
-                .map_err(|e| fail(RunRestoreFailure::UnsupportedConfig(e.to_string())))?;
             // Recovery also uses resume_chat. Only a new trusted human prompt
             // may lift a handoff's durable pre-start cancellation here; the
             // dedicated stopped-lane API lifts a stop before scheduling a resume.
@@ -791,7 +760,7 @@ impl AgentRuntime {
             self.execution_hook(super::cancellation::HookPoint::ResumeRegistered, &execution);
         }
         if operator_resume {
-            self.commit_chat_resume(run_id, &admission.execution, resume_ownership.as_ref())?;
+            self.commit_chat_resume(run_id, &admission.execution)?;
         }
         Ok(admission.run)
     }
@@ -1298,7 +1267,7 @@ impl AgentRuntime {
         store: &crate::run_store::RunStore,
         seed: &crate::restore::ChatForkSeed,
         role: Role,
-        authority: &RunConfig,
+        _authority: &RunConfig,
     ) -> Result<RestoredState, RuntimeError> {
         let fail = |reason| RuntimeError::RunRestoreFailed {
             run_id: seed.source_run_id.clone(),
@@ -1306,13 +1275,7 @@ impl AgentRuntime {
         };
         self.deny_deleted_run(&seed.source_run_id)
             .map_err(|deleted| fail(RunRestoreFailure::ThreadDeleted(deleted)))?;
-        if let Some(permit) = &authority.ownership {
-            permit
-                .validate_generation()
-                .map_err(|_| RuntimeError::StaleOwnership {
-                    run_id: seed.source_run_id.clone(),
-                })?;
-        }
+
         let source = crate::meta::parse_run_id(&seed.source_run_id)
             .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         let record = store

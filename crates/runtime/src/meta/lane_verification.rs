@@ -151,18 +151,8 @@ pub(super) fn submit(state: &LoopState, runtime: &AgentRuntime, input: Value) ->
         return failure(operation(LaneOperationError::VerificationRejected));
     }
     if let Err(e) = runtime.validate_run_mutation(state.caller_run_id()) {
-        return failure(crate::lanes::LaneError::new("ownership_lost", e));
+        return failure(crate::lanes::LaneError::new("reviewer_incomplete", e));
     }
-    let _guard = match state
-        .run_config()
-        .ownership
-        .as_ref()
-        .map(|p| p.mutation_guard())
-        .transpose()
-    {
-        Ok(g) => g,
-        Err(_) => return failure(operation(LaneOperationError::OwnershipLost)),
-    };
     let Some(store) = runtime.shared.run_store.get() else {
         return failure(crate::lanes::LaneError::new(
             "storage_unavailable",

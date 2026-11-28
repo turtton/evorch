@@ -73,13 +73,8 @@ async fn the_review_reads_stored_facts_with_their_freshness() {
     let fresh = linked(process.service.snapshot_for_review("r1").await.unwrap());
     world.clock.advance(61);
     let old = linked(process.service.snapshot_for_review("r1").await.unwrap());
-    let permit = process.permit("t1");
     let revision = process.state("t1").lifecycle_revision;
-    process
-        .service
-        .unlink("t1", revision, &permit)
-        .await
-        .unwrap();
+    process.service.unlink("t1", revision).await.unwrap();
     let gone = process.service.snapshot_for_review("r1").await.unwrap();
 
     assert_eq!(fresh.freshness, Freshness::Fresh);
@@ -166,23 +161,4 @@ async fn a_failed_refresh_hands_over_stale_facts() {
         review.facts.is_some(),
         "the last good facts are still there"
     );
-}
-
-// Given: a thread this process does not own / When: the review refreshes / Then: nothing is
-// fetched and the facts are handed over as stored
-#[tokio::test(start_paused = true)]
-async fn a_process_that_does_not_own_the_thread_does_not_fetch_for_the_review() {
-    let world = World::new();
-    let process = world.process(enabled());
-    process.environment.bind("r1", "t1");
-    process.link_directly("t1", 1);
-
-    let supply = process.service.refresh_for_review("r1").await.unwrap();
-
-    assert_eq!(supply.refresh, ReviewRefresh::NotOwner);
-    assert_eq!(
-        linked(supply.lookup).freshness,
-        Freshness::Stale(StaleReason::NoFacts)
-    );
-    assert!(process.source.calls().is_empty());
 }

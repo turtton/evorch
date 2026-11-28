@@ -1,78 +1,58 @@
 use workbench_host::admin::*;
-fn owner() -> RetainedOwner<'static> {
-    RetainedOwner {
-        retained_identity: "self",
-        retained_generation: 7,
-        current_identity: Some("self"),
-        current_generation: Some(7),
+fn facts(thread_count: usize) -> GraphDisposalFacts {
+    GraphDisposalFacts {
+        verified_live_adoption: true,
+        thread_count,
+        resume_committed: false,
+        disposal_complete: false,
+        revocation: RevocationObservation::NotApplied,
     }
 }
 #[test]
-fn undisposed_requires_all_retained_threads_and_includes_manual_and_over_limit() {
+fn undisposed_covers_every_adopted_thread_and_includes_manual_and_over_limit() {
     for n in [1, 2, 64, 65] {
-        let owners = vec![owner(); n];
-        let g = GraphOwnership {
-            verified_live_adoption: true,
-            owners: &owners,
-            resume_committed: false,
-            disposal_complete: false,
-            revocation: RevocationObservation::NotApplied,
-        };
-        assert!(is_undisposed(&g, "self")); // ManualPending/CleanupPending do not exclude.
-        assert!(!is_undisposed(&g, "foreign"));
-        assert!(!is_incomplete_disposal(&g, "self"));
+        let g = facts(n);
+        assert!(g.is_undisposed()); // ManualPending/CleanupPending do not exclude.
+        assert!(!g.is_incomplete_disposal());
         for changed in [
-            GraphOwnership {
+            GraphDisposalFacts {
                 verified_live_adoption: false,
                 ..g.clone()
             },
-            GraphOwnership {
+            GraphDisposalFacts {
                 resume_committed: true,
                 ..g.clone()
             },
-            GraphOwnership {
+            GraphDisposalFacts {
                 disposal_complete: true,
                 ..g.clone()
             },
         ] {
-            assert!(!is_undisposed(&changed, "self"));
+            assert!(!changed.is_undisposed());
         }
     }
-    let mut owners = vec![owner(), owner()];
-    owners[1].current_generation = Some(8);
-    let mut g = GraphOwnership {
-        verified_live_adoption: true,
-        owners: &owners,
-        resume_committed: false,
-        disposal_complete: false,
-        revocation: RevocationObservation::NotApplied,
-    };
-    assert!(!is_undisposed(&g, "self"));
-    assert!(!is_incomplete_disposal(&g, "self"));
-    g.revocation = RevocationObservation::Confirmed;
-    assert!(!is_undisposed(&g, "self"));
-    assert!(is_incomplete_disposal(&g, "self"));
+    let mut g = facts(2);
+    // An unknown revocation outcome still blocks: it may not have been applied.
     g.revocation = RevocationObservation::Unknown;
-    assert!(is_undisposed(&g, "self"));
-    assert!(!is_incomplete_disposal(&g, "self"));
-    let mut foreign = owner();
-    foreign.retained_identity = "foreign";
-    let absent = RetainedOwner {
-        current_identity: None,
-        current_generation: None,
-        ..owner()
-    };
-    for row in [foreign, absent] {
-        let rows = [row];
-        let g = GraphOwnership {
-            owners: &rows,
+    assert!(g.is_undisposed());
+    assert!(!g.is_incomplete_disposal());
+    // A confirmed revocation leaves only physical cleanup: a warning, not a blocker.
+    g.revocation = RevocationObservation::Confirmed;
+    assert!(!g.is_undisposed());
+    assert!(g.is_incomplete_disposal());
+    g.disposal_complete = true;
+    assert!(!g.is_undisposed());
+    assert!(!g.is_incomplete_disposal());
+    // A graph without a thread is never listed.
+    let empty = facts(0);
+    assert!(!empty.is_undisposed());
+    assert!(
+        !GraphDisposalFacts {
             revocation: RevocationObservation::Confirmed,
-            ..g.clone()
-        };
-        assert!(!is_undisposed(&g, "self"));
-    }
-    let empty = GraphOwnership { owners: &[], ..g };
-    assert!(!is_undisposed(&empty, "self"));
+            ..empty
+        }
+        .is_incomplete_disposal()
+    );
 }
 #[test]
 fn opaque_graph_and_thread_refs_are_stable_domain_separated_and_path_free() {

@@ -6,7 +6,7 @@
 //! never observed here; a Reviewer record may be attached for reference. Closing does
 //! not stop a run, delete a thread or worktree, or detach the lane.
 use crate::lane_management::LaneHumanContext;
-use crate::lane_verification::{operation, storage_error};
+use crate::lane_verification::storage_error;
 use crate::lanes::LaneError;
 use crate::runtime::questions::routing::LaneQuestionBindingSource;
 use crate::{AgentRuntime, RunId};
@@ -79,7 +79,7 @@ impl AgentRuntime {
     ///
     /// # Errors
     /// `not_current_lead`, `not_attached`, `stale_management`, `stale_ready`,
-    /// `stale_brief`, `stale_request`, `invalid_input`, `ownership_lost` and storage failures.
+    /// `stale_brief`, `stale_request`, `invalid_input` and storage failures.
     pub fn close_lane(
         &self,
         caller: RunId,
@@ -87,7 +87,7 @@ impl AgentRuntime {
     ) -> Result<LaneCloseResult, LaneError> {
         self.require_manual_resume_open()
             .map_err(|e| LaneError::new("restart_busy", e.to_string()))?;
-        let (lead, config, _) = self.verification_lead(caller, &request.lane_id)?;
+        let (lead, _, _) = self.verification_lead(caller, &request.lane_id)?;
         let store = self.verification_store()?;
         let lane_id = request.lane_id.clone();
         // A Stop or restart that replaced the lead's root after the authorization above is
@@ -98,12 +98,6 @@ impl AgentRuntime {
             hook();
         }
         let _manual = self.lane_close_restart_gate()?;
-        let guard = config
-            .ownership
-            .as_ref()
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|_| operation(LaneOperationError::OwnershipLost))?;
         let result = store
             .handle
             .close_lane(CloseLane {
@@ -124,15 +118,13 @@ impl AgentRuntime {
                 let error = storage_error(error);
                 with_current_revisions(store, &lane_id, error)
             })?;
-        drop(guard);
         self.announce_lane_closed(store, &result);
         LaneQuestionBindingSource::schedule_lane_question_delivery(self, &lead);
         Ok(result)
     }
 
     /// Trusted human ingress only: reachable from a host command, never from an agent
-    /// tool, MCP or dispatch. `permits` are resolved by the host for the lane and its
-    /// lead, as for `manage_lane_from_host`.
+    /// tool, MCP or dispatch.
     ///
     /// The result is recorded as `human_closed` or `discarded`, distinct from a lead
     /// close, and ends the ledger entry only.
@@ -143,15 +135,9 @@ impl AgentRuntime {
         &self,
         _: LaneHumanContext,
         request: HumanLaneCloseRequest,
-        permits: &[crate::ownership::OwnerPermit],
     ) -> Result<LaneCloseResult, LaneError> {
         let _manual = self.lane_close_restart_gate()?;
         let store = self.verification_store()?;
-        let host_authority = permits
-            .iter()
-            .map(|permit| permit.mutation_guard())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| operation(LaneOperationError::OwnershipLost))?;
         let result = store
             .handle
             .close_lane(CloseLane {
@@ -173,7 +159,6 @@ impl AgentRuntime {
                 at_ns: crate::run_store::review_time_ns(),
             })
             .map_err(storage_error)?;
-        drop(host_authority);
         self.announce_lane_closed(store, &result);
         if let Ok(Some(lane)) = store.handle.lane(&request.lane_id)
             && let Some(lead) = lane.lead_thread_id

@@ -2,9 +2,7 @@
 //! scratch sweep, credential backend, provider, MCP or producer runs here.
 use super::{BootstrapError, BootstrapOptions, components};
 use event_bus::EventBus;
-use runtime::{
-    AgentRuntime, RunStore, WorkspaceSeam, compose::StartupRuntime, ownership::OwnerHost,
-};
+use runtime::{AgentRuntime, RunStore, WorkspaceSeam, compose::StartupRuntime};
 use std::{sync::Arc, time::Duration};
 
 pub struct PlannedStorage {
@@ -18,17 +16,14 @@ pub struct PlannedStorage {
     pub(super) bus: Arc<EventBus>,
     pub(super) collector: Arc<super::recovery_disposal::LiveGraphCollector>,
 }
-/// Constructible only after proof-backed Adopt and a full inventory claim pass.
-/// Blocked threads are retained, never taken by an ordinary claim fallback.
-pub struct ClaimedBootstrap {
+/// Constructible only after proof-backed Adopt and transaction/epoch validation.
+pub struct AdoptedBootstrap {
     pub(super) storage: PlannedStorage,
-    pub(super) owner: Arc<OwnerHost>,
     pub(super) scratch: Arc<runtime::scratch::ThreadScratch>,
     pub(super) scratch_archive: Arc<runtime::scratch::archive::ArchiveService>,
-    pub blocked_threads: Vec<String>,
     successor_epoch: u64,
 }
-impl ClaimedBootstrap {
+impl AdoptedBootstrap {
     /// The epoch the adopted transaction fixed for this successor; the host
     /// composed from this claim starts its projection (hello, cursors) at it.
     pub fn successor_epoch(&self) -> u64 {
@@ -55,6 +50,7 @@ impl PlannedStorage {
             read_env: false,
             ..Default::default()
         })?;
+        super::prepare_state_root(&options.ownership_root)?;
         let db = options.config_dir.join("evorch-events.db");
         let root = options.ownership_root.clone();
         let (writer_leases, leases) = tokio::task::spawn_blocking(move || {
@@ -83,10 +79,7 @@ impl PlannedStorage {
         seed.runtime()
             .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))
             .map_err(|_| "startup tombstone guard already set")?;
-        let collector = super::recovery_disposal::LiveGraphCollector::new(
-            seed.runtime(),
-            storage_config.clone(),
-        );
+        let collector = super::recovery_disposal::LiveGraphCollector::new(storage_config.clone());
         seed.runtime().install_graph_observer(collector.clone())?;
         Ok(Self {
             collector,
@@ -109,17 +102,7 @@ impl PlannedStorage {
     pub fn database(&self) -> &storage::StorageConfig {
         &self.storage_config
     }
-    pub fn claim(self, restart_id: &str) -> Result<ClaimedBootstrap, BootstrapError> {
-        self.claim_with_progress(restart_id, || {})
-    }
-    /// Called after the first successful limited claim (never an ordinary claim).
-    pub fn claim_with_progress(
-        self,
-        restart_id: &str,
-        first_claim: impl FnOnce(),
-    ) -> Result<ClaimedBootstrap, BootstrapError> {
-        // Mint evidence before even opening an owner worker.
-        let evidence = self.runtime().adopted_restart_ownership_evidence()?;
+    pub fn prepare_adopted(self, restart_id: &str) -> Result<AdoptedBootstrap, BootstrapError> {
         let tx = self.runtime().adopted_restart_transaction()?;
         if tx.metadata.restart_id != restart_id {
             return Err("adopted transaction mismatch".into());
@@ -134,36 +117,31 @@ impl PlannedStorage {
         let scratch = Arc::new(runtime::scratch::ThreadScratch::for_ownership_root(
             &self.options.ownership_root,
         )?);
-        let owner = Arc::new(OwnerHost::open_with_shared_scratch(
-            &self.options.ownership_root,
-            self.config.ownership.clone(),
-            self.bus.clone(),
-            false,
-            Some(scratch.clone()),
-        )?);
         let guard = self
             .runtime()
             .tombstone_guard()
             .ok_or("startup tombstone guard missing")?;
-        owner
-            .set_tombstone_guard(guard.clone())
-            .map_err(|_| "owner guard already set")?;
         let scratch_archive = Arc::new(runtime::scratch::archive::ArchiveService::new(
             &scratch,
-            owner.scratch_archive_authority(),
+            runtime::scratch::archive::authority(
+                self.storage_config.clone(),
+                self.options.ownership_root.clone(),
+                self.options.config_dir.join("sidebar.json"),
+                self.writer_leases.clone(),
+                scratch.clone(),
+            ),
         )?);
         scratch_archive.set_guard(guard);
-        let report =
-            self.runtime()
-                .claim_physical_bootstrap_owners(&owner, evidence, first_claim)?;
-        let blocked_threads = report.blocked_threads;
         self.runtime().set_thread_scratch(scratch.clone());
-        Ok(ClaimedBootstrap {
+        self.runtime().set_disposal_context(
+            self.writer_leases.clone(),
+            self.options.ownership_root.clone(),
+            self.options.config_dir.join("sidebar.json"),
+        );
+        Ok(AdoptedBootstrap {
             storage: self,
-            owner,
             scratch,
             scratch_archive,
-            blocked_threads,
             successor_epoch,
         })
     }

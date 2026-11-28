@@ -164,49 +164,15 @@ impl AgentRuntime {
             let role = Role::from_name(&descriptor.role)
                 .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
             self.reject_nested_orchestrator(&record, &descriptor)?;
-            // Only a direct parent renews execution authority, with its own
-            // current permit. Any other sender restores strictly from disk.
-            let parent_authority = (parent == Some(sender)).then(|| {
-                lock_runs(&self.shared.runs)
-                    .get(&sender)
-                    .and_then(|entry| entry.config.ownership.clone())
-            });
-            let (mut restored, ownership) = match parent_authority {
-                Some(permit) => {
-                    let restored =
-                        self.renewed_child_state(&bundle, &descriptor, permit.as_ref())?;
-                    let renewed = !(record.restorable && descriptor.restorable);
-                    (restored, permit.filter(|_| renewed))
+            // Owner-free current and ownership-only legacy snapshots follow the
+            // same disk path. Never rebuild team/root authority from the recipe.
+            let mut restored = match self.renewed_child_state(&bundle, &descriptor) {
+                Ok(restored) => restored,
+                Err(_) if from_child => {
+                    return self.hold_queued_for_parent(sender, recipient, queued);
                 }
-                None => {
-                    let disk = if !record.restorable || !descriptor.restorable {
-                        Err(fail(RunRestoreFailure::UnsupportedConfig(
-                            descriptor
-                                .non_restorable_reason
-                                .clone()
-                                .unwrap_or_else(|| "実行設定".into()),
-                        )))
-                    } else {
-                        RestoredState::from_bundle(&bundle)
-                    };
-                    match disk {
-                        Ok(restored) => (restored, None),
-                        // Disk alone cannot continue the parent: keep the report
-                        // and let the parent be woken under current authority.
-                        Err(_) if from_child => {
-                            return self.hold_queued_for_parent(sender, recipient, queued);
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
+                Err(error) => return Err(error),
             };
-            let _authority = ownership
-                .as_ref()
-                .map(crate::ownership::OwnerPermit::mutation_guard)
-                .transpose()
-                .map_err(|_| RuntimeError::StaleOwnership {
-                    run_id: recipient.to_string(),
-                })?;
             self.reserve_restored_shell_handles(recipient, &restored)?;
             descriptor.restorable = false;
             descriptor.non_restorable_reason = Some("snapshot_consumed".into());
@@ -223,7 +189,6 @@ impl AgentRuntime {
                 load_skills: descriptor.load_skills,
                 model_preference: descriptor.model_preference,
                 project_root: descriptor.project_root,
-                ownership,
                 ..RunConfig::default()
             };
             #[cfg(test)]

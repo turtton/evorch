@@ -50,8 +50,6 @@ fn graph(f: &Fixture, claimed: bool) -> (GraphControlWrite, RecoveryActivationRe
             thread_id: Some(m.run_id.clone()),
             intent_revision: m.intent_revision,
             snapshot: m.snapshot.clone(),
-            owner_id: Some("owner".into()),
-            owner_generation: Some(7),
             lane_id: None,
         })
         .collect();
@@ -204,7 +202,6 @@ fn progress_is_full_durable_monotone_and_independent_of_operation_id() {
             restart_id: "restart".into(),
             capture_id: "capture".into(),
             thread_id: "run".into(),
-            owner_generation: 8,
         };
         // Fixture run IDs are canonical strings from the actual membership.
         let key = GraphDisposalProgressKey {
@@ -222,7 +219,6 @@ fn progress_is_full_durable_monotone_and_independent_of_operation_id() {
             key: key.clone(),
             expected_revision: 0,
             control: control.clone(),
-            owners: GraphDisposalStep::Applied,
             scratch: GraphDisposalStep::Applied,
         };
         f.storage
@@ -464,8 +460,6 @@ fn graph_cas_mutations() -> Vec<fn(&mut GraphControlCas)> {
                 sha256: "other".into(),
             })
         },
-        |c| c.membership[0].owner_id = Some("other".into()),
-        |c| c.membership[0].owner_generation = Some(8),
         |c| c.membership[0].lane_id = Some("other".into()),
         |c| c.manifest.manifest_id.push('x'),
         |c| c.manifest.schema_version += 1,

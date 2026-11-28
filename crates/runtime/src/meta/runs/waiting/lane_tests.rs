@@ -313,7 +313,6 @@ async fn real_close_and_detach_wake_a_wait_when_the_last_managed_lane_disappears
                         surface: "test".into(),
                         client_id: None,
                     },
-                    &[],
                 )
                 .unwrap();
         } else {

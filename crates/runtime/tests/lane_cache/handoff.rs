@@ -330,10 +330,7 @@ async fn failed_target_admission_recovers_its_seed_once_then_reuses_its_own_wire
     // target, so recovery is its first request, not a reset of the source.
     h.runtime = make();
     h.mock.enqueue([text_response("recovered target idle")]);
-    assert_eq!(
-        h.runtime.recover_unstarted_lanes(None).unwrap(),
-        vec![target]
-    );
+    assert_eq!(h.runtime.recover_unstarted_lanes().unwrap(), vec![target]);
     events.extend(through_phase(&mut h.receiver, target, AgentRunPhase::Waiting).await);
     assert_eq!(h.runtime.user_answers(target).unwrap()[0].id, question);
     input(
@@ -344,7 +341,7 @@ async fn failed_target_admission_recovers_its_seed_once_then_reuses_its_own_wire
         &mut events,
     )
     .await;
-    assert!(h.runtime.recover_unstarted_lanes(None).unwrap().is_empty());
+    assert!(h.runtime.recover_unstarted_lanes().unwrap().is_empty());
     let requests: Vec<_> = h
         .mock
         .recorded_requests()

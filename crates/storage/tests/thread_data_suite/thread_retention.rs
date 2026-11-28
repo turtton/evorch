@@ -1078,7 +1078,7 @@ fn owners_disabled_policy_and_unfinished_backfill_block_confirmation() {
         .unwrap();
     assert_eq!(
         outcome,
-        FinalizeOutcome::Blocked(BlockReason::Owner("running".into()))
+        FinalizeOutcome::Blocked(BlockReason::SafetyHold("running".into()))
     );
 
     // Days = 0 confirms nothing and drops the staging.
@@ -1290,7 +1290,8 @@ fn schedule_reports_due_dates_and_protections() {
     input.threads[1].archived_at_s = Some(now_s - 86_400);
     input.threads[0].updated_at_s = now_s - 40 * 86_400;
     input.threads[1].updated_at_s = now_s - 86_400;
-    let overrides = BTreeMap::from([("held".to_owned(), BlockReason::Owner("running".into()))]);
+    let overrides =
+        BTreeMap::from([("held".to_owned(), BlockReason::SafetyHold("running".into()))]);
 
     let statuses = database
         .retention_schedule(&input, &policy(), &overrides)
@@ -1305,7 +1306,7 @@ fn schedule_reports_due_dates_and_protections() {
     );
     assert_eq!(
         statuses[3].1,
-        RetentionStatus::Blocked(BlockReason::Owner("running".into()))
+        RetentionStatus::Blocked(BlockReason::SafetyHold("running".into()))
     );
     assert_eq!(statuses[4].1, RetentionStatus::NotArchived);
     let disabled = ThreadRetentionPolicy {
@@ -1362,11 +1363,11 @@ fn schedule_shows_why_an_explored_family_is_held() {
 
     // A member held by an owner holds the family with the owner's reason.
     let input = sidebar(&["A", "B"], &[]);
-    let owners = BTreeMap::from([("B".to_owned(), BlockReason::Owner("running".into()))]);
+    let owners = BTreeMap::from([("B".to_owned(), BlockReason::SafetyHold("running".into()))]);
     let held = status(&input, &owners);
     assert_eq!(
         held["A"],
-        RetentionStatus::Blocked(BlockReason::Owner("running".into()))
+        RetentionStatus::Blocked(BlockReason::SafetyHold("running".into()))
     );
 }
 

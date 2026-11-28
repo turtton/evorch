@@ -30,10 +30,9 @@ use crate::escalation_review::{
     WEB_REVIEW_INSTRUCTION, review_context, review_context_with_facts,
     support::{ScriptedModel, text_response},
 };
-use crate::ownership::{OwnerHost, OwnerPermit};
 use crate::pull_requests::{
-    FakePullRequestSource, FetchError, FetchedPullRequest, OwnershipView, PullRequestService,
-    ServiceParts, ThreadEnvironment, WallClock,
+    FakePullRequestSource, FetchError, FetchedPullRequest, PullRequestService, ServiceParts,
+    ThreadEnvironment, WallClock,
 };
 use crate::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 
@@ -118,7 +117,6 @@ struct Harness {
     model: Arc<ScriptedModel>,
     source: FakePullRequestSource,
     service: PullRequestService,
-    host: Arc<OwnerHost>,
     storage: storage::StorageHandle,
     clock: Arc<ManualClock>,
     bus: Arc<EventBus>,
@@ -158,21 +156,12 @@ impl Harness {
         .unwrap();
         let bus = Arc::new(EventBus::new(4096));
         let events = bus.subscribe();
-        let host = Arc::new(
-            OwnerHost::open(
-                directory.sockets(),
-                config::OwnershipConfig::default(),
-                Arc::clone(&bus),
-            )
-            .unwrap(),
-        );
         let clock = Arc::new(ManualClock(AtomicI64::new(10_000_000_000)));
         let source = FakePullRequestSource::new();
         let threads = Arc::new(Threads::default());
         let service = PullRequestService::start(ServiceParts {
             storage: storage.handle(),
             source: Arc::new(source.clone()),
-            ownership: Arc::clone(&host) as Arc<dyn OwnershipView>,
             environment: Arc::clone(&threads) as Arc<dyn ThreadEnvironment>,
             bus: Arc::clone(&bus),
             settings,
@@ -218,7 +207,6 @@ impl Harness {
             model,
             source,
             service,
-            host,
             storage: storage.handle(),
             clock,
             bus,
@@ -272,13 +260,6 @@ impl Harness {
         )
     }
 
-    fn permit(&self) -> OwnerPermit {
-        self.host
-            .owned_permit(THREAD)
-            .or_else(|_| self.host.start(THREAD))
-            .unwrap()
-    }
-
     fn revision(&self) -> u64 {
         self.storage
             .pull_request_thread_state(THREAD)
@@ -288,25 +269,15 @@ impl Harness {
 
     /// Links the thread (the scheduler fetches once, as the script says).
     async fn link(&self, number: u64) {
-        let permit = self.permit();
         self.service
-            .link(
-                THREAD,
-                &format!("{REPOSITORY}#{number}"),
-                self.revision(),
-                &permit,
-            )
+            .link(THREAD, &format!("{REPOSITORY}#{number}"), self.revision())
             .await
             .unwrap();
         settle().await;
     }
 
     async fn unlink(&self) {
-        let permit = self.permit();
-        self.service
-            .unlink(THREAD, self.revision(), &permit)
-            .await
-            .unwrap();
+        self.service.unlink(THREAD, self.revision()).await.unwrap();
         settle().await;
     }
 

@@ -154,7 +154,13 @@ const C_GC: u64 = 24;
 // The full probe measured 495/791 frames and exactly 221,082 VM steps at both
 // 10 and 100,000 thread_runs rows (70 fixed frames above v74 at the large size).
 // Add that measured fixed cost; retain collection and VM-step scaling budgets.
-const MIGRATION_FRAMES: u64 = 70
+// v81 adds a row format column, retains the legacy progress table and creates its
+// owner-free replacement. Its isolated 10/100,000 unrelated-thread probe writes
+// 12/18 frames and exactly 16,892 VM steps at both sizes. Add only those measured
+// 18 fixed schema frames (full-chain 519/817 frames, 245,142 steps at both sizes).
+// Collection and unrelated-row VM-scaling limits remain unchanged.
+const MIGRATION_FRAMES: u64 = 18
+    + 70
     + 24
     + 280
     + 40
@@ -415,6 +421,8 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v81.sql"),
+                    include_str!("../undo/undo_v80.sql"),
                     include_str!("../undo/undo_v79.sql"),
                     include_str!("../undo/undo_v78.sql"),
                     include_str!("../undo/undo_v77.sql"),
@@ -512,5 +520,51 @@ fn content_blob_collection_is_bounded() {
     normal_step_stays_inside_its_frame_budget();
     oversized_blob_is_registered_not_deleted();
     tick_work_ignores_the_size_of_the_reference_table();
+    owner_free_schema_has_fixed_cost_for_unrelated_thread_history();
     migration_does_not_scale_with_existing_rows();
+}
+
+/// Isolate the owner-removal DDL from the existing migration chain. The only
+/// grown relation is unrelated thread history; recovery and delivery rows stay empty.
+fn owner_free_schema_has_fixed_cost_for_unrelated_thread_history() {
+    fn cost(rows: i64) -> (u64, u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner-free.db");
+        drop(Database::open(&config(&path)).unwrap());
+        let observer = Connection::open(&path).unwrap();
+        observer
+            .execute_batch(include_str!("../undo/undo_v81.sql"))
+            .unwrap();
+        observer
+            .execute_batch(&format!(
+                "PRAGMA user_version=80;
+             WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x < {rows}-1)
+             INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth)
+             SELECT printf('r-%07d',x),'t','r-0000000',0 FROM n;
+             PRAGMA wal_checkpoint(TRUNCATE);"
+            ))
+            .unwrap();
+        observer.execute_batch("BEGIN").unwrap();
+        observer
+            .query_row("SELECT COUNT(*) FROM thread_runs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        let before = wal_bytes(&path);
+        VM_STEPS.store(0, Ordering::Relaxed);
+        drop(Database::open_unchecked(&config(&path)).unwrap());
+        let frames = (wal_bytes(&path) - before) / (page_size(&observer) + PAGE_OVERHEAD);
+        let steps = VM_STEPS.load(Ordering::Relaxed);
+        observer.execute_batch("COMMIT").unwrap();
+        (frames, steps)
+    }
+    let small = cost(10);
+    let large = cost(100_000);
+    println!("owner-free v81: 10 rows {small:?}, 100,000 rows {large:?} (frames, VM steps)");
+    assert!(small.0 > 0 && large.0 <= 18, "bounded empty-schema DDL");
+    assert!(small.1 > 0, "profiler must observe owner-free DDL");
+    assert_eq!(
+        small.1, large.1,
+        "unrelated thread history must not be scanned"
+    );
 }

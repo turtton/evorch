@@ -5,32 +5,7 @@ use runtime::RunId;
 use super::{CommandService, HostEvent, NoticeOutcome, RejectKind};
 
 impl CommandService {
-    pub(super) fn stop_run(
-        &mut self,
-        thread_id: String,
-        run_id: String,
-        permit: Option<runtime::ownership::OwnerPermit>,
-    ) -> Vec<HostEvent> {
-        if permit
-            .as_ref()
-            .is_some_and(|permit| permit.thread_id != thread_id)
-            || (self.ownership.is_some() && permit.is_none())
-        {
-            return vec![HostEvent::CommandRejected {
-                kind: RejectKind::Fenced,
-                reason: runtime::ownership::OwnershipError::Fenced.to_string(),
-            }];
-        }
-        // Keep the submitting owner's generation stable through the stop.
-        let _caller_guard = match permit.as_ref().map(|p| p.mutation_guard()).transpose() {
-            Ok(guard) => guard,
-            Err(error) => {
-                return vec![HostEvent::CommandRejected {
-                    kind: RejectKind::Fenced,
-                    reason: error.to_string(),
-                }];
-            }
-        };
+    pub(super) fn stop_run(&mut self, thread_id: String, run_id: String) -> Vec<HostEvent> {
         let target = run_id.parse::<RunId>().ok();
         let root = self
             .bindings
@@ -39,6 +14,9 @@ impl CommandService {
             .or_else(|| self.bindings.goal_runs.get(&thread_id));
         let Some(target) = target.filter(|target| {
             root.is_some_and(|root| self.runtime.live_descendants(*root).contains(target))
+                || (self.runtime.graceful_stop_requested(*target)
+                    && self.runtime.thread_of_live_run(*target).as_deref()
+                        == Some(thread_id.as_str()))
         }) else {
             return vec![HostEvent::ChatNotice {
                 outcome: NoticeOutcome::NotApplied,
@@ -48,10 +26,12 @@ impl CommandService {
         };
         match self.stop_for_host(target, runtime::StopScope::SelfOnly) {
             Ok(()) => Vec::new(),
-            Err(error) => vec![HostEvent::ChatNotice {
-                outcome: NoticeOutcome::NotApplied,
+            Err(error) => vec![HostEvent::ChatRejected {
+                kind: RejectKind::Failed,
                 thread_id,
-                text: format!("Could not stop the agent: {error}"),
+                reason: format!(
+                    "Stop could not be confirmed; any applied stop remains in effect. Retry after resolving: {error}"
+                ),
             }],
         }
     }
@@ -82,6 +62,9 @@ impl CommandService {
                     {
                         runtime::StopScope::Subtree
                     }
+                    _ if self.runtime.graceful_stop_requested(run_id) => {
+                        runtime::StopScope::SelfOnly
+                    }
                     _ => {
                         return vec![HostEvent::ChatNotice {
                             outcome: NoticeOutcome::NotApplied,
@@ -107,7 +90,9 @@ impl CommandService {
             return vec![HostEvent::ChatRejected {
                 kind: RejectKind::Failed,
                 thread_id,
-                reason: error.to_string(),
+                reason: format!(
+                    "Stop could not be confirmed; any applied stop remains in effect. Retry after resolving: {error}"
+                ),
             }];
         }
         match scope {

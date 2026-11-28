@@ -109,6 +109,6 @@ async fn current_admission_generation_outlives_old_terminal_entry() {
         let mut intents = fixture.runtime.shared.spawn_intents.lock().unwrap();
         intents.remove(&fixture.run);
     }
-    fixture.runtime.reserve_admission(fixture.run, None, None);
+    fixture.runtime.reserve_admission(fixture.run, None);
     assert!(fixture.runtime.host_input_run_is_live(fixture.run));
 }

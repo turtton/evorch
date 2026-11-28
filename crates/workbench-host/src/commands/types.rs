@@ -124,7 +124,7 @@ pub enum HostCommand {
 }
 
 impl HostCommand {
-    /// The thread whose ownership authorises this command, if it targets one.
+    /// The thread targeted by this command, for binding and tombstone checks.
     pub fn thread(&self) -> Option<&str> {
         match self {
             Self::SendChat(value) => Some(&value.thread_id),
@@ -147,7 +147,7 @@ impl HostCommand {
 /// text; the protocol handler turns the kind into an error code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectKind {
-    /// The caller does not own the thread (any more).
+    /// The caller's authority or execution context is not valid.
     Fenced,
     NotFound,
     /// The request conflicts with the current state of the thread or entity.

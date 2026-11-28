@@ -343,7 +343,7 @@ async fn stop_cancels_pending_admission_for_self_and_subtree_with_admission(admi
         }
         let pending = runtime.reserve_child_run_id(root).unwrap();
         runtime.seed_spawn_intent(pending, &root.to_string());
-        runtime.reserve_admission(pending, Some(root), None);
+        runtime.reserve_admission(pending, Some(root));
         let execution = runtime.execution_snapshot(pending).unwrap();
         {
             let _intents = runtime.shared.spawn_intents.lock().unwrap();

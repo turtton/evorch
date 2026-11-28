@@ -499,11 +499,7 @@ async fn an_approved_upload_is_dropped_when_the_link_changes_during_its_review()
             .pull_request_thread_state(THREAD)
             .unwrap()
             .lifecycle_revision;
-        world
-            .service
-            .unlink(THREAD, revision, &world.permit())
-            .await
-            .unwrap();
+        world.service.unlink(THREAD, revision).await.unwrap();
         release.notify_one();
         model.wait_for_request(2).await;
         release.notify_one();

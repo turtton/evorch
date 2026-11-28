@@ -35,26 +35,13 @@ impl LaneDeliveryHost for OwnedHost {
             .map_err(|_| LaneDeliveryNack::RestoreFailed)
     }
 }
-fn owned(
-    f: &Fixture,
-    lane: &crate::lanes::LaneOpened,
-) -> (Arc<crate::ownership::OwnerHost>, Arc<OwnedHost>) {
-    let owner = Arc::new(
-        crate::ownership::OwnerHost::open(
-            f._dir.sockets(),
-            Default::default(),
-            f.runtime.shared.bus.clone(),
-        )
-        .unwrap(),
-    );
-    let permit = owner.start(&lane.thread_id).unwrap();
+fn owned(f: &Fixture, lane: &crate::lanes::LaneOpened) -> Arc<OwnedHost> {
     let host = Arc::new(OwnedHost {
         thread: lane.thread_id.clone(),
         target: LaneDeliveryTarget {
             root_run_id: lane.root_run_id,
             generation: 1,
             authority: RunConfig {
-                ownership: Some(permit),
                 conversation: true,
                 ..Default::default()
             },
@@ -72,7 +59,7 @@ fn owned(
     });
     *f.runtime.shared.lanes.delivery.host.lock().unwrap() = Some(host.clone());
     f.runtime.start_lane_monitor();
-    (owner, host)
+    host
 }
 fn episodes(f: &Fixture) -> Vec<LaneStallEpisode> {
     let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
@@ -89,7 +76,7 @@ async fn a_closed_lane_is_never_nudged_or_reopened_by_the_monitor() {
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "closed").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     let base = host.now_ns();
     let context = f
         .storage
@@ -142,7 +129,7 @@ async fn no_report_and_work_stalled_boundaries_and_live_nudge_share_one_slot() {
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "boundaries").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     let base = host.now_ns();
     f.runtime.monitor_lanes().unwrap();
     host.now.store(base + 30 * MINUTE - 1, Ordering::SeqCst);
@@ -218,7 +205,7 @@ async fn long_tool_exemption_and_five_minute_grace_do_not_create_progress_anchor
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "tool-grace").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     let base = host.now_ns();
     f.runtime.monitor_lanes().unwrap();
     let anchor = f
@@ -271,7 +258,7 @@ async fn silent_done_wakes_once_despite_three_different_working_reports_and_rest
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "silent").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     f.finish(lane.root_run_id).await;
     f.runtime.monitor_lanes().unwrap();
     assert_eq!(episodes(&f)[0].classification, Class::SilentDone);
@@ -366,128 +353,12 @@ async fn silent_done_wakes_once_despite_three_different_working_reports_and_rest
     );
 }
 #[tokio::test(start_paused = true)]
-async fn nonowner_process_cannot_observe_or_fabricate_stall() {
-    const CHILD_DB: &str = "EVORCH_2B_NONOWNER_DB";
-    const CHILD_THREAD: &str = "EVORCH_2B_NONOWNER_THREAD";
-    const CHILD_SOCKETS: &str = "EVORCH_2B_NONOWNER_SOCKETS";
-    if let Some(db) = std::env::var_os(CHILD_DB) {
-        let config = storage::StorageConfig {
-            db_path: db.into(),
-            ..Default::default()
-        };
-        let storage = storage::Storage::open(config.clone()).unwrap();
-        let thread = std::env::var(CHILD_THREAD).unwrap();
-        let lane = storage.handle().lane_by_thread(&thread).unwrap().unwrap();
-        let root = lane.root_run_id.as_deref().unwrap().parse().unwrap();
-        let bus = Arc::new(EventBus::new(128));
-        let owner = crate::ownership::OwnerHost::open(
-            std::path::Path::new(&std::env::var_os(CHILD_SOCKETS).unwrap()),
-            Default::default(),
-            bus.clone(),
-        )
-        .unwrap();
-        assert!(
-            owner.start(&thread).is_err(),
-            "the parent process retains the owner lease"
-        );
-        let model = Arc::new(Model::default());
-        let foreign = AgentRuntime::new(
-            bus.clone(),
-            Arc::new(tools::ToolExecutor::new(bus)),
-            model.clone(),
-        )
-        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
-        foreign.bind_thread_root(&thread, root).unwrap();
-        *foreign.shared.lanes.delivery.host.lock().unwrap() = Some(Arc::new(OwnedHost {
-            target: LaneDeliveryTarget {
-                root_run_id: root,
-                generation: lane.generation,
-                authority: RunConfig::default(),
-            },
-            thread,
-            now: AtomicI64::new(lane.created_at_ns + 120 * MINUTE),
-            restores: AtomicUsize::new(0),
-            fail: AtomicBool::new(false),
-        }));
-        foreign.monitor_lanes().unwrap();
-        let count: i64 = rusqlite::Connection::open(&config.db_path)
-            .unwrap()
-            .query_row("SELECT count(*) FROM lane_stall_episodes", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(count, 0);
-        assert!(model.requests.lock().unwrap().is_empty());
-        return;
-    }
-    let mut f = Fixture::new();
-    let (lead, _) = f.lead().await;
-    let lane = f.lane(lead, "foreign").await;
-    let (owner, host) = owned(&f, &lane);
-    let second = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        f.runtime.shared.bus.clone(),
-    )
-    .unwrap();
-    assert!(second.owned_permit(&lane.thread_id).is_err());
-    let foreign = AgentRuntime::new(
-        f.runtime.shared.bus.clone(),
-        Arc::new(tools::ToolExecutor::new(f.runtime.shared.bus.clone())),
-        f.model.clone(),
-    )
-    .with_run_store(crate::RunStore::open(&f.config, f.storage.handle()).unwrap());
-    foreign
-        .bind_thread_root(&lane.thread_id, lane.root_run_id)
-        .unwrap();
-    // A reader knows the binding but has no OwnerPermit; no ownership DTO can substitute.
-    let readonly = Arc::new(OwnedHost {
-        target: LaneDeliveryTarget {
-            authority: RunConfig::default(),
-            ..host.target.clone()
-        },
-        thread: lane.thread_id.clone(),
-        now: AtomicI64::new(host.now_ns() + 120 * MINUTE),
-        restores: AtomicUsize::new(0),
-        fail: AtomicBool::new(false),
-    });
-    *foreign.shared.lanes.delivery.host.lock().unwrap() = Some(readonly);
-    foreign.monitor_lanes().unwrap();
-    assert!(episodes(&f).is_empty());
-    // Exercise the real OS lease and the shared DB from a second process, not
-    // merely a second runtime in this process. Process exit is the barrier.
-    let child = tokio::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "lane_delivery::tests::monitor::nonowner_process_cannot_observe_or_fabricate_stall",
-            "--nocapture",
-        ])
-        .env(CHILD_DB, &f.config.db_path)
-        .env(CHILD_THREAD, &lane.thread_id)
-        .env(CHILD_SOCKETS, f._dir.sockets())
-        .output()
-        .await
-        .unwrap();
-    assert!(
-        child.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&child.stdout),
-        String::from_utf8_lossy(&child.stderr)
-    );
-    assert!(episodes(&f).is_empty());
-    assert!(owner.owned_permit(&lane.thread_id).is_ok());
-    f.runtime.monitor_lanes().unwrap();
-    host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
-    f.runtime.monitor_lanes().unwrap();
-    assert_eq!(episodes(&f).len(), 1);
-}
-#[tokio::test(start_paused = true)]
 async fn worker_startup_retry_skip_and_weak_shutdown_are_real_lifecycle_boundaries() {
     let mut f = Fixture::new();
     let (lead, host) = f.lead().await;
     let lane = f.lane(lead, "timer").await;
     f.report(&lane, Some(1), LaneStatus::Ready);
-    *host.deny.lock().unwrap() = Some(LaneDeliveryNack::Readonly);
+    *host.deny.lock().unwrap() = Some(LaneDeliveryNack::UnknownThread);
     *f.runtime.shared.lanes.delivery.host.lock().unwrap() = None;
     let (tx, mut steps) = tokio::sync::mpsc::unbounded_channel();
     *f.runtime.shared.lanes.delivery.worker_steps.lock().unwrap() = Some(tx);
@@ -569,7 +440,7 @@ async fn waiting_question_pause_summary_and_reported_terminal_do_not_gain_nudges
         } else {
             f.lane(lead, kind).await
         };
-        let (_owner, host) = owned(&f, &lane);
+        let host = owned(&f, &lane);
         let base = host.now_ns();
         f.runtime.monitor_lanes().unwrap();
         let mut child = None;
@@ -665,7 +536,7 @@ async fn permanent_restore_failure_retires_nudge_and_restart_cannot_wake_it_agai
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "failure").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     f.finish(lane.root_run_id).await;
     f.runtime.monitor_lanes().unwrap();
     host.fail.store(true, Ordering::SeqCst);
@@ -721,7 +592,7 @@ async fn accepted_but_unpresented_nudge_error_is_attention_not_automatic_restore
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "unpresented-error").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     f.runtime.monitor_lanes().unwrap();
     host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
     f.runtime.monitor_lanes().unwrap();
@@ -772,7 +643,7 @@ async fn resolved_claim_is_obsolete_not_a_synthetic_restore_failure() {
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "resolved-claim").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     f.runtime.monitor_lanes().unwrap();
     host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
     f.runtime.monitor_lanes().unwrap();
@@ -827,7 +698,7 @@ async fn provider_exit_before_startup_scan_still_grants_exact_five_minute_grace(
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "provider-exit").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     let base = host.now_ns();
     host.now.store(base + 120 * MINUTE, Ordering::SeqCst);
     // The monitor bound after RequestStarted. Completion is still an explicit
@@ -869,7 +740,7 @@ async fn monitor_change_hints_requery_committed_state_without_timer_heartbeats()
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "attention-hint").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     let mut events = f.runtime.shared.bus.subscribe();
     let hints = |events: &mut event_bus::EventReceiver| {
         events
@@ -964,7 +835,7 @@ async fn ready_and_done_after_the_last_nudge_fence_do_not_append_failed() {
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "late-ready").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     f.runtime.monitor_lanes().unwrap();
     host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
     f.runtime.monitor_lanes().unwrap();
@@ -1002,7 +873,7 @@ async fn lag_and_a_parallel_tool_completion_remain_unobservable_until_a_full_bou
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "lag-parallel").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     f.runtime.monitor_lanes().unwrap();
     f.model.block_next.store(true, Ordering::SeqCst);
     f.runtime
@@ -1066,7 +937,7 @@ async fn lag_with_a_child_completion_suffix_keeps_the_child_wait_healthy_until_a
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "lag-child").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     f.runtime.monitor_lanes().unwrap();
     f.model.block_next.store(true, Ordering::SeqCst);
     let child = f
@@ -1125,7 +996,7 @@ async fn management_does_not_reset_stall_horizon_and_detached_is_excluded() {
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "management-monitor").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     let base = host.now_ns();
     f.runtime.monitor_lanes().unwrap();
     let request = |revision, action| LaneManagementRequest {
@@ -1192,7 +1063,7 @@ async fn ready_after_failure_observation_wins_the_synthetic_failed_commit_cas() 
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "failed-cas").await;
-    let (_owner, host) = owned(&f, &lane);
+    let host = owned(&f, &lane);
     f.runtime.monitor_lanes().unwrap();
     host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
     f.runtime.monitor_lanes().unwrap();
@@ -1346,9 +1217,7 @@ async fn ordinary_restore_failures_stop_at_three_across_runtime_restart_and_expl
             assert_eq!(host.restores.load(Ordering::SeqCst), 3);
             let before = f.model.requests.lock().unwrap().len();
             host.fail.store(false, Ordering::SeqCst);
-            restarted
-                .explicitly_resume_lane_delivery(lead, None)
-                .unwrap();
+            restarted.explicitly_resume_lane_delivery(lead).unwrap();
             assert_eq!(
                 f.storage
                     .handle()
@@ -1428,8 +1297,8 @@ async fn temporary_restore_failure_delivers_once_and_stop_or_host_denial_does_no
             );
             f.report(&lane, Some(2), LaneStatus::Ready);
             for reason in [
-                LaneDeliveryNack::Readonly,
-                LaneDeliveryNack::OwnershipLost,
+                LaneDeliveryNack::UnknownThread,
+                LaneDeliveryNack::BindingConflict,
                 LaneDeliveryNack::Stopped,
             ] {
                 *host.deny.lock().unwrap() = Some(reason);
@@ -1522,7 +1391,7 @@ async fn lane_restore_admission_failure_has_one_failed_report_not_one_per_execut
             let (lead, _) = f.lead().await;
             let lane = f.lane(lead, "lane-admission-failure").await;
             f.finish(lane.root_run_id).await;
-            let (_owner, host) = owned(&f, &lane);
+            let host = owned(&f, &lane);
             let root = lane.root_run_id.to_string();
             let q = event_bus::UserQuestion {
                 id: "recover-lane-question".into(),
@@ -1635,7 +1504,6 @@ async fn lane_restore_admission_failure_has_one_failed_report_not_one_per_execut
                     lane.root_run_id,
                     "late-admission-finalization",
                     "runtime_failed",
-                    host.target.authority.ownership.as_ref(),
                 )
                 .unwrap();
             assert_eq!(

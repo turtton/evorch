@@ -150,10 +150,8 @@
       capture_id: "cap1",
       expected_revision: "1",
       expected_core_epoch: "2",
-      owner_identity: null,
-      owner_generation: null,
     };
-    const binding = { graph, owners: [], expected_control_revision: "0" };
+    const binding = { graph, threads: [], expected_control_revision: "0" };
     const bodies = [
       adminQueries.targets(),
       adminQueries.status(),

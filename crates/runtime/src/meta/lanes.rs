@@ -339,11 +339,7 @@ pub(super) fn report(
     if let Err(e) = report.validate() {
         return failure(LaneError::new("invalid_report", e));
     }
-    match runtime.append_lane_agent_report(
-        state.caller_run_id(),
-        state.task.config.ownership.as_ref(),
-        report,
-    ) {
+    match runtime.append_lane_agent_report(state.caller_run_id(), report) {
         Ok(appended) => {
             runtime
                 .shared

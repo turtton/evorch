@@ -123,7 +123,7 @@ fn prepare_recovery_source(
     let owner = destination
         .owner
         .as_ref()
-        .ok_or_else(|| conflict("stale_owner"))?;
+        .ok_or_else(|| conflict("stale_binding"))?;
     let target = recovery_target(tx, &owner.root_run_id)?;
     let old = active_recovery(tx, &destination.thread_id)?;
     let episode = if let Some(e) = old.filter(|e| e.stable_recovery_target == target) {

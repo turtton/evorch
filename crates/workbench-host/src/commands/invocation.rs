@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 
 use runtime::{Role, RunConfig, RunId};
+use workbench_protocol::errors::WorkbenchError;
 
-use super::CommandService;
+use super::{CommandService, RejectKind};
 
 /// What the core needs to start one invocation's run.
 pub(crate) struct InvocationRun {
@@ -22,32 +23,26 @@ impl CommandService {
     /// its questions and approvals reach every client. The run neither waits for
     /// further input nor keeps itself alive after its turn: when it ends, the
     /// invocation is done with it.
-    pub(crate) fn start_invocation_run(&mut self, run: InvocationRun) -> Result<RunId, String> {
+    pub(crate) fn start_invocation_run(
+        &mut self,
+        run: InvocationRun,
+    ) -> Result<RunId, WorkbenchError> {
         if self.root_recovery_pending(&run.thread) {
-            return Err("restart_busy: restoring conversation; retry the same request".into());
+            return Err(crate::ingress::reject_error(
+                RejectKind::Busy,
+                "restart_busy: restoring conversation; retry the same request",
+            ));
         }
-        let permit = match &self.ownership {
-            None => None,
-            Some(owner) => {
-                match owner.attach(&run.thread) {
-                    Ok(_) => (),
-                    Err(runtime::ownership::RegistryError::Absent) => {
-                        owner
-                            .start(&run.thread)
-                            .map_err(|_| "thread could not be reserved".to_owned())?;
-                    }
-                    Err(_) => return Err("thread ownership unavailable".into()),
-                }
-                Some(
-                    owner
-                        .owned_permit(&run.thread)
-                        .map_err(|error| error.to_string())?,
-                )
-            }
-        };
+        // The helper leaves a new thread unchanged. A saved thread must use its
+        // current project/trust, even when this cold CLI invocation owns a new run.
+        crate::lane::current_thread_project(
+            &self.runtime,
+            self.sidebar_path.as_deref(),
+            &run.thread,
+            Some(&run.project_root),
+        )?;
         let mut config = RunConfig {
             project_root: Some(run.project_root.clone()),
-            ownership: permit.clone(),
             initial_prompt_id: Some(run.submission_id),
             ..RunConfig::default()
         };
@@ -56,15 +51,12 @@ impl CommandService {
         let run_id = self
             .runtime
             .delegate_chat_seeded(&run.thread, run.role, run.prompt, config, None)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                crate::ingress::reject_error(RejectKind::Failed, &error.to_string())
+            })?;
         self.bindings
             .thread_roots
             .insert(run.thread.clone(), run.project_root);
-        if let Some(permit) = permit {
-            self.bindings
-                .chat_permits
-                .insert(run.thread.clone(), permit);
-        }
         self.bindings.stop_marked.remove(&run.thread);
         self.bindings.stopped_by_us.remove(&run.thread);
         self.bindings.chat_runs.insert(run.thread, run_id);

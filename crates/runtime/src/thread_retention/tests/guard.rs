@@ -3,7 +3,6 @@ use std::sync::Arc;
 use storage::thread_retention::TombstoneSet;
 
 use super::super::{ThreadDeleted, TombstoneGuard};
-use crate::ownership::{OwnerHost, RegistryError};
 
 pub(crate) fn tombstones(threads: &[&str], runs: &[&str]) -> TombstoneGuard {
     TombstoneGuard::new(TombstoneSet {
@@ -34,51 +33,50 @@ fn the_guard_refuses_exactly_the_deleted_identities() {
     );
 }
 
-// Given: a host with a guard for thread "gone" / When: starting, attaching or claiming it
-// Then: each is refused with `ThreadDeleted` and leaves no owner row; other threads work.
-#[test]
-fn an_owner_host_refuses_start_claim_and_attach_for_a_deleted_thread() {
-    let root = test_socket_dir::SocketDir::new();
+// The runtime binding entry replaces the removed owner start/claim/attach
+// entries: a deleted thread or run must never become a current root again.
+#[tokio::test]
+async fn runtime_binding_refuses_deleted_threads_and_runs() {
+    struct NeverModel;
+    #[async_trait::async_trait]
+    impl crate::AgentModel for NeverModel {
+        fn selected_model(&self, _: crate::Role, _: Option<&str>) -> String {
+            "never".into()
+        }
+        async fn complete(
+            &self,
+            _: &crate::AgentInvocationContext,
+            _: crate::Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, crate::RuntimeError> {
+            panic!("binding must not invoke the provider")
+        }
+    }
     let bus = Arc::new(event_bus::EventBus::new(32));
-    let host = OwnerHost::open(root.path(), config::OwnershipConfig::default(), bus).unwrap();
-    // A row that exists from before the deletion: claim must not even look at it.
-    let permit = host.start("gone").unwrap();
-    let existing = host.attach("gone").unwrap();
-    drop(permit);
-    assert!(host.set_tombstone_guard(tombstones(&["gone"], &[])).is_ok());
-    assert!(
-        host.set_tombstone_guard(tombstones(&[], &[])).is_err(),
-        "the guard is installed once"
+    let runtime = crate::AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        Arc::new(NeverModel),
     );
-
-    assert!(matches!(
-        host.start("gone"),
-        Err(RegistryError::ThreadDeleted(_))
-    ));
-    assert!(matches!(
-        host.attach("gone"),
-        Err(RegistryError::ThreadDeleted(_))
-    ));
-    assert!(matches!(
-        host.claim(&existing),
-        Err(RegistryError::ThreadDeleted(_))
-    ));
-    assert!(matches!(
-        host.owned_permit("gone"),
-        Err(RegistryError::ThreadDeleted(_))
-    ));
-
-    assert!(host.start("kept").is_ok());
-    assert_eq!(host.attach("kept").unwrap().thread_id, "kept");
-    // The refusals changed nothing: still exactly the two rows that existed.
-    let registry =
-        crate::ownership::Registry::open_readonly(&root.path().join("owners.db")).unwrap();
-    let mut rows = registry
-        .list()
-        .unwrap()
-        .into_iter()
-        .map(|row| row.thread_id)
-        .collect::<Vec<_>>();
-    rows.sort();
-    assert_eq!(rows, ["gone", "kept"]);
+    let deleted_run = crate::RunId::new(1);
+    assert!(
+        runtime
+            .set_tombstone_guard(tombstones(&["gone"], &[&deleted_run.to_string()]))
+            .is_ok()
+    );
+    assert!(
+        runtime.set_tombstone_guard(tombstones(&[], &[])).is_err(),
+        "installed only once"
+    );
+    assert!(
+        runtime
+            .bind_thread_root("gone", crate::RunId::new(2))
+            .is_err()
+    );
+    assert!(runtime.bind_thread_root("kept", deleted_run).is_err());
+    assert!(runtime.goal_thread(deleted_run).is_none());
+    let kept = crate::RunId::new(3);
+    runtime.bind_thread_root("kept", kept).unwrap();
+    assert_eq!(runtime.goal_thread(kept).as_deref(), Some("kept"));
 }

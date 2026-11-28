@@ -53,12 +53,13 @@ fn reply(result: Result<Value, String>) -> crate::meta::DispatchResult {
 }
 fn caller(state: &LoopState) -> Result<Caller<'_>, String> {
     if !super::conversation_root(state) {
-        return Err("ownership_lost: only a trusted conversation root may manage its plan".into());
+        return Err(
+            "binding_conflict: only a trusted conversation root may manage its plan".into(),
+        );
     }
     Ok(Caller {
         run: state.caller_run_id(),
         mailbox: &state.task.mailbox,
-        permit: state.run_config().ownership.as_ref(),
     })
 }
 pub(crate) fn dispatch_read(

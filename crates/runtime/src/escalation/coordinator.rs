@@ -71,7 +71,7 @@ impl AgentRuntime {
                 inputs: vec![], deliverables: vec![], acceptance_criteria: vec!["Complete the original request and provide evidence".into()], constraints: vec![],
                 workspace: Default::default(), report_policy: LanePolicy::Detached,
             },
-            start_seed: serde_json::json!({"run_id":target,"project_root":source_config.project_root,"requires_ownership":source_config.ownership.is_some()}).to_string(),
+            start_seed: serde_json::json!({"run_id":target,"project_root":source_config.project_root}).to_string(),
             project_id: None, project_root: source_config.project_root.as_ref().map(|p|p.to_string_lossy().into_owned()),
             title: Some("Handoff · Orchestrator".into()), at_ns: crate::run_store::review_time_ns(),
         }).map_err(|e|e.to_string())?.lane
@@ -107,7 +107,6 @@ impl AgentRuntime {
             source,
             &prompt,
             &config,
-            source_config.ownership.is_some(),
             &continuity,
             reference,
         )
@@ -119,9 +118,8 @@ impl AgentRuntime {
             self.handoff_thread_goal_prepared(
                 source,
                 target,
-                source_config.ownership.as_ref(),
                 Some(&publication.incarnation()),
-                |owner| {
+                || {
                     // Stop/Cancel must be durable before the first target goal
                     // event; C is released before acquiring A (never I under Q).
                     self.shared
@@ -130,7 +128,6 @@ impl AgentRuntime {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(target, receipt.lane_id.clone());
-                    self.update_admission_owner(target, &execution, owner.clone());
                     self.shared.bus.emit(Event::new(lane.created_event()));
                 },
             )
@@ -156,7 +153,7 @@ impl AgentRuntime {
         &self,
         source: RunId,
         incarnation: &str,
-        source_config: &RunConfig,
+        _source_config: &RunConfig,
     ) -> Result<RunId, String> {
         let store = self
             .shared
@@ -178,12 +175,7 @@ impl AgentRuntime {
         // Ownership was prepared before commit. The source may have released
         // its lease as soon as its terminal became public; never consult it
         // again to authorize this independent target.
-        let ownership = self.admission_snapshot(target).and_then(|a| a.ownership);
-        let resumed = if source_config.ownership.is_some() && ownership.is_none() {
-            Err("prepared handoff ownership is missing".into())
-        } else {
-            self.spawn_prepared_handoff(target, ownership)
-        };
+        let resumed = self.spawn_prepared_handoff(target);
         if let Err(reason) = resumed {
             let execution = self.reserve_handoff_admission(source, target);
             self.fail_reserved_admission(target, &execution, reason.clone());

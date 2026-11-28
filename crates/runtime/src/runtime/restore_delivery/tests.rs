@@ -120,7 +120,7 @@ async fn message_driven_restore_ignores_quoted_huge_handles_and_preserves_histor
 #[tokio::test]
 async fn cold_restore_distinguishes_a_root_parent_from_a_durable_subagent_parent() {
     test_support::isolated_state_dir();
-    for nested in [false, true] {
+    for (nested, legacy) in [(false, false), (false, true), (true, false), (true, true)] {
         let directory = tempfile::tempdir().unwrap();
         let config = storage::StorageConfig {
             db_path: directory.path().join("ancestry.db"),
@@ -149,6 +149,23 @@ async fn cold_restore_distinguishes_a_root_parent_from_a_durable_subagent_parent
         } else {
             child
         };
+        if legacy {
+            let mut record = original
+                .shared
+                .run_store
+                .get()
+                .unwrap()
+                .restore_record(recipient)
+                .unwrap()
+                .unwrap();
+            let mut descriptor: RunRestoreDescriptor =
+                serde_json::from_str(&record.config_json).unwrap();
+            descriptor.restorable = false;
+            descriptor.non_restorable_reason = Some("復元対象外の実行状態: ownership".into());
+            record.restorable = false;
+            record.config_json = serde_json::to_string(&descriptor).unwrap();
+            storage.handle().upsert_run_context(&record).unwrap();
+        }
         drop(original);
         let model = Arc::new(CompletingModel::default());
         let runtime = make_runtime(model.clone());

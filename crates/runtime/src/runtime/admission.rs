@@ -60,14 +60,12 @@ pub(super) struct Admission {
     lane_root: bool,
     pub(super) cancelled: bool,
     pub(super) execution: Arc<ExecutionControl>,
-    ownership: Option<crate::ownership::OwnerPermit>,
     completion: Option<watch::Sender<Option<Result<(), RuntimeError>>>>,
     pub(super) result: watch::Receiver<Option<Result<(), RuntimeError>>>,
 }
 
 pub(crate) struct AdmissionSnapshot {
     pub parent: Option<RunId>,
-    pub ownership: Option<crate::ownership::OwnerPermit>,
     pub result: Option<Result<(), RuntimeError>>,
 }
 
@@ -82,7 +80,6 @@ impl Admission {
     pub(super) fn snapshot(&self) -> AdmissionSnapshot {
         AdmissionSnapshot {
             parent: self.parent,
-            ownership: self.ownership.clone(),
             result: self.result.borrow().clone().or_else(|| {
                 self.result.has_changed().is_err().then(|| {
                     Err(RuntimeError::Model {
@@ -265,7 +262,7 @@ impl AgentRuntime {
         error: RuntimeError,
     ) {
         self.drop_unstarted_host_input(run_id, config.initial_prompt_id.as_deref());
-        let execution = self.reserve_admission(run_id, parent, config.ownership.clone());
+        let execution = self.reserve_admission(run_id, parent);
         let mut admissions = self
             .shared
             .admissions
@@ -286,7 +283,6 @@ impl AgentRuntime {
         &self,
         run_id: RunId,
         parent: Option<RunId>,
-        ownership: Option<crate::ownership::OwnerPermit>,
     ) -> Arc<ExecutionControl> {
         let mut intents = self
             .shared
@@ -304,7 +300,7 @@ impl AgentRuntime {
                 .execution
                 .get_or_insert_with(|| ExecutionControl::new(inherited)),
         );
-        self.reserve_admission_for(run_id, parent, ownership, Arc::clone(&execution), false);
+        self.reserve_admission_for(run_id, parent, Arc::clone(&execution), false);
         execution
     }
 
@@ -312,7 +308,6 @@ impl AgentRuntime {
         &self,
         run_id: RunId,
         parent: Option<RunId>,
-        ownership: Option<crate::ownership::OwnerPermit>,
         execution: Arc<ExecutionControl>,
         lane_root: bool,
     ) {
@@ -337,7 +332,6 @@ impl AgentRuntime {
                 lane_root,
                 cancelled: execution.cancelled(),
                 execution,
-                ownership,
                 completion: Some(completion),
                 result,
             },
@@ -346,23 +340,6 @@ impl AgentRuntime {
 
     /// Handoff already reserved this execution before taking Q. Only A is
     /// needed here; never reacquire I from the handoff callback.
-    pub(crate) fn update_admission_owner(
-        &self,
-        run: RunId,
-        execution: &Arc<ExecutionControl>,
-        owner: Option<crate::ownership::OwnerPermit>,
-    ) {
-        let mut admissions = self
-            .shared
-            .admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(admission) = admissions.get_mut(&run)
-            && Arc::ptr_eq(&admission.execution, execution)
-        {
-            admission.ownership = owner;
-        }
-    }
 
     pub(crate) fn fail_reserved_admission(
         &self,
@@ -481,13 +458,7 @@ impl AgentRuntime {
                 .is_some_and(|current| Arc::ptr_eq(current, &execution))
         );
         let lane_root = parent.is_none() && config.lane_scope == Some(event_bus::LaneScope::Lane);
-        self.reserve_admission_for(
-            run_id,
-            parent,
-            config.ownership.clone(),
-            Arc::clone(&execution),
-            lane_root,
-        );
+        self.reserve_admission_for(run_id, parent, Arc::clone(&execution), lane_root);
         let result = self
             .shared
             .admissions
@@ -541,32 +512,10 @@ impl AgentRuntime {
             });
             // Admission may outlive a lane handoff. Reject its old generation
             // before registration can schedule even the initial snapshot write.
-            if lane_root
-                && admitted.is_ok()
-                && let Some(permit) = config.ownership.as_ref()
-            {
-                let interrupts = cancellation.clone();
-                let retry = runtime
-                    .shared
-                    .ownership_retry
-                    .get()
-                    .copied()
-                    .unwrap_or_else(crate::ownership::RetryPolicy::unbounded);
-                admitted = permit
-                    .validate_generation_off_thread(retry, move || {
-                        interrupts.borrow().kind().is_some()
-                    })
-                    .await
-                    .map_err(|error| {
-                        tracing::debug!(%run_id, %error, "lane admission ownership rejected");
-                        RuntimeError::StaleOwnership {
-                            run_id: run_id.to_string(),
-                        }
-                    });
-            }
+
             #[cfg(test)]
             if lane_root && admitted.is_ok() {
-                runtime.execution_hook(cancellation::HookPoint::LaneOwnershipValidated, &execution);
+                runtime.execution_hook(cancellation::HookPoint::LaneAdmissionValidated, &execution);
             }
             #[cfg(test)]
             if admitted.is_err() {
@@ -921,7 +870,7 @@ mod tests {
             Arc::new(Model),
         );
         let root = runtime.reserve_run_id();
-        runtime.reserve_admission(root, None, None);
+        runtime.reserve_admission(root, None);
         runtime.stop(root, StopScope::SelfOnly).unwrap();
         runtime
             .spawn_reserved(

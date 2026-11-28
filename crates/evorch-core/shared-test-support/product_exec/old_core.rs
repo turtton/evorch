@@ -33,7 +33,7 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::{Arc, mpsc},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use storage::recovery::restart::{RestartMetadata, RestartMutation};
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
@@ -99,13 +99,10 @@ pub fn run_worker() {
         listener.set_nonblocking(true).unwrap();
         let listener = tokio::net::UnixListener::from_std(listener).unwrap();
         let signals = OperatorSignals::new(signal_entry::mask()).unwrap();
-        let permit = host.owner.start("active").unwrap();
-        host.owner.start("idle").unwrap();
         let mut runs = Vec::new();
         for index in 0..3 {
             let mut events = host.runtime.event_bus().subscribe();
             let config = runtime::RunConfig {
-                ownership: Some(permit.clone()),
                 interactive: true,
                 keep_alive: true,
                 ..Default::default()
@@ -160,7 +157,7 @@ pub fn run_worker() {
             },
             &current,
             core_launcher::handoff::targets::TargetRequirements {
-                handoff: 1,
+                handoff: core_instance::handoff::HANDOFF_FORMAT_VERSION,
                 snapshot: 1,
                 storage_schema: schema,
                 protocol: description.protocol,
@@ -197,7 +194,7 @@ pub fn run_worker() {
             old_build,
             successor_build: build,
             target_identity: "target".into(),
-            handoff_version: 1,
+            handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
             snapshot_version: 1,
             storage_version: schema,
             old_builtin_tool_names: host.runtime.restart_builtin_tool_names(),
@@ -250,18 +247,6 @@ pub struct Cycle {
     /// Both ends are observation instants, each later than the event by a
     /// wake-up latency that is not measured here.
     pub exec_to_ready: Duration,
-    /// Wall-clock milliseconds from the OBSERVED exec (the instant the watcher
-    /// thread had read the pipe EOF, which is later than the kernel's close by
-    /// the watcher's wake-up latency) to the claim time derived from the
-    /// successor's lease. The first makes the value an under-measure by that
-    /// latency; the second is an upper bound of the claim instant only while
-    /// `claim_stable` holds. No bound of the true interval is claimed.
-    pub exec_to_claim_ms: i64,
-    /// The lease expiry did not move between the first readback and the last:
-    /// no heartbeat has shifted the claim time derived from it.
-    pub claim_stable: bool,
-    pub lease_ms: u64,
-    pub grace_ms: u64,
     pub pid_before: i32,
     pub old_epoch: u64,
     pub exe_replaced: bool,
@@ -280,10 +265,6 @@ impl std::fmt::Display for CycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
-}
-
-fn wall_ms(t: SystemTime) -> i64 {
-    t.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
 }
 
 /// One full old-core -> exec -> product Ready cycle in a fresh isolated
@@ -332,16 +313,12 @@ fn exec_cycle_inner(
         let mut byte = [0u8; 1];
         // Blocks until every write end is closed: the exec (or the worker's death).
         let result = pipe.read(&mut byte);
-        let _ = exec_tx.send((
-            Instant::now(),
-            SystemTime::now(),
-            result.map_err(|e| e.to_string()),
-        ));
+        let _ = exec_tx.send((Instant::now(), result.map_err(|e| e.to_string())));
     });
     worker
         .send_line("exec")
         .map_err(|e| CycleError::Exec(e.to_string()))?;
-    let (exec_at, exec_wall, eof) = exec_rx
+    let (exec_at, eof) = exec_rx
         .recv_timeout(READY_WATCHDOG)
         .map_err(|_| CycleError::Exec("no exec within the watchdog".into()))?;
     match eof {
@@ -359,8 +336,6 @@ fn exec_cycle_inner(
         std::path::Path::new(&format!("/proc/{pid}/exe")),
         &artifact.path,
     );
-    let (claim_a, lease_ms, grace_ms) = read_claim(&env);
-    let (claim_b, _, _) = read_claim(&env);
     worker
         .terminate(EXIT_WATCHDOG)
         .map_err(|e| CycleError::Cleanup(describe(e)))?;
@@ -387,38 +362,12 @@ fn exec_cycle_inner(
     let exec_to_ready = ready_at.checked_duration_since(exec_at).ok_or_else(|| {
         CycleError::Invalid("the readiness line was received before the exec EOF".into())
     })?;
-    let exec_to_claim_ms = (claim_a - lease_ms as i64) - wall_ms(exec_wall);
-    if exec_to_claim_ms < 0 {
-        return Err(CycleError::Invalid(format!(
-            "the claim time is before the observed exec ({exec_to_claim_ms} ms)"
-        )));
-    }
     Ok(Cycle {
         exec_to_ready,
-        exec_to_claim_ms,
-        claim_stable: claim_a == claim_b,
-        lease_ms,
-        grace_ms,
         pid_before: pid,
         old_epoch: before["old_epoch"].as_u64().unwrap(),
         exe_replaced,
     })
-}
-
-/// (lease expiry in wall-clock ms, lease_ms, grace_ms) of the claimed owner,
-/// read through the registry's own read-only open.
-fn read_claim(env: &IsolatedEnv) -> (i64, u64, u64) {
-    let registry = runtime::ownership::Registry::open_readonly(&env.ownership_db()).unwrap();
-    let owner = registry.attach("active").unwrap();
-    assert!(
-        owner.planned_claim.is_some(),
-        "the successor claimed the owner"
-    );
-    (
-        owner.lease.expires_at as i64,
-        owner.settings.lease_ms.get(),
-        owner.settings.grace_ms.get(),
-    )
 }
 
 fn describe(e: WaitError) -> String {

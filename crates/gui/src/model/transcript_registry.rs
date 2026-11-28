@@ -112,7 +112,6 @@ impl TranscriptRegistry {
                 | event_bus::CompactionEvent::Aborted { run_id, .. },
             ) => self.route_run(run_id),
             EventKind::Tool(ToolEvent::ArtifactsPresented { run_id, .. }) => self.route_run(run_id),
-            EventKind::Ownership(_) => vec![TranscriptKey::Thread],
             // A pull request change is not a transcript entry: no transcript receives it.
             EventKind::PullRequest(_) => Vec::new(),
             EventKind::ConversationPlan(_) => Vec::new(),
@@ -234,28 +233,6 @@ impl TranscriptRegistry {
 
     /// [`Self::apply`] for an event whose display body is still in the store.
     pub fn apply_with_body(&mut self, event: &Event, body: Option<&BodyText>) {
-        // A committed event may be rejected on receipt after authority changes.
-        // Existing ownership signals therefore also settle live-only cards,
-        // including saved compactions whose run phase was already terminal.
-        if let EventKind::Ownership(ownership) = &event.kind
-            && matches!(
-                ownership.action,
-                event_bus::OwnershipAction::Claimed
-                    | event_bus::OwnershipAction::Released
-                    | event_bus::OwnershipAction::Handoff
-            )
-        {
-            if let Some(model) = self.threads.get_mut(&ownership.thread_id) {
-                model.interrupt_compactions(None);
-            }
-            for (run, thread) in &self.run_threads {
-                if thread == &ownership.thread_id
-                    && let Some(model) = self.runs.get_mut(run)
-                {
-                    model.interrupt_compactions(Some(run));
-                }
-            }
-        }
         if let EventKind::Compaction(event_bus::CompactionEvent::Compacted {
             run_id,
             checkpoint_id,
@@ -303,7 +280,6 @@ impl TranscriptRegistry {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
             | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => {}
         }
@@ -350,7 +326,6 @@ impl TranscriptRegistry {
         let route = self.route(event);
         let explicit_thread = match &event.kind {
             EventKind::Diagnostic(event) => event.thread_id.clone(),
-            EventKind::Ownership(event) => Some(event.thread_id.clone()),
             EventKind::Lifecycle(_)
             | EventKind::Ledger(_)
             | EventKind::Message(_)

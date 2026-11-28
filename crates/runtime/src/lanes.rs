@@ -21,7 +21,6 @@ pub(crate) struct LaneRuntime {
     // Cancellation can look up a pending lane without I/O for ordinary runs.
     pub(crate) creation_intents: Mutex<std::collections::HashMap<RunId, String>>,
     pub(crate) started: Mutex<std::collections::HashMap<RunId, Vec<String>>>,
-    stops: stops::LaneStopWrites,
     #[cfg(test)]
     activity_time: Mutex<Option<i64>>,
 }
@@ -54,52 +53,17 @@ impl From<storage::StorageError> for LaneError {
     }
 }
 #[derive(Serialize, Deserialize)]
-struct StartSeed {
-    run_id: RunId,
+pub(super) struct StartSeed {
+    pub(super) run_id: RunId,
     project_root: Option<std::path::PathBuf>,
-    requires_ownership: bool,
-}
-
-pub(crate) fn ownership_failure_reason(
-    state: &crate::agent_loop::LoopState,
-    error: &crate::ownership::RegistryError,
-) -> String {
-    if state.task.parent.is_none()
-        && state.task.config.lane_scope == Some(LaneScope::Lane)
-        && error.is_fenced()
-    {
-        crate::RuntimeError::StaleOwnership {
-            run_id: state.task.run_id.to_string(),
-        }
-        .to_string()
-    } else {
-        error.to_string()
-    }
 }
 
 pub(crate) async fn persist_initial_context(
     state: &mut crate::agent_loop::LoopState,
 ) -> Result<(), String> {
-    let lane_root =
-        state.task.parent.is_none() && state.task.config.lane_scope == Some(LaneScope::Lane);
-    let _guard = if lane_root && let Some(permit) = &state.task.config.ownership {
-        let interrupts = state.channels.cancel_rx.clone();
-        let retry = state
-            .runtime()
-            .and_then(|runtime| runtime.shared.ownership_retry.get().copied())
-            .unwrap_or_else(crate::ownership::RetryPolicy::unbounded);
-        Some(
-            permit
-                .mutation_guard_off_thread(retry, move || interrupts.borrow().kind().is_some())
-                .await
-                .map_err(|error| ownership_failure_reason(state, &error))?,
-        )
-    } else {
-        None
-    };
     crate::restore::persist_checkpoint(state)
         .map_err(|error| format!("Cannot persist prepared context: {error}"))?;
-    // Keep authority across both writes: only a restorable context may make a
+    // Only a reusable context may make a
     // creation intent started, and a successor must observe that same decision.
     if state.task.parent.is_none()
         && state.task.config.lane_scope.is_some()
@@ -298,7 +262,6 @@ impl AgentRuntime {
         let seed = StartSeed {
             run_id,
             project_root: config.project_root.clone(),
-            requires_ownership: config.ownership.is_some(),
         };
         // Only a new lane stores this; a creation-key retry returns the stored lane
         // and its title (a user rename included) unchanged.
@@ -320,7 +283,7 @@ impl AgentRuntime {
             title: Some(title),
             at_ns: self.lane_activity_time(),
         })?;
-        let (run_id, scheduled) = self.start_lane_intent(&creation.lane, &config)?;
+        let (run_id, scheduled) = self.start_lane_intent(&creation.lane)?;
         let started = scheduled && self.inspect_agent(run_id).is_ok();
         Ok(LaneOpened {
             lane_id: creation.lane.lane_id,
@@ -360,32 +323,24 @@ impl AgentRuntime {
         })
     }
 
-    /// Start host recovery without retaining the window/runtime across lease waits.
-    /// An unresponsive old host may still have an unexpired lease at startup;
-    /// retry until those intents start, rather than requiring another restart.
-    pub fn recover_lanes_on_startup(
-        &self,
-        host: &std::sync::Arc<crate::ownership::OwnerHost>,
-    ) -> Result<tokio::task::JoinHandle<()>, LaneError> {
-        Ok(tokio::spawn(self.prepare_lane_recovery(host)?))
+    /// Start recovery without retaining the runtime across admission waits.
+    pub fn recover_lanes_on_startup(&self) -> Result<tokio::task::JoinHandle<()>, LaneError> {
+        Ok(tokio::spawn(self.prepare_lane_recovery()?))
     }
 
     /// Initial synchronous recovery followed by an owned retry future. Hosts register
     /// this future with their service lifecycle instead of detaching a retry task.
     pub fn prepare_lane_recovery(
         &self,
-        host: &std::sync::Arc<crate::ownership::OwnerHost>,
     ) -> Result<impl std::future::Future<Output = ()> + Send + use<>, LaneError> {
-        self.recover_unstarted_lanes(Some(host))?;
+        self.recover_unstarted_lanes()?;
         let runtime = self.downgrade();
         let mut producer_changes = self.producer_gate().subscribe_admission();
-        let host = std::sync::Arc::downgrade(host);
         Ok(async move {
-            // External host death/lease expiry has no in-process notification.
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 tokio::select! { _ = tick.tick() => (), _ = producer_changes.changed() => () }
-                let (Some(runtime), Some(host)) = (runtime.upgrade(), host.upgrade()) else {
+                let Some(runtime) = runtime.upgrade() else {
                     return;
                 };
                 let Some(store) = runtime.shared.run_store.get() else {
@@ -402,7 +357,7 @@ impl AgentRuntime {
                     }
                     Ok(_) => {}
                 }
-                if let Err(error) = runtime.recover_unstarted_lanes(Some(&host)) {
+                if let Err(error) = runtime.recover_unstarted_lanes() {
                     tracing::warn!(%error, "lane startup recovery failed");
                     return;
                 }
@@ -412,10 +367,7 @@ impl AgentRuntime {
 
     /// Recover durable intents after a crash before registration. Authority is current
     /// host authority, never reconstructed from the brief or serialized seed.
-    pub fn recover_unstarted_lanes(
-        &self,
-        host: Option<&crate::ownership::OwnerHost>,
-    ) -> Result<Vec<RunId>, LaneError> {
+    pub fn recover_unstarted_lanes(&self) -> Result<Vec<RunId>, LaneError> {
         let Some(_producer) = self.producer_gate().try_enter() else {
             return Ok(Vec::new());
         };
@@ -427,7 +379,7 @@ impl AgentRuntime {
             .handle
             .unstarted_lanes_excluding(1000, self.lane_recovery_exclusions())?
         {
-            if let Some(id) = self.recover_lane(&lane, host)? {
+            if let Some(id) = self.recover_lane(&lane)? {
                 recovered.push(id);
             }
         }
@@ -438,15 +390,9 @@ impl AgentRuntime {
     /// durable state `Runtime::stop` leaves). Cancelled and failed intents stay blocked,
     /// and a restart never does this on its own.
     ///
-    /// The stop is lifted only after the authority to start is in hand (a current owner
-    /// host when the lane needs ownership); when that is missing the stop is kept.
     /// A process that already tried to start this lane keeps its settled admission, so
     /// the resume needs a new runtime (`lane_unavailable` otherwise).
-    pub fn resume_stopped_lane(
-        &self,
-        lane_id: &str,
-        host: Option<&crate::ownership::OwnerHost>,
-    ) -> Result<Option<RunId>, LaneError> {
+    pub fn resume_stopped_lane(&self, lane_id: &str) -> Result<Option<RunId>, LaneError> {
         let _manual = self
             .shared
             .quiesce
@@ -490,43 +436,19 @@ impl AgentRuntime {
         let seed: StartSeed = serde_json::from_str(&lane.start_seed)
             .map_err(|e| LaneError::new("restore_failed", e))?;
         self.check_lane_recovery(&lane, &seed)?;
-        let Some(ownership) = Self::lane_authority(&lane, &seed, host)? else {
-            return Err(LaneError::new(
-                "lane_creation_denied",
-                "another owner holds the lane thread; the stop is kept",
-            ));
-        };
-        let resumed = {
-            let _guard = ownership
-                .as_ref()
-                .map(|p| p.mutation_guard())
-                .transpose()
-                .map_err(|error| LaneError::new("lane_creation_denied", error))?;
-            store
-                .handle
-                .resume_lane_start(&lane.lane_id, self.lane_activity_time())?
-                .lane
-        };
-        match self.start_recovered(&resumed, &seed, ownership.clone()) {
+        let resumed = store
+            .handle
+            .resume_lane_start(&lane.lane_id, self.lane_activity_time())?
+            .lane;
+        match self.start_recovered(&resumed, &seed) {
             Ok(started) => Ok(started),
             Err(error) => {
                 // Nothing started: the operator's stop stays in force.
-                let stopped = ownership
-                    .as_ref()
-                    .map(|p| p.mutation_guard())
-                    .transpose()
-                    .map_err(|e| LaneError::new("ownership_lost", e))
-                    .and_then(|_guard| {
-                        store
-                            .handle
-                            .block_lane_start(
-                                &lane.lane_id,
-                                storage::lanes::LANE_START_OPERATOR_STOP,
-                                self.lane_activity_time(),
-                            )
-                            .map(|_| ())
-                            .map_err(LaneError::from)
-                    });
+                let stopped = store.handle.block_lane_start(
+                    &lane.lane_id,
+                    storage::lanes::LANE_START_OPERATOR_STOP,
+                    self.lane_activity_time(),
+                );
                 if let Err(stop_error) = stopped {
                     self.lane_delivery_diagnostic(
                         None,
@@ -543,70 +465,19 @@ impl AgentRuntime {
         }
     }
 
-    fn recover_lane(
-        &self,
-        lane: &LaneRecord,
-        host: Option<&crate::ownership::OwnerHost>,
-    ) -> Result<Option<RunId>, LaneError> {
+    fn recover_lane(&self, lane: &LaneRecord) -> Result<Option<RunId>, LaneError> {
         let seed: StartSeed = serde_json::from_str(&lane.start_seed)
             .map_err(|e| LaneError::new("restore_failed", e))?;
         if self.check_lane_recovery(lane, &seed).is_err() {
             return Ok(None);
         }
-        match Self::lane_authority(lane, &seed, host)? {
-            Some(ownership) => self.start_recovered(lane, &seed, ownership),
-            None => Ok(None),
-        }
-    }
-
-    /// The ownership a start of this lane needs from the current host. `Ok(None)` when
-    /// another live host holds the thread: it may be admitting this same intent, and
-    /// startup must neither steal it nor fail the entire new window.
-    fn lane_authority(
-        lane: &LaneRecord,
-        seed: &StartSeed,
-        host: Option<&crate::ownership::OwnerHost>,
-    ) -> Result<Option<Option<crate::ownership::OwnerPermit>>, LaneError> {
-        // A host startup always participates in ADR 0024, including intents
-        // created by an unowned/demo runtime. The persisted seed is not authority
-        // to bypass another live host or its quiescing fence. Standalone runtimes
-        // without a host keep their explicit unowned recovery path.
-        if !seed.requires_ownership && host.is_none() {
-            return Ok(Some(None));
-        }
-        let host = host.ok_or_else(|| {
-            LaneError::new("lane_creation_denied", "a current owner host is required")
-        })?;
-        let permit = match host.attach(&lane.thread_id) {
-            Ok(owner) if owner.lease.owner_id == host.owner_id() => {
-                host.owned_permit(&lane.thread_id)
-            }
-            Ok(owner) => host.claim(&owner),
-            Err(crate::ownership::RegistryError::Absent) => host.start(&lane.thread_id),
-            Err(e) => Err(e),
-        };
-        match permit {
-            Ok(permit) => Ok(Some(Some(permit))),
-            Err(
-                crate::ownership::RegistryError::Ownership(
-                    crate::ownership::OwnershipError::NotClaimable
-                    | crate::ownership::OwnershipError::OwnerResponsive
-                    | crate::ownership::OwnershipError::Fenced
-                    | crate::ownership::OwnershipError::Active
-                    | crate::ownership::OwnershipError::Quiescing,
-                )
-                | crate::ownership::RegistryError::Exists
-                | crate::ownership::RegistryError::ThreadDeleted(_),
-            ) => Ok(None),
-            Err(error) => Err(LaneError::new("lane_creation_denied", error)),
-        }
+        self.start_recovered(lane, &seed)
     }
 
     fn start_recovered(
         &self,
         lane: &LaneRecord,
         seed: &StartSeed,
-        ownership: Option<crate::ownership::OwnerPermit>,
     ) -> Result<Option<RunId>, LaneError> {
         self.check_lane_recovery(lane, seed)?;
         let store = self.shared.run_store.get().ok_or_else(|| {
@@ -620,11 +491,6 @@ impl AgentRuntime {
                 event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error
             )
         {
-            let _guard = ownership
-                .as_ref()
-                .map(|permit| permit.mutation_guard())
-                .transpose()
-                .map_err(|error| LaneError::new("lane_creation_denied", error))?;
             let reason = format!(
                 "local root {} ended in {:?} before its first start committed",
                 seed.run_id, local.phase
@@ -635,13 +501,7 @@ impl AgentRuntime {
             tracing::warn!(lane_id = %lane.lane_id, %reason, "lane startup held after local terminal failure");
             return Ok(None);
         }
-        let (id, started) = self.start_lane_intent(
-            lane,
-            &RunConfig {
-                ownership,
-                ..RunConfig::default()
-            },
-        )?;
+        let (id, started) = self.start_lane_intent(lane)?;
         Ok(started.then_some(id))
     }
 
@@ -670,15 +530,11 @@ impl AgentRuntime {
         }
     }
 
-    fn start_lane_intent(
-        &self,
-        lane: &LaneRecord,
-        authority: &RunConfig,
-    ) -> Result<(RunId, bool), LaneError> {
+    fn start_lane_intent(&self, lane: &LaneRecord) -> Result<(RunId, bool), LaneError> {
         let seed: StartSeed = serde_json::from_str(&lane.start_seed)
             .map_err(|e| LaneError::new("restore_failed", e))?;
         // Idempotent open_lane retries return the existing ledger row too. Fence
-        // that path before ownership, registration or any admission is attempted.
+        // that path before registration or any admission is attempted.
         self.check_lane_recovery(lane, &seed)?;
         if let Some(reason) = &lane.start_blocked_reason {
             return Err(LaneError::new("lane_creation_denied", reason));
@@ -697,24 +553,9 @@ impl AgentRuntime {
             }
             return Ok((seed.run_id, false));
         }
-        let ownership = match authority.ownership.as_ref() {
-            Some(source) => Some(
-                source
-                    .prepare_lane(&lane.thread_id)
-                    .map_err(|e| LaneError::new("lane_creation_denied", e))?,
-            ),
-            None if seed.requires_ownership => {
-                return Err(LaneError::new(
-                    "lane_creation_denied",
-                    "current ownership is required",
-                ));
-            }
-            None => None,
-        };
         let config = RunConfig {
             lane_scope: Some(LaneScope::Lane),
             budget: crate::budget_tracker::BudgetSettings::lane_scope(),
-            ownership,
             project_root: seed.project_root,
             conversation: true,
             interactive: true,

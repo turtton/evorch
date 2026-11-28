@@ -425,7 +425,6 @@ mod tests {
                     source,
                     "worker memo",
                     &RunConfig::default(),
-                    false,
                     &Default::default(),
                     None,
                 )

@@ -35,20 +35,6 @@ pub(super) fn classify_run_error(reason: &str) -> Option<&'static str> {
     }
     Some(if lower.contains("database is locked") {
         "RunError:storage_busy"
-    } else if [
-        // OwnershipError display strings (ownership/state.rs), plus RuntimeError::StaleOwnership.
-        "owner or generation no longer matches",
-        "thread is not accepting new turns",
-        "thread has an active turn or needs a checkpoint",
-        "owner is not claimable",
-        "generation exhausted",
-        "previous owner still responds or liveness could not be established",
-        "run ownership generation is stale",
-    ]
-    .iter()
-    .any(|pattern| lower.contains(pattern))
-    {
-        "RunError:ownership"
     } else if lower.starts_with("cannot persist") || lower.starts_with("cannot record tool intent")
     {
         "RunError:persist"

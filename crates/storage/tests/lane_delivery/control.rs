@@ -34,7 +34,6 @@ fn started(f: &Fixture) -> LaneDeliveryOwner {
     let owner = LaneDeliveryOwner {
         root_run_id: "run-1".into(),
         generation: 1,
-        ownership_generation: 7,
     };
     f.h()
         .bind_lane_delivery_destination(
@@ -410,7 +409,7 @@ fn nudge_cas_is_single_slot_across_two_writers_and_rejects_stale_owner() {
     assert_eq!(one.notification_id, two.notification_id);
     assert_eq!(f.count("lane_notifications"), 1);
     let mut stale = r;
-    stale.owner.ownership_generation += 1;
+    stale.owner.generation += 1;
     rejected(
         f.h().observe_lane_stall(stale),
         LaneOperationError::OwnershipLost,

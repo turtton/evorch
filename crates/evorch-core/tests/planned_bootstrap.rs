@@ -2,7 +2,6 @@
 //! Real exec through the successor pipeline, with IPC checkpoints instead of
 //! elapsed-time assertions. The runner owns hang detection.
 use core_instance::{ConfigIdentity, Instance, LaunchGuard, handoff::receipt::BootStatus};
-use runtime::ownership::{OwnerState, Registry};
 use serde_json::Value;
 use std::{
     io::{BufRead, BufReader, Write},
@@ -91,11 +90,15 @@ impl Fixture {
         })
         .unwrap()
     }
-    fn owner(&self) -> runtime::ownership::ThreadOwner {
-        Registry::open_readonly(&self.owners.path().join("owners.db"))
-            .unwrap()
-            .attach("idle")
-            .unwrap()
+    fn no_owner_artifacts(&self) {
+        assert!(!self.owners.path().join("owners.db").exists());
+        assert!(std::fs::read_dir(self.owners.path()).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "sock")
+        }));
     }
     fn excludes_second_core(&self) {
         let launch = LaunchGuard::acquire(&self.identity()).unwrap();
@@ -153,7 +156,6 @@ async fn configured_sandbox_probe_is_owned_and_only_runs_after_ready() {
         let mut f = Fixture::new(scenario);
         f.event("exec");
         f.event("physical");
-        let held = f.owner();
         std::fs::write(
             f.data.path().join("config/config.toml"),
             format!(
@@ -221,10 +223,7 @@ models = [{{ route = "fixture" }}]
                     exit_code: 73
                 }
             ));
-            assert_eq!(f.owner().lease.generation, held.lease.generation + 1);
-            assert_ne!(f.owner().state, OwnerState::Released);
-            assert!(f.owner().planned_claim.is_some());
-            assert!(f.owner().handoff_hold.is_none());
+            f.no_owner_artifacts();
             assert!(mock.received_requests().await.unwrap().is_empty());
             assert!(!git_marker.exists());
         }
@@ -243,76 +242,6 @@ models = [{{ route = "fixture" }}]
     }
 }
 
-fn change_owner(f: &Fixture, thread: &str, change: impl FnOnce(&mut Value)) -> Value {
-    // Model another owner's already-committed generation, or a damaged hold;
-    // the successor must re-read canonical owners.db, not trust its inventory.
-    let db = rusqlite::Connection::open(f.owners.path().join("owners.db")).unwrap();
-    let state: String = db
-        .query_row(
-            "SELECT state FROM thread_owners WHERE thread_id = ?1",
-            [thread],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let mut state: Value = serde_json::from_str(&state).unwrap();
-    change(&mut state);
-    db.execute(
-        "UPDATE thread_owners SET state = ?2 WHERE thread_id = ?1",
-        [thread, &state.to_string()],
-    )
-    .unwrap();
-    state
-}
-
-#[test]
-fn another_owner_is_reported_blocked_and_never_taken_back() {
-    let mut f = Fixture::new("blocked");
-    f.event("exec");
-    f.event("physical");
-    let foreign = change_owner(&f, "idle", |s| {
-        s["lease"]["generation"] = (s["lease"]["generation"].as_u64().unwrap() + 1).into();
-        s["lease"]["owner_id"] = "another-owner".into();
-        s["handoff_hold"] = Value::Null;
-        s["state"] = "Running".into();
-    });
-    f.advance();
-    assert_eq!(f.event("prepared")["blocked"], serde_json::json!(["idle"]));
-    assert_eq!(serde_json::to_value(f.owner()).unwrap(), foreign);
-    f.advance();
-    f.event("ready");
-    f.advance();
-    assert!(f.child.wait().unwrap().success());
-    assert_eq!(serde_json::to_value(f.owner()).unwrap(), foreign);
-}
-
-#[test]
-fn partial_claim_error_keeps_both_claimed_generation_and_unclaimed_hold() {
-    let mut f = Fixture::new("partial_claim");
-    f.event("exec");
-    f.event("physical");
-    let first = f.owner();
-    let damaged = change_owner(&f, "z-idle", |s| {
-        s["handoff_hold"]["capture_id"] = "different-capture".into();
-    });
-    f.advance();
-    assert_eq!(f.child.wait().unwrap().code(), Some(73));
-    assert_eq!(f.owner().lease.generation, first.lease.generation + 1);
-    assert_ne!(f.owner().state, OwnerState::Released);
-    let second = Registry::open_readonly(&f.owners.path().join("owners.db"))
-        .unwrap()
-        .attach("z-idle")
-        .unwrap();
-    assert_eq!(serde_json::to_value(second).unwrap(), damaged);
-    assert_eq!(
-        f.database()
-            .restart_transaction("restart")
-            .unwrap()
-            .unwrap()
-            .phase,
-        RestartPhase::Adopted
-    );
-}
-
 #[test]
 fn control_bind_failure_uses_planned_failure_not_normal_shutdown() {
     let mut f = Fixture::new("bind");
@@ -323,11 +252,9 @@ fn control_bind_failure_uses_planned_failure_not_normal_shutdown() {
     let _occupied =
         std::os::unix::net::UnixListener::bind(f.identity().socket(f.sockets.path()).unwrap())
             .unwrap();
-    let owner = f.owner();
     f.advance();
     assert_eq!(f.child.wait().unwrap().code(), Some(73));
-    assert_eq!(f.owner().lease, owner.lease);
-    assert_ne!(f.owner().state, OwnerState::Released);
+    f.no_owner_artifacts();
     assert!(
         f.database()
             .restart_transaction("restart")
@@ -343,12 +270,10 @@ async fn check_success(scenario: &str) {
     let old = f.event("exec");
     let physical = f.event("physical");
     assert_eq!(old["pid"], physical["pid"]);
-    let held = f.owner();
-    assert!(held.handoff_hold.is_some());
+    f.no_owner_artifacts();
     f.excludes_second_core();
     f.advance();
     let prepared = f.event("prepared");
-    assert_eq!(prepared["blocked"], serde_json::json!([]));
     let stages = prepared["timings_ms"]
         .as_array()
         .unwrap()
@@ -361,8 +286,7 @@ async fn check_success(scenario: &str) {
             "PhysicalAdopted",
             "StorageOpened",
             "Adopted",
-            "FirstOwnerClaimed",
-            "OwnersClaimed",
+            "TransactionPrepared",
             "HostComposed"
         ]
     );
@@ -373,11 +297,7 @@ async fn check_success(scenario: &str) {
         .unwrap();
     assert_eq!(tx.phase, RestartPhase::Adopted);
     assert!(tx.ready_at_ms.is_none());
-    let claimed = f.owner();
-    assert_eq!(claimed.lease.generation, held.lease.generation + 1);
-    assert_ne!(claimed.lease.owner_id, held.lease.owner_id);
-    assert!(claimed.planned_claim.is_some());
-    assert!(claimed.handoff_hold.is_none());
+    f.no_owner_artifacts();
     f.excludes_second_core();
     f.advance();
     let ready = f.event("ready");
@@ -417,7 +337,7 @@ async fn check_success(scenario: &str) {
 }
 
 #[tokio::test]
-async fn planned_bootstrap_exec_adopts_claims_before_composition_and_defers_activation() {
+async fn planned_bootstrap_exec_adopts_transaction_before_composition_and_defers_activation() {
     check_success("success").await;
 }
 #[tokio::test]
@@ -437,7 +357,6 @@ async fn check_failure(scenario: &str, code: i32, adopted: bool) {
     let mut f = Fixture::new(scenario);
     f.event("exec");
     f.event("physical");
-    let held = f.owner();
     f.excludes_second_core();
     let db_path = f.data.path().join("config/evorch-events.db");
     let saved_db = db_path.with_extension("saved");
@@ -481,14 +400,7 @@ async fn check_failure(scenario: &str, code: i32, adopted: bool) {
         }
     );
     assert!(tx.ready_at_ms.is_none());
-    let after = f.owner();
-    assert_ne!(after.state, OwnerState::Released);
-    assert_eq!(
-        after.lease.generation,
-        held.lease.generation + u64::from(adopted)
-    );
-    assert_eq!(after.handoff_hold.is_some(), !adopted);
-    assert_eq!(after.planned_claim.is_some(), adopted);
+    f.no_owner_artifacts();
     let receipt = f.identity().read_restart_receipt().unwrap().unwrap();
     assert!(matches!(receipt.status, BootStatus::Failed { exit_code, .. } if exit_code == code));
     // Repair only the fixture's deliberately broken local config. Failure
@@ -550,13 +462,13 @@ failure_case!(
     false
 );
 failure_case!(
-    unknown_ack_never_authorizes_claim_or_cold_fallback,
+    unknown_ack_never_authorizes_composition_or_cold_fallback,
     "ack_unknown",
     72,
     false
 );
 failure_case!(
-    post_claim_failure_never_releases_successor_generation,
+    post_adopt_failure_preserves_the_successor_transaction,
     "before_ready",
     73,
     true
@@ -575,7 +487,7 @@ failure_case!(
 );
 
 #[tokio::test]
-async fn planned_storage_without_proof_cannot_open_an_owner_or_run_maintenance() {
+async fn planned_storage_without_proof_cannot_compose_or_run_maintenance() {
     let data = tempfile::tempdir().unwrap();
     let owners = test_socket_dir::SocketDir::new();
     let project = data.path().join("project");
@@ -592,12 +504,12 @@ async fn planned_storage_without_proof_cannot_open_an_owner_or_run_maintenance()
     assert!(stage.runtime().list_agents().is_empty());
     assert!(!config.join("credentials").exists());
     assert!(!owners.path().join("owners.db").exists());
-    assert!(stage.claim("unproven").is_err());
+    assert!(stage.prepare_adopted("unproven").is_err());
     assert!(!owners.path().join("owners.db").exists());
 }
 
 #[tokio::test]
-async fn planned_storage_lease_contention_does_not_open_an_owner_or_fall_back() {
+async fn planned_storage_lease_contention_does_not_compose_or_fall_back() {
     let data = tempfile::tempdir().unwrap();
     let config = data.path().join("config");
     let project = data.path().join("project");

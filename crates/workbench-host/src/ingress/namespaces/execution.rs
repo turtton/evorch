@@ -218,16 +218,13 @@ impl CommandHost {
                     None,
                 )?;
             }
-            let run = self
-                .service
-                .start_invocation_run(InvocationRun {
-                    thread: thread.as_str().to_owned(),
-                    role: invocation_role(start.role),
-                    prompt: start.prompt.clone(),
-                    project_root: root,
-                    submission_id: submission,
-                })
-                .map_err(|reason| reject_error(RejectKind::Failed, &reason))?;
+            let run = self.service.start_invocation_run(InvocationRun {
+                thread: thread.as_str().to_owned(),
+                role: invocation_role(start.role),
+                prompt: start.prompt.clone(),
+                project_root: root,
+                submission_id: submission,
+            })?;
             (run, Some(run), None)
         };
         let ownership = if owned.is_some() {

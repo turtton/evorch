@@ -615,7 +615,6 @@ async fn raw_transcript_reconstructs_in_order() {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
             | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => None,
         })

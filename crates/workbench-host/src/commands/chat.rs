@@ -52,16 +52,14 @@ impl CommandService {
     pub(super) fn submit_chat(
         &mut self,
         submission: ChatInput,
-        permit: Option<runtime::ownership::OwnerPermit>,
         resume_only: bool,
     ) -> Vec<HostEvent> {
-        self.submit_chat_config(submission, permit, resume_only, RunConfig::default())
+        self.submit_chat_config(submission, resume_only, RunConfig::default())
     }
 
     pub(super) fn submit_chat_config(
         &mut self,
         submission: ChatInput,
-        permit: Option<runtime::ownership::OwnerPermit>,
         resume_only: bool,
         mut initial: RunConfig,
     ) -> Vec<HostEvent> {
@@ -88,12 +86,43 @@ impl CommandService {
             initial.skill_mentions.clone_from(&submission.skills);
         }
         let thread_id = submission.thread_id;
-        // New runs of a thread work in its project, even after the active project moved.
-        if let Some(root) = submission.project_root {
-            self.bindings.thread_roots.insert(thread_id.clone(), root);
-        }
-        if initial.project_root.is_none() {
-            initial.project_root = self.bindings.thread_roots.get(&thread_id).cloned();
+        let requested_project = initial
+            .project_root
+            .as_deref()
+            .or(submission.project_root.as_deref())
+            .or_else(|| {
+                self.bindings
+                    .thread_roots
+                    .get(&thread_id)
+                    .map(|root| root.as_path())
+            });
+        initial.project_root = match crate::lane::current_thread_project(
+            &self.runtime,
+            self.sidebar_path.as_deref(),
+            &thread_id,
+            requested_project,
+        ) {
+            Ok(root) => root,
+            Err(error) => {
+                return vec![HostEvent::chat_rejected(
+                    &thread_id,
+                    match error.code {
+                        workbench_protocol::errors::ErrorCode::NotFound => RejectKind::NotFound,
+                        workbench_protocol::errors::ErrorCode::PermissionDenied => {
+                            RejectKind::Fenced
+                        }
+                        workbench_protocol::errors::ErrorCode::Conflict => RejectKind::Conflict,
+                        _ => RejectKind::Unavailable,
+                    },
+                    error.message,
+                )];
+            }
+        };
+        // A refused request must not replace the project later resumes use.
+        if let Some(root) = &initial.project_root {
+            self.bindings
+                .thread_roots
+                .insert(thread_id.clone(), root.clone());
         }
         initial.memory = self.capture_memory(initial.project_root.as_deref());
         // A lane thread has one conversation root, the lane ledger's, which report and close
@@ -117,6 +146,32 @@ impl CommandService {
                 }];
             }
         };
+        // Send and Continue use the same saved root. Removing the process owner
+        // must not create a new conversation just because this core is cold.
+        if !self.bindings.chat_runs.contains_key(&thread_id)
+            && !self.bindings.goal_runs.contains_key(&thread_id)
+        {
+            match self.runtime.latest_chat_run(&thread_id) {
+                Ok(Some(root)) => {
+                    if let Err(error) = self.runtime.bind_thread_root(&thread_id, root) {
+                        return vec![HostEvent::chat_rejected(
+                            &thread_id,
+                            RejectKind::Conflict,
+                            error.to_string(),
+                        )];
+                    }
+                    self.bindings.chat_runs.insert(thread_id.clone(), root);
+                }
+                Ok(None) => (),
+                Err(error) => {
+                    return vec![HostEvent::chat_rejected(
+                        &thread_id,
+                        RejectKind::Unavailable,
+                        error.to_string(),
+                    )];
+                }
+            }
+        }
         let mut resume_observation = None;
         if resume_only {
             if !self.bindings.chat_runs.contains_key(&thread_id)
@@ -196,7 +251,6 @@ impl CommandService {
                 .copied()
                 .unwrap_or(run_id);
             let mut authority = RunConfig {
-                ownership: permit.clone(),
                 model_preference: submission.model_preference.selection().flatten(),
                 ..initial.clone()
             };
@@ -282,25 +336,6 @@ impl CommandService {
                 }
             }
         }
-        if let Some(permit) = &permit {
-            if !resume_only
-                && !lane_thread
-                && self
-                    .bindings
-                    .chat_permits
-                    .get(&thread_id)
-                    .is_some_and(|previous| {
-                        previous.registry_path != permit.registry_path
-                            || previous.lease.owner_id != permit.lease.owner_id
-                            || previous.lease.generation != permit.lease.generation
-                    })
-            {
-                self.bindings.chat_runs.remove(&thread_id);
-            }
-            self.bindings
-                .chat_permits
-                .insert(thread_id.clone(), permit.clone());
-        }
         if let Some(&run_id) = self.bindings.chat_runs.get(&thread_id) {
             // continue_goal preserves the saved role, regardless of the current composer.
             let saved_role = self
@@ -316,7 +351,6 @@ impl CommandService {
             let mut authority = RunConfig {
                 conversation,
                 category: worker.then(|| CategoryId::Conversation.to_string()),
-                ownership: permit.clone(),
                 model_preference: submission.model_preference.selection().flatten(),
                 ..initial.clone()
             };
@@ -398,7 +432,6 @@ impl CommandService {
             RunConfig {
                 conversation: true,
                 category: worker.then(|| CategoryId::Conversation.to_string()),
-                ownership: permit,
                 interactive: true,
                 keep_alive: true,
                 model_preference: submission.model_preference.selection().flatten(),

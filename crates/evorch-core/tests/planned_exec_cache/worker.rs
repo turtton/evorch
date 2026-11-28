@@ -142,7 +142,6 @@ async fn run_async(root: PathBuf) {
     listener.set_nonblocking(true).unwrap();
     let listener = tokio::net::UnixListener::from_std(listener).unwrap();
     let signals = OperatorSignals::new(signal_entry::mask()).unwrap();
-    let permit = host.owner.start("cache-thread").unwrap();
     let mut events = host.runtime.event_bus().subscribe();
     let run = host
         .runtime
@@ -151,7 +150,6 @@ async fn run_async(root: PathBuf) {
             runtime::Role::Orchestrator,
             "Preserve this exact prefix and the tool result".into(),
             runtime::RunConfig {
-                ownership: Some(permit),
                 project_root: Some(root.clone()),
                 memory: workbench_host::lane::memory_boundary(
                     &host.runtime,
@@ -236,7 +234,7 @@ async fn run_async(root: PathBuf) {
         },
         &current,
         core_launcher::handoff::targets::TargetRequirements {
-            handoff: 1,
+            handoff: core_instance::handoff::HANDOFF_FORMAT_VERSION,
             snapshot: 1,
             storage_schema: storage_version,
             protocol: workbench_protocol::ProtocolVersion::CURRENT.0,
@@ -274,7 +272,7 @@ async fn run_async(root: PathBuf) {
         old_build: core_instance::handoff::running_elf_identity().unwrap(),
         successor_build: core_instance::handoff::elf_identity(&product).unwrap(),
         target_identity: "cache-target".into(),
-        handoff_version: 1,
+        handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_version: 1,
         storage_version,
         old_builtin_tool_names: host.runtime.restart_builtin_tool_names(),

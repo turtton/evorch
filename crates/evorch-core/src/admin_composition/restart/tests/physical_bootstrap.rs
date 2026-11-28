@@ -1,4 +1,4 @@
-//! Test-binary physical entry: real exec, inherited OFD, ticket and owner claim.
+//! Test-binary physical entry: real exec, inherited OFD, ticket and transaction adoption.
 use core_instance::{
     ConfigIdentity, InheritedHandoffProof, Instance, LaunchGuard,
     handoff::{
@@ -9,7 +9,7 @@ use core_instance::{
     },
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
@@ -59,7 +59,7 @@ static PHYSICAL_ENTRY: extern "C" fn() = {
                 let launch = LaunchGuard::acquire(&identity).unwrap();
                 let instance = Instance::acquire(&launch, &sockets).unwrap();
                 drop(launch);
-                seed(&root, &sockets, &identity);
+                seed(&root, &identity);
                 let record = HandoffRecord {
                     restart_id: TX.into(),
                     config_identity: identity.identity().into(),
@@ -80,24 +80,14 @@ static PHYSICAL_ENTRY: extern "C" fn() = {
     }
     entry
 };
-fn seed(root: &Path, sockets: &Path, identity: &ConfigIdentity) {
+fn seed(root: &Path, identity: &ConfigIdentity) {
     let config = storage::StorageConfig {
         db_path: root.join("evorch-events.db"),
         ..Default::default()
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
     let writer = storage.handle();
-    let bus = Arc::new(event_bus::EventBus::new(64));
-    let owner = runtime::ownership::OwnerHost::open_planned(
-        &sockets.join("owners"),
-        Default::default(),
-        bus,
-    )
-    .unwrap();
     let run = runtime::RunId::new(1);
-    let mut permit = owner.start("owned").unwrap();
-    permit.run_id = Some(run.to_string());
-    permit.begin_turn().unwrap();
     let intent = runtime::quiesce::ResumeIntent {
         version: 1,
         run_id: run,
@@ -141,8 +131,6 @@ fn seed(root: &Path, sockets: &Path, identity: &ConfigIdentity) {
         thread_id: Some("owned".into()),
         intent_revision: 0,
         snapshot: None,
-        owner_id: Some(owner.owner_id().into()),
-        owner_generation: Some(permit.lease.generation),
         lane_id: None,
     };
     let build = running_elf_identity().unwrap();
@@ -162,7 +150,7 @@ fn seed(root: &Path, sockets: &Path, identity: &ConfigIdentity) {
         old_build: build.clone(),
         successor_build: build,
         target_identity: "current".into(),
-        handoff_version: 1,
+        handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_version: 1,
         storage_version: schema,
         old_builtin_tool_names: BTreeSet::new(),
@@ -209,7 +197,7 @@ fn seed(root: &Path, sockets: &Path, identity: &ConfigIdentity) {
     };
     step(RestartMutation::SaveComponent(RecoveryManifestRecord {
         manifest_id: "owned-graph".into(),
-        schema_version: 1,
+        schema_version: storage::recovery::RECOVERY_SCHEMA_VERSION,
         committed: false,
         superseded: false,
         edges: vec![],
@@ -223,34 +211,9 @@ fn seed(root: &Path, sockets: &Path, identity: &ConfigIdentity) {
         }],
     }));
     step(RestartMutation::Commit);
-    let active = BTreeMap::from([(
-        "owned".into(),
-        runtime::ownership::ExpectedThreadRuns {
-            generation: permit.lease.generation,
-            active_runs: BTreeSet::from([run.to_string()]),
-        },
-    )]);
-    let holds = owner.hold_for_restart(TX, CAPTURE, &active).unwrap();
-    owner.stop_worker_for_exec().unwrap();
-    for hold in holds {
-        step(RestartMutation::OwnerProgress(RestartOwnerProgress {
-            thread_id: hold.thread_id,
-            old_owner_id: hold.owner_id,
-            old_generation: hold.generation,
-            active_runs: hold.active_runs,
-            parked_runs: hold.parked_runs,
-            hold_saved: true,
-            hold_read_back: true,
-            worker_joined: true,
-            socket_unlinked: true,
-            hold_removed: false,
-        }));
-    }
     step(RestartMutation::Arm {
         nonce_hash: "composed-nonce".into(),
     });
-    drop(permit);
-    drop(owner);
     drop(writer);
     storage.close();
 }
@@ -278,30 +241,25 @@ impl workbench_host::bootstrap::core_startup::CoreStartupHook for ParkedRecovery
         })
     }
 }
-mod lease_observation;
-pub use lease_observation::{State, finish_renewals, wait_for_renewal};
 
 pub fn state(
     host: &workbench_host::bootstrap::BootstrappedHost,
     driver: &crate::lifecycle::LifecycleDriver,
-) -> State {
-    State::new(
-        format!(
-            "{:?}|{:?}|{:?}|{:?}",
-            storage::Database::open(host.storage_config())
-                .unwrap()
-                .restart_transactions()
-                .unwrap(),
-            driver.restart.snapshot(),
-            host.runtime.quiesce_state(),
-            host.host
-                .lock()
-                .unwrap()
-                .service()
-                .lane_bindings()
-                .observe()
-                .is_current()
-        ),
-        host.owner.restart_inventory().unwrap(),
+) -> String {
+    format!(
+        "{:?}|{:?}|{:?}|{:?}",
+        storage::Database::open(host.storage_config())
+            .unwrap()
+            .restart_transactions()
+            .unwrap(),
+        driver.restart.snapshot(),
+        host.runtime.quiesce_state(),
+        host.host
+            .lock()
+            .unwrap()
+            .service()
+            .lane_bindings()
+            .observe()
+            .is_current()
     )
 }

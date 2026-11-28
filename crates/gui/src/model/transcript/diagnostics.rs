@@ -138,7 +138,6 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
         | EventKind::Provider(_)
         | EventKind::AgentMessage(_)
         | EventKind::Compaction(_)
-        | EventKind::Ownership(_)
         | EventKind::ConversationPlan(_)
         | EventKind::PullRequest(_)
         | EventKind::Orchestrator(_) => None,
@@ -172,7 +171,6 @@ fn wording(code: &str) -> Option<Wording> {
         code::PROVIDER_MODEL_ROUTE => Fixed("Model route adjusted for the provider"),
         code::CACHE_REGRESSION => Fixed("Prompt cache reuse dropped"),
         code::TOOL_ARGUMENTS_MALFORMED => Fixed("A tool call had malformed arguments"),
-        code::OWNERSHIP_REGISTRY_WAIT => Detail,
         code::COMPACTION_FAILED => Lead("Compaction failed"),
         code::LEARNING_PIPELINE_FAILED => Fixed("Lesson extraction or review failed"),
         code::CONTEXT_SNAPSHOT_FAILED => Fixed("Could not save the conversation checkpoint"),
@@ -389,13 +387,6 @@ mod tests {
             "kimi: HTTP 403\nsecond line",
         ));
         assert_eq!(text, "Provider unavailable: kimi: HTTP 403");
-
-        let (text, _) = text_and_hover(&diagnostic(
-            Warning,
-            code::OWNERSHIP_REGISTRY_WAIT,
-            "Waiting for the owner registry (locked for over 3 s)",
-        ));
-        assert_eq!(text, "Waiting for the owner registry (locked for over 3 s)");
     }
 
     // Given: a code the GUI has no wording for / When: shown / Then: its detail is the line

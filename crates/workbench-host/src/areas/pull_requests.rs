@@ -32,7 +32,6 @@ use crate::bootstrap::BootstrapError;
 use crate::bootstrap::restart::HostCommandPermit;
 use event_bus::{EventKind, PullRequestChangedField, PullRequestEvent, RecvError};
 use runtime::AgentRuntime;
-use runtime::ownership::OwnerPermit;
 use runtime::pull_requests::{PullRequestError, PullRequestService};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -182,10 +181,6 @@ impl From<PullRequestError> for Failure {
                 message: sanitize(&error.to_string()),
                 unknown: false,
             },
-            E::NotOwner | E::OwnershipLost => failure(
-                ErrorCode::PermissionDenied,
-                "this core does not hold the thread",
-            ),
             E::StaleRevision => failure(
                 ErrorCode::StaleRevision,
                 "the thread's pull request changed since it was read; read it again",
@@ -198,7 +193,6 @@ impl From<PullRequestError> for Failure {
                 message: sanitize(&rejection.to_string()),
                 unknown: false,
             },
-            E::OwnershipBusy => failure(ErrorCode::Busy, "the ownership registry is busy"),
             E::Storage(storage::StorageError::PrAutoFix(rejection)) => match rejection {
                 PrAutoFixRejection::StaleLink | PrAutoFixRejection::StaleBudget => failure(
                     ErrorCode::StaleRevision,
@@ -271,19 +265,19 @@ impl PullRequestsArea {
     }
 
     /// Accept a command: start its operation, or answer from the table.
-    /// `permit` is asked only for a new operation, so a repeated request is
-    /// answered even when the thread has meanwhile left this core.
+    /// Whether the thread exists and may be changed is decided by the pull
+    /// request service when the operation runs, and reaches the client as the
+    /// operation's failure (`NotFound`, `PermissionDenied`, `Conflict`, ...).
     ///
     /// # Errors
     /// `Conflict` for an id used by a different request, `LimitExceeded` when the
     /// memory of accepted ids is full or
-    /// every retained operation is still running, `Draining` once the host is
-    /// stopping, and what `permit` refuses with.
+    /// every retained operation is still running, and `Draining` once the host is
+    /// stopping.
     pub(crate) fn submit(
         &self,
         command: PullRequestsCommand,
         accepted: Option<HostCommandPermit>,
-        permit: impl FnOnce() -> Result<OwnerPermit, WorkbenchError>,
     ) -> Result<Submitted, WorkbenchError> {
         let inner = self.inner()?;
         let id = command.operation_id().clone();
@@ -291,7 +285,6 @@ impl PullRequestsArea {
         if let Some(known) = inner.known(&command, &id, &digest)? {
             return Ok(known);
         }
-        let permit = permit()?;
         let view = {
             let mut operations = lock(&inner.operations);
             if let Some(known) = inner.answer(&mut operations, &command, &id, &digest)? {
@@ -330,7 +323,7 @@ impl PullRequestsArea {
             inner
                 .tasks
                 .spawn_counted_tracked("pull-request-operation", accepted, move |_stop| {
-                    task.run(task_id, command, permit)
+                    task.run(task_id, command)
                 });
         if let Err(refused) = spawned {
             lock(&inner.operations).forget(&id);
@@ -348,15 +341,11 @@ impl PullRequestsArea {
     }
 
     /// What a client shows of `thread`, read from the database the service
-    /// writes. `owned_here` is what the adapter knows of the thread's lease.
+    /// writes.
     ///
     /// # Errors
     /// `StorageUnavailable` when the database cannot be read.
-    pub fn thread(
-        &self,
-        thread: &ThreadId,
-        owned_here: bool,
-    ) -> Result<ThreadPullRequest, WorkbenchError> {
+    pub fn thread(&self, thread: &ThreadId) -> Result<ThreadPullRequest, WorkbenchError> {
         let inner = self.inner()?;
         let service = inner.runtime.pull_requests();
         let settings = service.as_ref().map(PullRequestService::settings);
@@ -382,7 +371,6 @@ impl PullRequestsArea {
         Ok(read.into_view(
             thread.clone(),
             settings.as_ref().is_some_and(|s| s.enabled),
-            owned_here,
             globally,
             attribution,
         ))
@@ -534,7 +522,6 @@ impl Inner {
         self: Arc<Self>,
         id: OperationId,
         command: PullRequestsCommand,
-        permit: OwnerPermit,
     ) -> Result<(), BootstrapError> {
         // Settles the operation as unknown when this future is dropped or
         // panics before it finished: a cut-off operation is never a success.
@@ -543,17 +530,13 @@ impl Inner {
             id: id.clone(),
             settled: false,
         };
-        let outcome = self.execute(command, &permit).await;
+        let outcome = self.execute(command).await;
         guard.settled = true;
         self.finish(&id, outcome);
         Ok(())
     }
 
-    async fn execute(
-        &self,
-        command: PullRequestsCommand,
-        permit: &OwnerPermit,
-    ) -> Result<Done, Failure> {
+    async fn execute(&self, command: PullRequestsCommand) -> Result<Done, Failure> {
         let service = self.runtime.pull_requests().ok_or_else(|| {
             failure(
                 ErrorCode::UnsupportedCapability,
@@ -563,39 +546,29 @@ impl Inner {
         let done = match command {
             PullRequestsCommand::LinkPullRequest(c) => {
                 let receipt = service
-                    .link(
-                        c.thread.as_str(),
-                        &c.locator,
-                        c.expected_revision.get(),
-                        permit,
-                    )
+                    .link(c.thread.as_str(), &c.locator, c.expected_revision.get())
                     .await?;
                 lifecycle(receipt.lifecycle_revision)
             }
             PullRequestsCommand::UnlinkPullRequest(c) => {
                 let receipt = service
-                    .unlink(c.thread.as_str(), c.expected_revision.get(), permit)
+                    .unlink(c.thread.as_str(), c.expected_revision.get())
                     .await?;
                 lifecycle(receipt.lifecycle_revision)
             }
             PullRequestsCommand::RefreshPullRequest(c) => {
-                service.refresh(c.thread.as_str(), permit).await?;
+                service.refresh(c.thread.as_str()).await?;
                 Done::default()
             }
             PullRequestsCommand::ConfirmPullRequestCandidate(c) => {
                 let receipt = service
-                    .confirm_candidate(
-                        c.thread.as_str(),
-                        c.candidate_id,
-                        c.expected_revision.get(),
-                        permit,
-                    )
+                    .confirm_candidate(c.thread.as_str(), c.candidate_id, c.expected_revision.get())
                     .await?;
                 lifecycle(receipt.lifecycle_revision)
             }
             PullRequestsCommand::DismissPullRequestCandidate(c) => {
                 service
-                    .dismiss_candidate(c.thread.as_str(), c.candidate_id, permit)
+                    .dismiss_candidate(c.thread.as_str(), c.candidate_id)
                     .await?;
                 Done::default()
             }
@@ -606,7 +579,6 @@ impl Inner {
                         c.link_revision.get(),
                         c.policy_revision.get(),
                         c.enabled,
-                        permit,
                     )
                     .await?;
                 policy(state.policy_revision)
@@ -618,7 +590,6 @@ impl Inner {
                         c.link_revision.get(),
                         c.policy_revision.get(),
                         c.confirmed_previous.map(String::from),
-                        permit,
                     )
                     .await?;
                 policy(state.policy_revision)
@@ -630,7 +601,6 @@ impl Inner {
                         c.link_revision.get(),
                         c.policy_revision.get(),
                         c.confirmed_previous.map(String::from),
-                        permit,
                     )
                     .await?;
                 policy(state.policy_revision)
@@ -641,7 +611,6 @@ impl Inner {
                         c.thread.as_str(),
                         c.link_revision.get(),
                         &c.expected_head,
-                        permit,
                     )
                     .await?;
                 Done {
@@ -910,7 +879,6 @@ impl ThreadRead {
         self,
         thread: ThreadId,
         tracking_enabled: bool,
-        owned_here: bool,
         globally_enabled: bool,
         head_attribution: HeadAttribution,
     ) -> ThreadPullRequest {
@@ -922,7 +890,6 @@ impl ThreadRead {
         ThreadPullRequest {
             thread,
             tracking_enabled,
-            owned_here,
             lifecycle_revision: Revision(self.state.lifecycle_revision),
             transition_seq: Sequence(self.state.transition_seq),
             link: self.link.as_ref().map(|link| LinkView {
@@ -1093,7 +1060,6 @@ mod origin_tests {
         };
         let view = read.into_view(
             ThreadId::new("thread-1").unwrap(),
-            true,
             true,
             true,
             HeadAttribution::Unknown,

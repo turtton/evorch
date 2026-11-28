@@ -5,9 +5,7 @@
 mod tests;
 use super::view::{self, GraphFact};
 use crate::admin::{self, AdminFailure};
-use runtime::{
-    AgentRuntime, RuntimeError, WeakAgentRuntime, runtime::graph_observation::GraphObserver,
-};
+use runtime::{RuntimeError, runtime::graph_observation::GraphObserver};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -21,7 +19,6 @@ use workbench_protocol::{
 
 pub struct LiveGraphCollector {
     pub(super) state: Mutex<LiveState>,
-    runtime: WeakAgentRuntime,
     storage: StorageConfig,
 }
 pub(super) struct LiveState {
@@ -30,6 +27,9 @@ pub(super) struct LiveState {
     pub ready: bool,
     pub failed: bool,
     pub graphs: BTreeMap<String, GraphFact>,
+    /// Graphs in a format this build does not execute, by manifest. Display
+    /// only: never part of the live inventory, so no effect can start on them.
+    pub legacy: BTreeMap<String, GraphReference>,
     pub pending: BTreeMap<String, u64>,
     // Only asks the existing coordinator whether this exact attempt returned to
     // Running. Never interprets receipts or invents a second lifecycle state.
@@ -67,9 +67,8 @@ fn runtime_error(_: AdminFailure) -> RuntimeError {
     RuntimeError::RestartBusy
 }
 impl LiveGraphCollector {
-    pub fn new(runtime: &AgentRuntime, storage: StorageConfig) -> Arc<Self> {
+    pub fn new(storage: StorageConfig) -> Arc<Self> {
         Arc::new(Self {
-            runtime: runtime.downgrade(),
             storage,
             state: Mutex::new(LiveState {
                 epoch: None,
@@ -77,6 +76,7 @@ impl LiveGraphCollector {
                 ready: false,
                 failed: false,
                 graphs: BTreeMap::new(),
+                legacy: BTreeMap::new(),
                 pending: BTreeMap::new(),
                 restart: None,
             }),
@@ -107,108 +107,83 @@ impl LiveGraphCollector {
         if !state.pending.is_empty() {
             return Err(unavailable());
         }
-        view::aggregate_facts(state.graphs.values(), Revision(state.revision))
+        view::aggregate_facts(
+            state.graphs.values(),
+            state.legacy.values(),
+            Revision(state.revision),
+        )
     }
-    fn facts(&self, manifest: Option<&str>) -> Result<BTreeMap<String, GraphFact>, AdminFailure> {
-        let runtime = self.runtime.upgrade().ok_or_else(unavailable)?;
-        let graphs =
-            storage::Database::read_owned_graphs(&self.storage, |db| db.owned_graph_snapshots())
-                .map_err(|_| unavailable())?;
+    /// This core's epoch, once bound.
+    pub fn epoch(&self) -> Option<InstanceEpoch> {
+        self.state.lock().ok().and_then(|state| state.epoch)
+    }
+    /// One read snapshot: the live facts of graphs this core adopted, and the
+    /// legacy graphs to show. Only the sealed adopted inventory can acquire
+    /// live tickets; cold and legacy database rows never extend it through a
+    /// later claim.
+    fn observe(
+        &self,
+        manifest: Option<&str>,
+    ) -> Result<
+        (
+            BTreeMap<String, GraphFact>,
+            BTreeMap<String, GraphReference>,
+        ),
+        AdminFailure,
+    > {
+        // Never read storage while holding the state.
+        let live_epoch = self.state.lock().map_err(|_| unavailable())?.epoch;
+        let (graphs, headers) = storage::Database::read_owned_graphs(&self.storage, |db| {
+            Ok((db.owned_graph_snapshots()?, db.recovery_graph_headers()?))
+        })
+        .map_err(|_| unavailable())?;
         let mut facts = BTreeMap::new();
-        for graph in graphs
-            .iter()
-            .filter(|g| manifest.is_none_or(|m| m == g.cas.manifest.manifest_id))
-        {
-            let diagnostic = runtime
-                .owned_graph_ownership_readback(&graph.cas)
-                .map_err(|_| unavailable())?;
-            // Only the sealed adopted inventory can acquire live tickets. Cold
-            // and foreign database rows never extend it through a later claim.
-            if diagnostic.verified_adoption() {
-                let key = graph.cas.manifest.manifest_id.clone();
-                if facts
-                    .insert(key, view::graph_fact(graph, &diagnostic)?)
-                    .is_some()
-                {
-                    return Err(unavailable());
-                }
+        for graph in graphs.iter().filter(|g| {
+            manifest.is_none_or(|m| m == g.cas.manifest.manifest_id)
+                && view::adopted_by(g, live_epoch)
+        }) {
+            let key = graph.cas.manifest.manifest_id.clone();
+            if facts
+                .insert(key, view::graph_fact(graph, live_epoch)?)
+                .is_some()
+            {
+                return Err(unavailable());
             }
         }
-        Ok(facts)
+        let mut legacy = BTreeMap::new();
+        for header in headers
+            .iter()
+            .filter(|h| manifest.is_none_or(|m| m == h.manifest_id) && view::legacy_listed(h))
+        {
+            legacy.insert(header.manifest_id.clone(), view::legacy_reference(header)?);
+        }
+        Ok((facts, legacy))
+    }
+    fn facts(&self, manifest: Option<&str>) -> Result<BTreeMap<String, GraphFact>, AdminFailure> {
+        self.observe(manifest).map(|(facts, _)| facts)
+    }
+    /// Re-read the legacy graphs after an explicit discard. A read failure
+    /// closes observation (it never becomes an empty list).
+    pub fn refresh_legacy(&self) -> Result<(), AdminFailure> {
+        let legacy = match self.observe(None) {
+            Ok((_, legacy)) => legacy,
+            Err(error) => {
+                self.invalidate();
+                return Err(error);
+            }
+        };
+        let mut state = self.state.lock().map_err(|_| unavailable())?;
+        state.available()?;
+        if state.legacy != legacy {
+            state.advance()?;
+            state.legacy = legacy;
+        }
+        Ok(())
     }
 }
 impl GraphObserver for LiveGraphCollector {
     fn mark_unavailable(&self) {
         self.invalidate();
-    }
-    fn diagnostic_revision(&self, manifest: &str) -> Option<u64> {
-        let mut state = self.state.lock().ok()?;
-        state.available().ok()?;
-        state.reconcile_restart();
-        if state.restart.is_some() || state.pending.contains_key(manifest) {
-            return None;
-        }
-        Some(state.revision)
-    }
-    fn publish_diagnostic(
-        &self,
-        expected: &storage::recovery::graph_control::GraphControlCas,
-        revision: u64,
-        diagnostic: &runtime::OwnedGraphOwnershipDiagnostic,
-    ) -> Result<(), RuntimeError> {
-        let manifest = &expected.manifest.manifest_id;
-        // A diagnostic must never overwrite a newer effect result. Check both
-        // before I/O and at publication; effect begin advances the revision.
-        let current = |state: &LiveState| {
-            state.available().is_ok()
-                && state.revision == revision
-                && state.restart.is_none()
-                && !state.pending.contains_key(manifest)
-        };
-        {
-            let state = self.state.lock().map_err(|_| RuntimeError::RestartBusy)?;
-            if !current(&state) {
-                return Err(RuntimeError::RestartBusy);
-            }
-            // Cold/foreign rows are diagnostic-only. They still use the same
-            // optimistic revision and restart fence, but never grow the sealed
-            // live inventory or acquire effect authority through a read.
-            if !state.graphs.contains_key(manifest) {
-                return Ok(());
-            }
-        }
-        // Project the very ownership result returned to the diagnostic caller,
-        // not a second owner read that could disagree with that response.
-        let fact =
-            storage::Database::read_owned_graphs(&self.storage, |db| db.owned_graph_snapshots())
-                .map_err(|_| unavailable())
-                .and_then(|graphs| {
-                    let graph = graphs
-                        .iter()
-                        .find(|graph| graph.cas == *expected)
-                        .ok_or_else(unavailable)?;
-                    if !diagnostic.verified_adoption() {
-                        return Err(unavailable());
-                    }
-                    view::graph_fact(graph, diagnostic)
-                });
-        let mut state = self.state.lock().map_err(|_| RuntimeError::RestartBusy)?;
-        if !current(&state) {
-            return Err(RuntimeError::RestartBusy);
-        }
-        let fact = match fact {
-            Ok(fact) => fact,
-            Err(error) => {
-                state.failed = true;
-                let _ = state.advance();
-                return Err(runtime_error(error));
-            }
-        };
-        if state.graphs.get(manifest) != Some(&fact) {
-            state.advance().map_err(runtime_error)?;
-            state.graphs.insert(manifest.into(), fact);
-        }
-        Ok(())
     }
     fn begin_change(&self, manifest: &str) -> Result<u64, RuntimeError> {
         let mut state = self.state.lock().map_err(|_| RuntimeError::RestartBusy)?;
@@ -301,8 +276,8 @@ impl GraphObserver for LiveGraphCollector {
     fn rebuild(&self) -> Result<(), RuntimeError> {
         // Bootstrap calls this before any automatic attempt. A failed initial
         // read leaves Rebuilding; a later query cannot turn it into Ready.
-        let facts = match self.facts(None) {
-            Ok(facts) => facts,
+        let (facts, legacy) = match self.observe(None) {
+            Ok(observed) => observed,
             Err(_) => {
                 self.invalidate();
                 return Ok(());
@@ -314,6 +289,7 @@ impl GraphObserver for LiveGraphCollector {
         }
         state.advance().map_err(runtime_error)?;
         state.graphs = facts;
+        state.legacy = legacy;
         state.ready = true;
         Ok(())
     }

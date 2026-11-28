@@ -74,8 +74,7 @@ enum Command {
         Option<ReplyTx<usize>>,
     ),
     AppendEvent(Option<String>, Event, ReplyTx),
-    AppendFencedEvent(Option<String>, Event, event_bus::MutationValidator, ReplyTx),
-    AppendStreamEvent(String, Event, Option<event_bus::MutationValidator>, ReplyTx),
+    AppendStreamEvent(String, Event, ReplyTx),
     RecordCatalogUpdate(CatalogUpdateRecord, ReplyTx),
     Memory(crate::repo::memory::Mutation, ReplyTx),
     RecordImprovementCandidate(
@@ -670,15 +669,8 @@ impl StorageHandle {
     }
 
     /// Appends to a cross-session stream, retaining daily, event and database limits.
-    pub fn append_stream_event(
-        &self,
-        stream_id: &str,
-        event: &Event,
-        validator: Option<event_bus::MutationValidator>,
-    ) -> Result<(), StorageError> {
-        self.request(|reply| {
-            Command::AppendStreamEvent(stream_id.into(), event.clone(), validator, reply)
-        })
+    pub fn append_stream_event(&self, stream_id: &str, event: &Event) -> Result<(), StorageError> {
+        self.request(|reply| Command::AppendStreamEvent(stream_id.into(), event.clone(), reply))
     }
 
     /// Append a complete, guarded note revision of up to 8192 bytes; empty clears it.
@@ -1188,25 +1180,6 @@ impl StorageHandle {
         self.request(|reply| Command::InvalidateRunContext(run_id.into(), reply))
     }
 
-    pub fn append_fenced_event(
-        &self,
-        session_id: Option<&str>,
-        event: &Event,
-        validator: event_bus::MutationValidator,
-    ) -> Result<(), StorageError> {
-        let result = self.request(|reply| {
-            Command::AppendFencedEvent(
-                session_id.map(String::from),
-                event.clone(),
-                validator,
-                reply,
-            )
-        });
-        if result.is_ok() {
-            self.3.notify();
-        }
-        result
-    }
     pub fn append_team_snapshot(
         &self,
         snapshot: crate::team::TeamSnapshot,

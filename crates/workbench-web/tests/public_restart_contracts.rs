@@ -9,11 +9,11 @@ use tokio::{
 };
 use workbench_web::{WebServer, WebServerConfig};
 fn graph() -> Value {
-    json!({"binding":{"graph_id":"g1","restart_tx_id":"tx1","capture_id":"cap1","expected_revision":"1","expected_core_epoch":"2","owner_identity":null,"owner_generation":null,"operation_id":"op1"},"confirmed":true})
+    json!({"binding":{"graph_id":"g1","restart_tx_id":"tx1","capture_id":"cap1","expected_revision":"1","expected_core_epoch":"2","operation_id":"op1"},"confirmed":true})
 }
 fn owned() -> Value {
     let graph = graph();
-    json!({"binding":{"graph":graph["binding"],"owners":[],"expected_control_revision":"0"},"confirmed":true})
+    json!({"binding":{"graph":graph["binding"],"threads":[],"expected_control_revision":"0"},"confirmed":true})
 }
 fn operations() -> Vec<(&'static str, Value)> {
     vec![

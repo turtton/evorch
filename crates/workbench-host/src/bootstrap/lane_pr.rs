@@ -1,14 +1,7 @@
-//! Shared startup for core and the transitional embedded GUI.
-//!
-//! Authority is per thread (ADR 0024), not per window or process-wide DB access:
-//! recovery claims the lane thread before starting it; PR producers obtain and
-//! revalidate the same owner's permit before observing, fetching or preparing a
-//! notice. Another host cannot act for that thread merely by opening this DB.
-//! Transitional only: P11 (PR20) removes ownership and replaces this partition
-//! with a single core-side service owner; do not keep it as a second core path.
+//! Core-side startup, durable lane recovery and producer drain.
 use super::{BootstrapError, services::BackgroundServices};
 use runtime::pull_requests::source::TokioProcessRunner;
-use runtime::{AgentRuntime, ownership::OwnerHost, pull_requests::*};
+use runtime::{AgentRuntime, pull_requests::*};
 use std::sync::Arc;
 
 pub struct PullRequestAdapters {
@@ -35,15 +28,13 @@ impl PullRequestAdapters {
     }
 }
 
-/// Synchronous first recovery precedes command/transport admission. Retries only
-/// cover unexpired leases left by an external host; they never steal live owners.
+/// Synchronous first recovery precedes command/transport admission.
 pub fn start_recovery(
     runtime: &AgentRuntime,
-    owner: &Arc<OwnerHost>,
     scratch: &Arc<runtime::scratch::ThreadScratch>,
 ) -> Result<tokio::task::JoinHandle<()>, runtime::lanes::LaneError> {
     runtime.set_thread_scratch(scratch.clone());
-    runtime.recover_lanes_on_startup(owner)
+    runtime.recover_lanes_on_startup()
 }
 
 /// Call inside the host executor, after storage and tombstone fences are
@@ -52,35 +43,24 @@ pub fn start_recovery(
 pub fn start(
     services: &mut BackgroundServices,
     runtime: &AgentRuntime,
-    owner: &Arc<OwnerHost>,
     scratch: &Arc<runtime::scratch::ThreadScratch>,
     settings: config::PullRequestsConfig,
     adapters: PullRequestAdapters,
 ) -> Result<(), BootstrapError> {
     settings.validate()?;
     // Subscribe before recovery can admit a root on another executor thread.
-    let view: Arc<dyn OwnershipView> = owner.clone();
-    let service = runtime.start_pull_requests_with_log_source(
-        view,
-        adapters.source,
-        settings,
-        adapters.logs,
-    )?;
+    let service =
+        runtime.start_pull_requests_with_log_source(adapters.source, settings, adapters.logs)?;
     services.start("pull-requests", |stop| async move {
         let _ = stop.await;
         service.shutdown_and_drain().await?;
         Ok(())
     });
-    let writer = runtime.clone();
-    services.start("lane-stop-writes", |stop| async move {
-        writer.run_lane_stop_writes(stop).await?;
-        Ok(())
-    });
     runtime.set_thread_scratch(scratch.clone());
-    let recovery = runtime.prepare_lane_recovery(owner)?;
+    let recovery = runtime.prepare_lane_recovery()?;
     services.start("lane-recovery", |stop| async move {
         // Retry storage operations are synchronous; dropping this future leaves
-        // no child task. Admitted roots are drained by the runtime owner host.
+        // no child task. Admitted roots are joined by the runtime drain.
         tokio::select! { biased; _ = stop => {}, _ = recovery => {} }
         Ok(())
     });
@@ -110,9 +90,8 @@ impl RuntimeDrain {
     pub async fn stop_and_drain(
         &self,
         services: &mut BackgroundServices,
-        owner: &Arc<OwnerHost>,
     ) -> Result<(), BootstrapError> {
-        stop_and_drain(services, &self.runtime, owner, &self.executor).await
+        stop_and_drain(services, &self.runtime, &self.executor).await
     }
 }
 
@@ -122,13 +101,12 @@ impl RuntimeDrain {
 pub async fn stop_and_drain(
     services: &mut BackgroundServices,
     runtime: &AgentRuntime,
-    owner: &OwnerHost,
     executor: &tools::ToolExecutor,
 ) -> Result<(), BootstrapError> {
     let mut failure = None;
     // Reuse the established 03b prefix; no restart quiesce in operator drain.
     let fence = runtime
-        .fence_dispatch_shutdown(|| stop_dispatch_producers(services, runtime, owner))
+        .fence_dispatch_shutdown(|| stop_dispatch_producers(services, runtime))
         .await;
     if let Err(error) = &fence {
         remember(&mut failure, Err::<(), _>(error.clone()));
@@ -159,7 +137,6 @@ pub async fn stop_and_drain(
     if let Ok(fence) = fence {
         remember(&mut failure, runtime.drain_dispatch_tails(&fence).await);
     }
-    remember(&mut failure, runtime.drain_lane_stop_writes().await);
     remember(&mut failure, services.shutdown().await);
     failure.map_or(Ok(()), Err)
 }
@@ -168,10 +145,8 @@ pub async fn stop_and_drain(
 async fn stop_dispatch_producers(
     services: &mut BackgroundServices,
     runtime: &AgentRuntime,
-    owner: &OwnerHost,
 ) -> Result<(), BootstrapError> {
     let mut failure = None;
-    remember(&mut failure, owner.begin_quiesce().map(|_| ()));
     if let Some(service) = runtime.pull_requests() {
         service.shutdown();
     }
@@ -181,7 +156,6 @@ async fn stop_dispatch_producers(
     remember(&mut failure, services.join_named("lane-recovery").await);
     remember(&mut failure, runtime.drain_lane_admissions().await);
     // A recovery scan already in progress may have acquired another lease.
-    remember(&mut failure, owner.begin_quiesce().map(|_| ()));
     services.request_stop();
     failure.map_or(Ok(()), Err)
 }

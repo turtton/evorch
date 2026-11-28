@@ -76,7 +76,7 @@ fn owned(graph: GraphCas) -> owned_graphs::ConfirmedOwnedGraph {
     owned_graphs::ConfirmedOwnedGraph {
         binding: owned_graphs::OwnedGraphBinding {
             graph,
-            owners: vec![],
+            threads: vec![],
             expected_control_revision: Revision(0),
         },
         confirmed: true,
@@ -443,8 +443,6 @@ async fn audit_accept_and_start_fail_closed_for_all_five_irreversible_effects() 
             capture_id: id("cap"),
             expected_revision: Revision(1),
             expected_core_epoch: InstanceEpoch(7),
-            owner_identity: None,
-            owner_generation: None,
             operation_id: id("op"),
         },
         confirmed: true,
@@ -870,24 +868,20 @@ async fn missing_owned_collection_and_old_epoch_fail_before_audit() {
 }
 
 fn owned_request() -> owned_graphs::ConfirmedOwnedGraph {
-    let graph: GraphCas = serde_json::from_value(serde_json::json!({"graph_id":"g","restart_tx_id":"tx","capture_id":"cap","expected_revision":"1","expected_core_epoch":"7","owner_identity":null,"owner_generation":null,"operation_id":"owned-op"})).unwrap();
+    let graph: GraphCas = serde_json::from_value(serde_json::json!({"graph_id":"g","restart_tx_id":"tx","capture_id":"cap","expected_revision":"1","expected_core_epoch":"7","operation_id":"owned-op"})).unwrap();
     let mut c = owned(graph);
-    c.binding.owners = vec![
-        owned_graphs::OwnerCas {
+    c.binding.threads = vec![
+        owned_graphs::ThreadCas {
             thread_ref: id("thread-a"),
-            owner_identity: None,
-            owner_generation: None,
         },
-        owned_graphs::OwnerCas {
+        owned_graphs::ThreadCas {
             thread_ref: id("thread-b"),
-            owner_identity: Some(id("self")),
-            owner_generation: Some(Revision(7)),
         },
     ];
     c
 }
 #[test]
-fn owned_inspection_compares_every_thread_absence_and_control_expectation() {
+fn owned_inspection_compares_every_thread_and_control_expectation() {
     let c = owned_request();
     c.validate().unwrap();
     for resume in [false, true] {
@@ -902,14 +896,10 @@ fn owned_inspection_compares_every_thread_absence_and_control_expectation() {
         changed.expected_control_revision = Revision(1);
         assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
         let mut changed = expected.clone();
-        changed.owners.pop();
+        changed.threads.pop();
         assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
         let mut changed = expected.clone();
-        changed.owners[1].owner_generation = Some(Revision(8));
-        assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
-        let mut changed = expected.clone();
-        changed.owners[0].owner_identity = Some(id("self"));
-        changed.owners[0].owner_generation = Some(Revision(7));
+        changed.threads[1].thread_ref = id("thread-c");
         assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
         let mut changed = expected;
         changed.graph.capture_id = id("new-cap");
@@ -917,7 +907,7 @@ fn owned_inspection_compares_every_thread_absence_and_control_expectation() {
     }
 }
 #[tokio::test]
-async fn owned_same_id_is_readback_before_inspection_even_after_control_and_owner_advance() {
+async fn owned_same_id_is_readback_before_inspection_even_after_control_and_thread_advance() {
     for resume in [false, true] {
         let c = owned_request();
         let intent = LifecycleCommand::OwnedGraphs(if resume {
@@ -930,7 +920,7 @@ async fn owned_same_id_is_readback_before_inspection_even_after_control_and_owne
         h.event("finalize").await;
         let mut next = c.binding.clone();
         next.expected_control_revision = Revision(8);
-        next.owners[1].owner_generation = Some(Revision(8));
+        next.threads[1].thread_ref = id("thread-c");
         *h.facade.live.lock().unwrap() = AdminInspection::OwnedGraph(next);
         let got = h.submit(intent).unwrap().await.unwrap().unwrap();
         assert_eq!(got.receipt().state, AdminOperationState::Completed);
@@ -967,8 +957,6 @@ async fn only_a_bound_request_can_defer_finalization_to_recovery_and_all_release
                     capture_id: id("cap"),
                     expected_revision: Revision(1),
                     expected_core_epoch: InstanceEpoch(7),
-                    owner_identity: None,
-                    owner_generation: None,
                     operation_id: id("other-bound"),
                 },
             ))),
@@ -1038,8 +1026,6 @@ fn every_command() -> Vec<AdminIntent> {
         capture_id: id("cap"),
         expected_revision: Revision(1),
         expected_core_epoch: InstanceEpoch(7),
-        owner_identity: None,
-        owner_generation: None,
         operation_id: id("op"),
     };
     vec![
@@ -1083,7 +1069,7 @@ fn every_query() -> Vec<AdminQuery> {
 }
 /// The publication switch is off by default: a verified local human is refused
 /// by all nine operations at the first step, before any leaf, audit row, gate,
-/// transaction or owner is touched.
+/// transaction is touched.
 #[tokio::test]
 async fn unpublished_management_refuses_all_nine_operations_without_side_effects() {
     let seed = request("seed");

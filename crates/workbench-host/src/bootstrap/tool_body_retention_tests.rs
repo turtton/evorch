@@ -56,6 +56,7 @@ async fn tool_body_retention_running_waiting_and_snapshot_races_do_not_delete() 
     doc.sidebar
         .add_project(workspace_state::ProjectId::new("p"), "p", dir.path())
         .unwrap();
+    doc.sidebar.projects[0].trust = workspace_state::TrustState::Approved;
     doc.sidebar.threads.push(ThreadRecord::new(
         workspace_state::ThreadId::new("t"),
         workspace_state::ProjectId::new("p"),

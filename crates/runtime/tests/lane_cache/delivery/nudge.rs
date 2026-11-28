@@ -4,7 +4,6 @@ use event_bus::lane::{LaneNudgeState, LaneStallClassification, LaneStallEpisode}
 use storage::lane_control::ObserveLaneStall;
 pub(super) struct NudgeFixture {
     pub(super) f: Fixture,
-    _owner: Arc<runtime::ownership::OwnerHost>,
     pub(super) observation: ObserveLaneStall,
 }
 impl NudgeFixture {
@@ -14,19 +13,9 @@ impl NudgeFixture {
         f.lead = lane.root_run_id.as_deref().unwrap().parse().unwrap();
         f.request_tool = "lane_report";
         f.request_marker = Some("delivery first lane".into());
-        let owner = Arc::new(
-            runtime::ownership::OwnerHost::open(
-                f.h._directory.sockets(),
-                Default::default(),
-                Arc::new(event_bus::EventBus::new(128)),
-            )
-            .unwrap(),
-        );
-        let permit = owner.start(&lane.thread_id).unwrap();
         let delivery_owner = storage::lane_delivery::LaneDeliveryOwner {
             root_run_id: f.lead.to_string(),
             generation: lane.generation,
-            ownership_generation: permit.lease.generation,
         };
         f.store
             .handle()
@@ -43,7 +32,6 @@ impl NudgeFixture {
                 root_run_id: f.lead,
                 generation: lane.generation,
                 authority: RunConfig {
-                    ownership: Some(permit),
                     conversation: true,
                     ..Default::default()
                 },
@@ -62,11 +50,7 @@ impl NudgeFixture {
             classification: LaneStallClassification::NoReport,
             at_ns: 100,
         };
-        Self {
-            f,
-            _owner: owner,
-            observation,
-        }
+        Self { f, observation }
     }
     fn queue(&self) -> LaneStallEpisode {
         let e = self

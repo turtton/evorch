@@ -84,7 +84,7 @@ fn append(handle: &StorageHandle, index: usize, event: &Event) {
     match index % 3 {
         0 => handle.append_event(Some("session-a"), event),
         1 => handle.append_event(Some("session-b"), event),
-        _ => handle.append_stream_event("gui-stream", event, None),
+        _ => handle.append_stream_event("gui-stream", event),
     }
     .expect("every measured append must be accepted");
 }

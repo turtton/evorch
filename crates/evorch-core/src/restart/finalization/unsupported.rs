@@ -6,7 +6,7 @@ impl RestartCoordinator {
         &self,
         _: RestartId,
         _: Option<FinalizationTarget>,
-        _: Arc<workbench_host::bootstrap::planned_exit::RestartHolds>,
+        _: Arc<workbench_host::bootstrap::planned_exit::RestartTransactionGuard>,
         _: storage::recovery::restart::RestartMetadata,
     ) -> Result<ArmedFinalization, String> {
         Err("planned restart is supported only on Linux".into())
@@ -19,7 +19,6 @@ impl RestartCoordinator {
         &self,
         _: RestartId,
         armed: ArmedFinalization,
-        _: Arc<runtime::ownership::OwnerHost>,
         _: Arc<runtime::scratch::archive::ArchiveService>,
         _: storage::StorageHandle,
     ) -> Result<(), String> {

@@ -8,7 +8,7 @@ use super::{
     BootstrapError,
     services::{BackgroundServices, StopMode},
 };
-use runtime::{AgentRuntime, ownership::OwnerHost};
+use runtime::AgentRuntime;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -81,7 +81,6 @@ pub fn configure(
 pub fn start(
     services: &mut BackgroundServices,
     runtime: &AgentRuntime,
-    owner: Arc<OwnerHost>,
     config: &config::Config,
     storage: &storage::StorageConfig,
     evaluations: eval::evaluator::EvaluationService,
@@ -169,16 +168,10 @@ pub fn start(
                         _ => (None, None),
                     };
                     if let Some(thread) = thread {
-                        // Quiescing still owns the generation until the final drain.
-                        let owned = owner.attach(thread).is_ok_and(|o| {
-                            o.lease.owner_id == owner.owner_id()
-                                && !matches!(o.state, runtime::ownership::OwnerState::Released)
-                        });
-                        if !owned {
-                            return false;
-                        }
                         if run.is_none() {
-                            return true;
+                            return weak.upgrade().is_some_and(|runtime| {
+                                runtime.latest_chat_run(thread).ok().flatten().is_some()
+                            });
                         }
                     }
                     if let Some(run) = run {

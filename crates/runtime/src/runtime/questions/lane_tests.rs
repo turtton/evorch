@@ -445,9 +445,8 @@ fn message(role: providers::Role, text: &str) -> providers::Message {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn lane_answer_rejects_fenced_ownership_and_rebound_root() {
+async fn lane_answer_rejects_rebound_root() {
     let mut f = Fixture::new();
     let lead = f.lead("lead").await;
     let lane = f.lane(lead, "lane", LanePolicy::Attached).await;
@@ -462,55 +461,6 @@ async fn lane_answer_rejects_fenced_ownership_and_rebound_root() {
             )
             .unwrap(),
     );
-    let dir = test_socket_dir::SocketDir::new();
-    let owner_path = dir.path().to_path_buf();
-    let first = crate::ownership::OwnerHost::open(
-        &owner_path,
-        config::OwnershipConfig::default(),
-        f.runtime.shared.bus.clone(),
-    )
-    .unwrap();
-    let old = first.start("lead").unwrap();
-    f.runtime
-        .shared
-        .runs
-        .lock()
-        .unwrap()
-        .get_mut(&lead)
-        .unwrap()
-        .config
-        .ownership = Some(old.clone());
-    assert!(!first.quiesce().unwrap());
-    let second = crate::ownership::OwnerHost::open(
-        &owner_path,
-        config::OwnershipConfig::default(),
-        f.runtime.shared.bus.clone(),
-    )
-    .unwrap();
-    let current = second.claim(&second.attach("lead").unwrap()).unwrap();
-    assert!(current.lease.generation > old.lease.generation);
-    assert!(
-        f.runtime
-            .resolve_lane_question(lead, request(&question, "stale-owner", Some("denied")))
-            .is_err()
-    );
-    assert!(
-        f.runtime
-            .user_question(&question.id)
-            .unwrap()
-            .unwrap()
-            .answer
-            .is_none()
-    );
-    f.runtime
-        .shared
-        .runs
-        .lock()
-        .unwrap()
-        .get_mut(&lead)
-        .unwrap()
-        .config
-        .ownership = None;
     f.db.handle()
         .bind_lane_delivery_destination(
             "lead".into(),
@@ -518,7 +468,6 @@ async fn lane_answer_rejects_fenced_ownership_and_rebound_root() {
             storage::lane_delivery::LaneDeliveryOwner {
                 root_run_id: "run-new-root".into(),
                 generation: 2,
-                ownership_generation: current.lease.generation,
             },
             storage::lane_delivery::LaneDestinationAction::Bind,
         )

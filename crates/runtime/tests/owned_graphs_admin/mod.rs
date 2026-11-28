@@ -1,10 +1,7 @@
 use super::fixture::{self, Fixture};
 pub mod shell;
-use runtime::{
-    RunId,
-    ownership::{OwnerState, ThreadOwner},
-};
-use rusqlite::{Connection, params};
+use runtime::RunId;
+use rusqlite::Connection;
 use storage::recovery::{graph_control::GraphEffectKey, graph_progress::GraphDisposalStep};
 
 fn effect(id: &str) -> GraphEffectKey {
@@ -12,18 +9,6 @@ fn effect(id: &str) -> GraphEffectKey {
         operation_id: id.into(),
         attempt_nonce: format!("nonce-{id}"),
     }
-}
-fn identity(row: &ThreadOwner) -> (&str, u64, OwnerState) {
-    (&row.lease.owner_id, row.lease.generation, row.state)
-}
-fn save(f: &Fixture, row: &ThreadOwner) {
-    Connection::open(f.root.join("owners/owners.db"))
-        .unwrap()
-        .execute(
-            "UPDATE thread_owners SET state=?2 WHERE thread_id=?1",
-            params![row.thread_id, serde_json::to_string(row).unwrap()],
-        )
-        .unwrap();
 }
 fn stored_bindings(f: &Fixture) -> Vec<(String, String)> {
     Connection::open(&f.config.db_path).unwrap().prepare(
@@ -37,7 +22,7 @@ fn dispose(f: &Fixture, id: &str) -> runtime::runtime::recovery_disposal::Dispos
         .runtime
         .reserve_owned_graph_disposal("graph-a", effect(id), cas.control_revision)
         .unwrap();
-    let authority = f.runtime.disposal_authority(cas, f.owners("a")).unwrap();
+    let authority = f.runtime.disposal_authority(cas).unwrap();
     let before = stored_bindings(f);
     let result = f
         .runtime
@@ -51,23 +36,18 @@ fn dispose(f: &Fixture, id: &str) -> runtime::runtime::recovery_disposal::Dispos
     result
 }
 pub fn check(f: &Fixture, case: &str) {
-    f.retain();
     let bindings_before = stored_bindings(f);
-    let original = f.owner.attach("a").unwrap();
-    let sibling = f.owner.attach("b").unwrap();
-    let scratch = f.owner.thread_scratch();
-    if case != "release-unknown" {
-        f.runtime.set_thread_scratch(scratch.clone());
+    let scratch = f.scratch.clone();
+    if case == "release-unknown" {
+        let inaccessible = f.root.join("not-a-scratch-directory");
+        std::fs::write(&inaccessible, "cannot prepare scratch").unwrap();
+        f.runtime
+            .set_thread_scratch(std::sync::Arc::new(runtime::scratch::ThreadScratch::at(
+                inaccessible,
+            )));
     }
     let dir = scratch.thread_dir("a");
-    use sha2::Digest;
-    use std::os::unix::ffi::OsStrExt;
-    let canonical = f.root.join("owners").canonicalize().unwrap();
-    let digest = format!(
-        "{:x}",
-        sha2::Sha256::digest(canonical.as_os_str().as_bytes())
-    );
-    let disk = sandbox::ScratchRoot::fixed(&digest[..8], &digest).unwrap();
+    let disk = sandbox::ScratchRoot::at(scratch.parent().into());
     disk.prepare(dir.file_name().unwrap().to_str().unwrap())
         .unwrap();
     std::fs::write(dir.join("before"), "before").unwrap();
@@ -86,7 +66,7 @@ pub fn check(f: &Fixture, case: &str) {
                 None
             };
             let paused = if case == "release-paused" {
-                let root = f.root.join("owners");
+                let root = f.root.join("state");
                 let leases =
                     storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO)
                         .unwrap();
@@ -112,29 +92,26 @@ pub fn check(f: &Fixture, case: &str) {
                 None
             };
             if case == "release-other-graph" {
-                let mut expected = f.tx().expected;
-                let member = expected
-                    .iter_mut()
-                    .find(|m| m.run_id == fixture::run_id("b").to_string())
+                // A second graph references the same captured run. Use the real
+                // manifest writer so both graph membership and relational IDs
+                // agree; JSON-only thread edits are not authority.
+                let mut shared = f.cas("a").manifest;
+                shared.manifest_id = "shared-graph".into();
+                shared.committed = false;
+                f.storage
+                    .handle()
+                    .prepare_recovery_manifest(shared)
                     .unwrap();
-                member.thread_id = Some("a".into());
-                // Another graph of the same tx now references the shared thread.
-                // Target graph membership and retained authority remain unchanged.
-                Connection::open(&f.config.db_path)
-                    .unwrap()
-                    .execute(
-                        "UPDATE restart_expected_members SET member_json=?1 WHERE run_id=?2",
-                        params![serde_json::to_string(&member).unwrap(), member.run_id],
-                    )
+                f.storage
+                    .handle()
+                    .commit_recovery_manifest("shared-graph".into())
                     .unwrap();
-                let digest = storage::recovery::restart::restart_digest(&expected).unwrap();
-                Connection::open(&f.config.db_path)
-                    .unwrap()
-                    .execute(
-                        "UPDATE restart_transactions SET expected_digest=?1 WHERE restart_id=?2",
-                        params![digest, fixture::TX],
-                    )
-                    .unwrap();
+                assert!(
+                    f.db()
+                        .owned_graph_shared_threads(&f.cas("a"))
+                        .unwrap()
+                        .contains("a")
+                );
             } else if case == "release-shell-teardown" {
                 LiveRun::start(f, false, true).finish();
                 // Replace the now-terminal test run root with the captured root.
@@ -168,13 +145,8 @@ pub fn check(f: &Fixture, case: &str) {
             }
             let result = dispose(f, case);
             assert!(result.complete(), "{result:?}");
-            assert_eq!(result.threads[0].owners, GraphDisposalStep::NotApplicable);
             assert_eq!(result.threads[0].scratch, GraphDisposalStep::NotApplicable);
             assert_eq!(std::fs::read(dir.join("before")).unwrap(), b"before");
-            assert_eq!(
-                f.owner.attach("a").unwrap().planned_claim,
-                original.planned_claim
-            );
             if let Some(live) = live {
                 live.finish();
             }
@@ -190,7 +162,7 @@ pub fn check(f: &Fixture, case: &str) {
             );
             let cleanup_only = released || case == "release-completed-absent";
             let _prepared = if case == "release-prepared" || released {
-                let root = f.root.join("owners");
+                let root = f.root.join("state");
                 let leases =
                     storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO)
                         .unwrap();
@@ -253,7 +225,6 @@ pub fn check(f: &Fixture, case: &str) {
             }
             assert_eq!(result.threads[0].scratch, GraphDisposalStep::Applied);
             assert!(!dir.join("before").exists());
-            assert!(f.owner.attach("a").unwrap().planned_claim.is_none());
         }
         "release-unknown" => {
             let result = dispose(f, case);
@@ -261,19 +232,17 @@ pub fn check(f: &Fixture, case: &str) {
             assert_eq!(result.threads[0].scratch, GraphDisposalStep::Unknown);
             assert_eq!(std::fs::read(dir.join("before")).unwrap(), b"before");
         }
-        "release-owner-conflict" => {
+        "release-cas-conflict" => {
             let cas = f.cas("a");
-            let authority = f
-                .runtime
-                .disposal_authority(cas.clone(), f.owners("a"))
-                .unwrap();
+            let authority = f.runtime.disposal_authority(cas.clone()).unwrap();
             let reservation = f
                 .runtime
-                .reserve_owned_graph_disposal("graph-a", effect(case), 0)
+                .reserve_owned_graph_disposal("graph-a", effect(case), cas.control_revision)
                 .unwrap();
-            let mut changed = original.clone();
-            changed.lease.generation += 1;
-            save(f, &changed);
+            Connection::open(&f.config.db_path)
+                .unwrap()
+                .execute("UPDATE restart_transactions SET phase='completed'", [])
+                .unwrap();
             let before = f.tx();
             let result = f
                 .runtime
@@ -284,24 +253,18 @@ pub fn check(f: &Fixture, case: &str) {
             let _retry = f
                 .runtime
                 .reserve_owned_graph_disposal("graph-a", effect("after-conflict"), 0)
-                .expect("a confirmed refusal does not strand admission");
+                .expect("a confirmed CAS refusal does not strand admission");
             assert_eq!(f.tx(), before);
             assert!(f.db().recovery_graph_control("graph-a").unwrap().is_none());
-            assert!(f.owner.disposal_cleanup_receipt(case).unwrap().is_none());
-            assert_eq!(identity(&f.owner.attach("a").unwrap()), identity(&changed));
             assert_eq!(std::fs::read(dir.join("before")).unwrap(), b"before");
-            save(f, &original);
         }
         "release-reset-ack-lost" => {
             // Fail durable progress AFTER the real namespace reset. The missing
             // file independently proves the irreversible effect was applied.
             let conn = Connection::open(&f.config.db_path).unwrap();
-            conn.execute_batch("CREATE TRIGGER fail_disposal_progress BEFORE INSERT ON recovery_graph_thread_progress BEGIN SELECT RAISE(FAIL,'injected progress failure'); END;").unwrap();
+            conn.execute_batch("CREATE TRIGGER fail_disposal_progress BEFORE UPDATE ON recovery_graph_thread_progress WHEN NEW.scratch='applied' BEGIN SELECT RAISE(FAIL,'injected progress failure'); END;").unwrap();
             let cas = f.cas("a");
-            let authority = f
-                .runtime
-                .disposal_authority(cas.clone(), f.owners("a"))
-                .unwrap();
+            let authority = f.runtime.disposal_authority(cas.clone()).unwrap();
             let reservation = f
                 .runtime
                 .reserve_owned_graph_disposal("graph-a", effect(case), 0)
@@ -324,8 +287,28 @@ pub fn check(f: &Fixture, case: &str) {
                     .unwrap()
             );
             assert_eq!(std::fs::read(dir.join("after")).unwrap(), b"new scratch");
-            let observed = f.owner.disposal_cleanup_receipt(case).unwrap().unwrap();
-            assert_eq!(observed.effect, effect(case));
+            let key = storage::recovery::graph_progress::GraphDisposalProgressKey {
+                manifest_id: "graph-a".into(),
+                restart_id: fixture::TX.into(),
+                capture_id: fixture::CAPTURE.into(),
+                thread_id: "a".into(),
+            };
+            assert_eq!(
+                f.db()
+                    .recovery_graph_thread_progress(&key)
+                    .unwrap()
+                    .unwrap()
+                    .scratch,
+                GraphDisposalStep::Unknown
+            );
+            // Only the original supervisor may settle its uncertain reset. Its
+            // captured usage epoch prevents another rename of the new namespace.
+            let settled = f
+                .runtime
+                .dispose_owned_graph(&authority, effect(case), &reservation)
+                .unwrap();
+            assert!(settled.complete(), "{settled:?}");
+            assert_eq!(std::fs::read(dir.join("after")).unwrap(), b"new scratch");
             drop(reservation);
             let retried = dispose(f, "release-new-id");
             assert!(retried.complete(), "{retried:?}");
@@ -344,12 +327,6 @@ pub fn check(f: &Fixture, case: &str) {
         "disposal registered no execution"
     );
     // Independent readbacks. Fixture provider panics on any request.
-    assert_eq!(identity(&f.owner.attach("a").unwrap()), identity(&original));
-    assert_eq!(identity(&f.owner.attach("b").unwrap()), identity(&sibling));
-    assert_eq!(
-        f.owner.attach("b").unwrap().planned_claim,
-        sibling.planned_claim
-    );
     assert!(
         f.db()
             .recovery_claims()

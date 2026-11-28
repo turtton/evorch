@@ -9,67 +9,38 @@
 //! The host runs on the runtime's executor, not the UI thread, so it reads a snapshot of the
 //! command sink's bindings that the sink republishes after every change.
 
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use crate::lane::{BindingTable, TeamSource, memory_boundary};
 use config::agent_categories::CategoryId;
 use runtime::lane_delivery::{LaneDeliveryHost, LaneDeliveryTarget};
-use runtime::ownership::{OwnerHost, OwnerPermit, OwnershipError, RegistryError};
 use runtime::{Role, RunConfig, WeakAgentRuntime};
 use storage::lane_delivery::LaneDeliveryNack;
 
-/// The ownership permit this host holds for `thread`, or why it holds none.
-fn permit_for(host: &OwnerHost, thread: &str) -> Result<OwnerPermit, LaneDeliveryNack> {
-    let missing = |error: &RegistryError| {
-        matches!(
-            error,
-            RegistryError::Absent | RegistryError::ThreadDeleted(_)
-        )
-    };
-    match host.owned_or_claim_abandoned(thread) {
-        Ok(permit) => Ok(permit),
-        Err(error) if missing(&error) => Err(LaneDeliveryNack::UnknownThread),
-        Err(RegistryError::Ownership(
-            OwnershipError::Fenced
-            | OwnershipError::NotClaimable
-            | OwnershipError::OwnerResponsive
-            | OwnershipError::PlannedHeld,
-        )) => match host.attach(thread) {
-            Ok(owner) if owner.lease.owner_id != host.owner_id() => Err(LaneDeliveryNack::Readonly),
-            Ok(_) => Err(LaneDeliveryNack::OwnershipLost),
-            Err(error) if missing(&error) => Err(LaneDeliveryNack::UnknownThread),
-            Err(error) if error.sqlite_code().is_some() => Err(LaneDeliveryNack::StorageFailed),
-            Err(_) => Err(LaneDeliveryNack::OwnershipLost),
-        },
-        Err(error) if error.sqlite_code().is_some() => Err(LaneDeliveryNack::StorageFailed),
-        Err(_) => Err(LaneDeliveryNack::OwnershipLost),
-    }
-}
-
-/// Resolves lane delivery destinations from the host's current bindings and ownership.
+/// Resolves lane delivery destinations from the host's trusted thread/project bindings.
 /// It holds the runtime weakly: the runtime owns this host.
 pub struct HostLaneDeliveryHost {
     runtime: WeakAgentRuntime,
-    ownership: Option<Arc<OwnerHost>>,
     bindings: BindingTable,
     memory_config: Option<storage::StorageConfig>,
     team_writer: Option<storage::StorageHandle>,
+    sidebar_path: Option<PathBuf>,
 }
 
 impl HostLaneDeliveryHost {
     pub(crate) fn new(
         runtime: WeakAgentRuntime,
-        ownership: Option<Arc<OwnerHost>>,
         bindings: BindingTable,
         memory_config: Option<storage::StorageConfig>,
         team_writer: Option<storage::StorageHandle>,
+        sidebar_path: Option<PathBuf>,
     ) -> Self {
         Self {
             runtime,
-            ownership,
             bindings,
             memory_config,
             team_writer,
+            sidebar_path,
         }
     }
 }
@@ -99,24 +70,33 @@ impl LaneDeliveryHost for HostLaneDeliveryHost {
                 0,
             ),
         };
-        let permit = self
-            .ownership
-            .as_deref()
-            .map(|host| permit_for(host, thread))
-            .transpose()?;
         let saved_role = runtime
             .restore_diagnostics(root)
             .ok()
             .flatten()
             .map(|saved| saved.role_name);
         let worker = saved_role.as_deref() == Some(Role::Worker.name());
-        let project_root = binding
-            .as_ref()
-            .and_then(|binding| binding.project_root.clone());
+        let project_root = crate::lane::current_thread_project(
+            &runtime,
+            self.sidebar_path.as_deref(),
+            thread,
+            binding
+                .as_ref()
+                .and_then(|binding| binding.project_root.as_deref()),
+        )
+        .map_err(|error| match error.code {
+            workbench_protocol::errors::ErrorCode::NotFound => LaneDeliveryNack::UnknownThread,
+            workbench_protocol::errors::ErrorCode::StorageUnavailable => {
+                LaneDeliveryNack::StorageFailed
+            }
+            _ => LaneDeliveryNack::RestoreFailed,
+        })?;
+        runtime
+            .bind_thread_root(thread, root)
+            .map_err(|_| LaneDeliveryNack::RestoreFailed)?;
         let mut authority = RunConfig {
             conversation: worker || saved_role.as_deref() == Some(Role::Orchestrator.name()),
             category: worker.then(|| CategoryId::Conversation.to_string()),
-            ownership: permit,
             memory: memory_boundary(
                 &runtime,
                 self.memory_config.as_ref(),

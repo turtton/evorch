@@ -17,7 +17,7 @@ fn metadata() -> RestartMetadata {
         old_build: "old".into(),
         successor_build: "new".into(),
         target_identity: "target".into(),
-        handoff_version: 1,
+        handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_version: 1,
         storage_version: 62,
         old_builtin_tool_names: BTreeSet::from(["read".into()]),
@@ -253,8 +253,6 @@ async fn restart_quarantined_corrupt_transaction_does_not_block_new_attempt() {
                     thread_id: None,
                     intent_revision: 0,
                     snapshot: None,
-                    owner_id: None,
-                    owner_generation: None,
                     lane_id: None,
                 }]),
             )
@@ -500,7 +498,7 @@ async fn a_snapshot_committed_but_not_yet_named_by_the_intent_is_an_observation_
         move || {
             let _ = seen.send((
                 runtime.prepare_restart_quiesce(&observed).err(),
-                runtime.restart_recipe_inventory(&BTreeMap::new()).err(),
+                runtime.restart_recipe_inventory().err(),
                 runtime.observe_restart_recipes(),
             ));
         },
@@ -540,11 +538,7 @@ async fn recipe_inventory_missing_live_member_retains_its_run_id() {
     let run = chat(&f);
     f.model.entered.notified().await;
     let entry = f.runtime.shared.runs.lock().unwrap().remove(&run).unwrap();
-    let failure = f
-        .runtime
-        .restart_recipe_inventory(&BTreeMap::new())
-        .err()
-        .unwrap();
+    let failure = f.runtime.restart_recipe_inventory().err().unwrap();
     f.runtime.shared.runs.lock().unwrap().insert(run, entry);
     assert!(matches!(failure, RuntimeError::RestartRunUnavailable { run_id, .. } if run_id == run));
     assert!(failure.to_string().contains(&run.to_string()));
@@ -560,11 +554,7 @@ async fn recipe_inventory_inconsistent_live_member_retains_its_run_id() {
         let mut runs = f.runtime.shared.runs.lock().unwrap();
         std::mem::replace(&mut runs.get_mut(&run).unwrap().role, Role::Reviewer)
     };
-    let failure = f
-        .runtime
-        .restart_recipe_inventory(&BTreeMap::new())
-        .err()
-        .unwrap();
+    let failure = f.runtime.restart_recipe_inventory().err().unwrap();
     f.runtime
         .shared
         .runs

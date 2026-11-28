@@ -32,16 +32,10 @@ use storage::thread_retention::{
     BlockReason, LegacyArchivedPolicy, RetentionInput, RetentionStatus, ThreadRetentionPolicy,
 };
 
-use crate::ownership::{OwnerVerdict, Registry, RegistryError};
-
-const MS_PER_DAY: u64 = 86_400_000;
-
 #[derive(Debug, thiserror::Error)]
 pub enum RetentionError {
     #[error(transparent)]
     Storage(#[from] storage::StorageError),
-    #[error(transparent)]
-    Registry(#[from] RegistryError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("retention binding: {0}")]
@@ -61,49 +55,6 @@ pub fn policy_from_config(config: &config::StorageConfig) -> ThreadRetentionPoli
     }
 }
 
-const OWNER_BLOCK_PREFIX: &str = "owner active remnant until ";
-
-/// The text of a block by an owner row that lasts until `until_ms` (Unix milliseconds).
-fn owner_block_reason(until_ms: u64) -> String {
-    format!("{OWNER_BLOCK_PREFIX}{until_ms}")
-}
-
-/// The Unix milliseconds an owner block (see [`owner_blocks`]) lasts until, so a host can
-/// show it as a date; `None` for any other reason text.
-#[must_use]
-pub fn owner_block_until_ms(reason: &str) -> Option<u64> {
-    reason.strip_prefix(OWNER_BLOCK_PREFIX)?.parse().ok()
-}
-
-/// The reason an owner row keeps its thread from being deleted, per thread.
-///
-/// A row that still claims a turn or run blocks until its lease expired for the
-/// whole retention period: a crashed owner needs no help, one that may still come
-/// back is given the benefit of the doubt. Idle and released rows never block.
-/// With `days == 0` nothing is ever confirmed, so the grace is moot.
-#[must_use]
-pub fn owner_blocks(
-    verdicts: &BTreeMap<String, OwnerVerdict>,
-    now_ms: u64,
-    days: u32,
-) -> BTreeMap<String, String> {
-    let grace_ms = u64::from(days).saturating_mul(MS_PER_DAY);
-    verdicts
-        .iter()
-        .filter_map(|(thread, verdict)| match verdict {
-            OwnerVerdict::ActiveRemnant { expires_at_ms }
-                if now_ms.saturating_sub(*expires_at_ms) < grace_ms =>
-            {
-                Some((
-                    thread.clone(),
-                    owner_block_reason(expires_at_ms.saturating_add(grace_ms)),
-                ))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 /// The status shown for every thread while the binding does not match.
 pub const BINDING_MISMATCH_BLOCK: &str = "retention disabled: binding mismatch";
 
@@ -113,39 +64,21 @@ impl ThreadRetention {
     /// The status of every sidebar thread for display: `DueIn` / `DueNextStartup`
     /// become "deleted in N days" / "deleted at next startup", `Blocked` carries the
     /// reason. With a mismatching binding every archived thread reads as blocked by it.
-    /// Owner rows (`registry`) are classified the way the startup phase will.
     ///
     /// # Errors
-    /// Fails when the database or the registry cannot be read.
+    /// Fails when the database cannot be read.
     pub fn schedule(
         database: &Database,
         input: &RetentionInput,
         policy: &ThreadRetentionPolicy,
         binding: &BindingStatus,
-        registry: Option<&Registry>,
     ) -> Result<Vec<(String, RetentionStatus)>, RetentionError> {
-        let mut overrides = BTreeMap::new();
-        if let Some(registry) = registry {
-            let archived = input
-                .threads
-                .iter()
-                .filter(|thread| thread.archived)
-                .map(|thread| thread.thread_id.clone())
-                .collect::<Vec<_>>();
-            let now_ms = u64::try_from(input.now_ns / 1_000_000)
-                .map_err(|_| RetentionError::Input("now_ns is negative".into()))?;
-            let verdicts = registry.classify_for_retention(&archived)?;
-            for (thread, reason) in
-                owner_blocks(&verdicts, now_ms, policy.archived_delete_after_days)
-            {
-                overrides.insert(thread, BlockReason::Owner(reason));
-            }
-        }
+        let overrides = BTreeMap::new();
         let mut statuses = database.retention_schedule(input, policy, &overrides)?;
         if matches!(binding, BindingStatus::Mismatch(_)) {
             for (_, status) in &mut statuses {
                 if *status != RetentionStatus::NotArchived {
-                    *status = RetentionStatus::Blocked(BlockReason::Owner(
+                    *status = RetentionStatus::Blocked(BlockReason::SafetyHold(
                         BINDING_MISMATCH_BLOCK.to_owned(),
                     ));
                 }

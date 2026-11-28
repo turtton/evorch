@@ -23,9 +23,9 @@ pub use workspace_state::{
     LineageKind, Membership, MigrationReport, ModelPreference, ProjectError, ProjectId,
     ProjectRecord, ResolvedState, SIDEBAR_SCHEMA_VERSION, SidebarError, SidebarState,
     ThreadChatRole, ThreadError, ThreadId, ThreadLineage, ThreadRecord, ThreadRunPhase,
-    ThreadState, TrustState, display_parent, load_sidebar, load_sidebar_report, merge_keyed,
-    normalize_versions, point_versions, save_sidebar, show_version, sidebar_from_json,
-    sidebar_from_json_report, sidebar_to_json, version_root, visible_version,
+    ThreadState, TrustState, display_parent, load_sidebar, load_sidebar_report, normalize_versions,
+    point_versions, save_sidebar, show_version, sidebar_from_json, sidebar_from_json_report,
+    sidebar_to_json, version_root, visible_version,
 };
 
 pub use errors::{LayoutError, PersistError, SettingsError};

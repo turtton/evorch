@@ -14,7 +14,6 @@ fn target(p: &Process) -> Target {
         key: l.key,
         link_id: l.link_id,
         link_revision: l.link_revision,
-        permit: p.permit("t"),
     }
 }
 fn snapshot(p: &Process, head: char, pending: bool) -> u64 {
@@ -35,20 +34,19 @@ fn snapshot(p: &Process, head: char, pending: bool) -> u64 {
     p.service.inner().lock().keys.insert(key(1), k);
     seq
 }
-fn attribute(p: &Process, t: &Target, seq: u64, head: char) {
+fn attribute(p: &Process, _t: &Target, seq: u64, head: char) {
     let mut s = p.service.inner().lock();
-    s.attribution.succeeded("t", t.permit.lease.generation);
+    s.attribution.succeeded("t");
     let h = head.to_string().repeat(40);
-    s.attribution
-        .adopt("t", t.permit.lease.generation, 1, seq, &h, Some(&h));
+    s.attribution.adopt("t", 1, seq, &h, Some(&h));
 }
 fn notices(p: &Process) -> Vec<PrNotice> {
     p.storage_handle.pr_notices(key(1), String::new()).unwrap()
 }
-async fn enable(p: &Process, t: &Target) {
+async fn enable(p: &Process, _t: &Target) {
     let s = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
     p.service
-        .set_auto_fix("t", 1, s.policy_revision, true, &t.permit)
+        .set_auto_fix("t", 1, s.policy_revision, true)
         .await
         .unwrap();
 }
@@ -67,14 +65,11 @@ async fn baseline_pending_completion_and_toggle_work_without_gui_notifications()
     assert!(notices(&p).is_empty());
     assert!(logs.requests().is_empty());
     let seq = snapshot(&p, 'a', false);
-    p.service.inner().lock().attribution.adopt(
-        "t",
-        t.permit.lease.generation,
-        1,
-        seq,
-        &"a".repeat(40),
-        None,
-    );
+    p.service
+        .inner()
+        .lock()
+        .attribution
+        .adopt("t", 1, seq, &"a".repeat(40), None);
     p.service.notify_changed();
     settle().await;
     assert_eq!(logs.requests().len(), 1);
@@ -100,25 +95,19 @@ async fn re_reserving_the_same_sha_after_pending_prepares_the_new_reservation() 
     assert_eq!(first.phase, PrNoticePhase::Ready);
 
     let seq = snapshot(&p, 'a', true);
-    p.service.inner().lock().attribution.adopt(
-        "t",
-        t.permit.lease.generation,
-        1,
-        seq,
-        &"a".repeat(40),
-        None,
-    );
+    p.service
+        .inner()
+        .lock()
+        .attribution
+        .adopt("t", 1, seq, &"a".repeat(40), None);
     p.service.inner().coordinate(std::slice::from_ref(&t)).await;
     assert_eq!(notices(&p)[0].phase, PrNoticePhase::Cancelled);
     let seq = snapshot(&p, 'a', false);
-    p.service.inner().lock().attribution.adopt(
-        "t",
-        t.permit.lease.generation,
-        1,
-        seq,
-        &"a".repeat(40),
-        None,
-    );
+    p.service
+        .inner()
+        .lock()
+        .attribution
+        .adopt("t", 1, seq, &"a".repeat(40), None);
     p.service.inner().coordinate(std::slice::from_ref(&t)).await;
     // Storage and permit stages are inline in these virtual-time fixtures; drain runnable work.
     settle().await;
@@ -134,7 +123,7 @@ async fn re_reserving_the_same_sha_after_pending_prepares_the_new_reservation() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn off_unknown_and_non_owner_neither_reserve_nor_fetch_logs() {
+async fn off_and_unknown_neither_reserve_nor_fetch_logs() {
     for (on, agent) in [(false, true), (true, false)] {
         let w = World::new();
         let logs = Arc::new(FakePullRequestLogSource::new());
@@ -152,11 +141,6 @@ async fn off_unknown_and_non_owner_neither_reserve_nor_fetch_logs() {
         settle().await;
         assert!(notices(&p).is_empty());
         assert!(logs.requests().is_empty());
-        let other_logs = Arc::new(FakePullRequestLogSource::new());
-        let viewer = w.process_with_logs(enabled(), other_logs.clone());
-        settle().await;
-        assert!(viewer.source.calls().is_empty());
-        assert!(other_logs.requests().is_empty());
     }
 }
 #[tokio::test(start_paused = true)]
@@ -171,7 +155,7 @@ async fn manual_request_drives_preparation_and_manual_auto_races_share_one_sha()
         attribute(&p, &t, seq, 'a');
         if manual_first {
             p.service
-                .request_manual_notice("t", 1, &"a".repeat(40), &t.permit)
+                .request_manual_notice("t", 1, &"a".repeat(40))
                 .await
                 .unwrap();
             enable(&p, &t).await;
@@ -180,7 +164,7 @@ async fn manual_request_drives_preparation_and_manual_auto_races_share_one_sha()
             settle().await;
             assert!(
                 p.service
-                    .request_manual_notice("t", 1, &"a".repeat(40), &t.permit)
+                    .request_manual_notice("t", 1, &"a".repeat(40))
                     .await
                     .is_err()
             );
@@ -223,12 +207,12 @@ async fn after_logs_revalidate_off_unlink_head_closed_global_and_stop() {
             "off" => {
                 let s = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
                 p.service
-                    .set_auto_fix("t", 1, s.policy_revision, false, &t.permit)
+                    .set_auto_fix("t", 1, s.policy_revision, false)
                     .await
                     .unwrap();
             }
             "unlink" => {
-                p.service.unlink("t", 1, &t.permit).await.unwrap();
+                p.service.unlink("t", 1).await.unwrap();
             }
             "head" => {
                 snapshot(&p, 'b', false);
@@ -260,7 +244,6 @@ async fn after_logs_revalidate_off_unlink_head_closed_global_and_stop() {
                         LaneDeliveryOwner {
                             root_run_id: "root".into(),
                             generation: 1,
-                            ownership_generation: t.permit.lease.generation,
                         },
                         LaneDestinationAction::Stop,
                     )
@@ -304,12 +287,12 @@ async fn cooldown_599_600_and_reset_evaluate_only_the_latest_head() {
     let s = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
     assert!(
         p.service
-            .set_auto_fix("t", 1, s.policy_revision, true, &t.permit)
+            .set_auto_fix("t", 1, s.policy_revision, true)
             .await
             .is_err()
     );
     p.service
-        .reset_auto_fix_budget("t", 1, s.policy_revision, None, &t.permit)
+        .reset_auto_fix_budget("t", 1, s.policy_revision, None)
         .await
         .unwrap();
     settle().await;
@@ -371,7 +354,6 @@ async fn real_link_baseline_uses_observed_publishing_and_only_the_fresh_local_re
         let w = World::new();
         let logs = Arc::new(FakePullRequestLogSource::new());
         let p = w.process_with_logs(enabled(), logs.clone());
-        let permit = p.permit("t");
         p.environment.bind("run", "t");
         p.environment
             .set_directories(vec![w.dir.path().to_path_buf()]);
@@ -405,10 +387,7 @@ async fn real_link_baseline_uses_observed_publishing_and_only_the_fresh_local_re
             fetched(1, facts(PullRequestState::Open, failing())),
         );
         p.source.repeat_last();
-        p.service
-            .link("t", "turtton/evorch#1", 0, &permit)
-            .await
-            .unwrap();
+        p.service.link("t", "turtton/evorch#1", 0).await.unwrap();
         // Even a persisted match cannot substitute for this fetch's unresolved local HEAD.
         p.storage_handle
             .record_pull_request_local_head("t", 1, &"a".repeat(40), 1)
@@ -424,37 +403,6 @@ async fn real_link_baseline_uses_observed_publishing_and_only_the_fresh_local_re
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_owner_handoff_recovers_the_reservation_without_trusting_the_old_log_result() {
-    let w = World::new();
-    let old_logs = Arc::new(GateLogs::default());
-    let new_logs = Arc::new(FakePullRequestLogSource::new());
-    let first = w.process_with_logs(enabled(), old_logs.clone());
-    first.link_directly("t", 1);
-    let t = target(&first);
-    let seq = snapshot(&first, 'a', false);
-    attribute(&first, &t, seq, 'a');
-    enable(&first, &t).await;
-    old_logs.arrived.notified().await;
-    let second = w.process_with_logs(enabled(), new_logs.clone());
-    let mut parked = KeyState::new(Instant::now(), false, seq);
-    parked.next_due = None;
-    second.service.inner().lock().keys.insert(key(1), parked);
-    first.host.handoff(&t.permit, &second.host).unwrap();
-    old_logs.release.notify_one();
-    settle().await;
-    assert_eq!(notices(&first).len(), 1);
-    assert_eq!(notices(&first)[0].phase, PrNoticePhase::Ready);
-    assert_eq!(new_logs.requests().len(), 1);
-    assert_eq!(
-        first
-            .storage_handle
-            .pr_auto_fix_state(key(1))
-            .unwrap()
-            .reserved,
-        1
-    );
-}
-#[tokio::test(start_paused = true)]
 async fn destination_changes_require_confirmation_and_revision_cas() {
     let w = World::new();
     let p = w.process(enabled());
@@ -463,35 +411,34 @@ async fn destination_changes_require_confirmation_and_revision_cas() {
     snapshot(&p, 'a', false);
     enable(&p, &t).await;
     p.link_directly("u", 1);
-    let u = p.permit("u");
     let s = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
     assert!(
         p.service
-            .set_auto_fix("u", 1, s.policy_revision, true, &u)
+            .set_auto_fix("u", 1, s.policy_revision, true)
             .await
             .is_err()
     );
     assert!(
         p.service
-            .change_auto_fix_destination("u", 1, s.policy_revision, None, &u)
+            .change_auto_fix_destination("u", 1, s.policy_revision, None)
             .await
             .is_err()
     );
     let changed = p
         .service
-        .change_auto_fix_destination("u", 1, s.policy_revision, Some("t".into()), &u)
+        .change_auto_fix_destination("u", 1, s.policy_revision, Some("t".into()))
         .await
         .unwrap();
     assert_eq!(changed.destination_thread_id.as_deref(), Some("u"));
     assert!(
         p.service
-            .set_auto_fix("u", 1, s.policy_revision, false, &u)
+            .set_auto_fix("u", 1, s.policy_revision, false)
             .await
             .is_err()
     );
     assert!(
         p.service
-            .request_manual_notice("u", 1, &"b".repeat(40), &u)
+            .request_manual_notice("u", 1, &"b".repeat(40))
             .await
             .is_err()
     );
@@ -508,12 +455,11 @@ async fn manual_does_not_resume_stop_but_is_independent_of_the_global_auto_switc
         logs.clone(),
     );
     p.link_directly("t", 1);
-    let t = target(&p);
+    let _t = target(&p);
     snapshot(&p, 'a', true);
     let owner = LaneDeliveryOwner {
         root_run_id: "root".into(),
         generation: 1,
-        ownership_generation: t.permit.lease.generation,
     };
     let epoch = p
         .storage_handle
@@ -521,7 +467,7 @@ async fn manual_does_not_resume_stop_but_is_independent_of_the_global_auto_switc
         .unwrap();
     assert!(
         p.service
-            .request_manual_notice("t", 1, &"a".repeat(40), &t.permit)
+            .request_manual_notice("t", 1, &"a".repeat(40))
             .await
             .is_err()
     );
@@ -535,7 +481,7 @@ async fn manual_does_not_resume_stop_but_is_independent_of_the_global_auto_switc
         )
         .unwrap();
     p.service
-        .request_manual_notice("t", 1, &"a".repeat(40), &t.permit)
+        .request_manual_notice("t", 1, &"a".repeat(40))
         .await
         .unwrap();
     settle().await;
@@ -577,7 +523,7 @@ async fn stale_log_completion_cannot_ready_a_replacement_manual_request() {
     );
     let manual = p
         .service
-        .request_manual_notice("t", 1, &"a".repeat(40), &t.permit)
+        .request_manual_notice("t", 1, &"a".repeat(40))
         .await
         .unwrap();
     assert_eq!(manual.notice_id, old.notice_id);
@@ -603,46 +549,6 @@ impl Default for DeliveryHints {
             ready: Notify::new(),
         }
     }
-}
-
-#[tokio::test(start_paused = true)]
-async fn reacquiring_ownership_recovers_a_reservation_in_the_same_process() {
-    let w = World::new();
-    let logs = Arc::new(GateLogs::default());
-    let hints = Arc::new(DeliveryHints::default());
-    let first = w.process_with_delivery(enabled(), logs.clone(), hints.clone());
-    *hints.storage.lock().unwrap() = Some(first.storage_handle.clone());
-    first.link_directly("t", 1);
-    let old = target(&first);
-    let seq = snapshot(&first, 'a', false);
-    attribute(&first, &old, seq, 'a');
-    enable(&first, &old).await;
-    logs.arrived.notified().await;
-    let mut disabled = enabled();
-    disabled.enabled = false;
-    let second = w.process(disabled);
-    first.host.handoff(&old.permit, &second.host).unwrap();
-    second
-        .host
-        .handoff(&second.permit("t"), &first.host)
-        .unwrap();
-    let current = target(&first);
-    assert_ne!(current.permit.lease.generation, old.permit.lease.generation);
-    let finished = Arc::new(Notify::new());
-    let signal = Arc::clone(&finished);
-    first.at_stage(super::super::Stage::PrPreparationFinished, move || {
-        signal.notify_one()
-    });
-    logs.release.notify_one();
-    finished.notified().await;
-    let _ = first.service.inner().coordinate(&[current]).await;
-    logs.arrived.notified().await;
-    assert_eq!(notices(&first)[0].phase, PrNoticePhase::Reserved);
-    logs.release.notify_one();
-    hints.ready.notified().await;
-    assert_eq!(notices(&first)[0].phase, PrNoticePhase::Ready);
-    assert_eq!(logs.fake.requests().len(), 2);
-    assert_eq!(hints.scheduled.lock().unwrap().len(), 1);
 }
 
 impl super::super::PrNoticeDelivery for DeliveryHints {
@@ -678,7 +584,6 @@ async fn explicit_resume_hint_rescans_links_and_ready_commit_kicks_the_destinati
     let owner = LaneDeliveryOwner {
         root_run_id: "root".into(),
         generation: 1,
-        ownership_generation: t.permit.lease.generation,
     };
     let epoch = p
         .storage_handle
@@ -776,26 +681,25 @@ async fn a_reset_from_another_thread_moves_the_destination_only_when_it_names_th
     snapshot(&p, 'a', false);
     enable(&p, &t).await;
     p.link_directly("u", 1);
-    let u = p.permit("u");
     exhaust_budget(&w);
     let before = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
     assert!(!before.enabled && before.used == 3);
 
     let unconfirmed = p
         .service
-        .reset_auto_fix_budget("u", 1, before.policy_revision, None, &u)
+        .reset_auto_fix_budget("u", 1, before.policy_revision, None)
         .await
         .unwrap_err();
     assert!(confirmation_required(&unconfirmed), "{unconfirmed:?}");
     let wrong = p
         .service
-        .reset_auto_fix_budget("u", 1, before.policy_revision, Some("v".into()), &u)
+        .reset_auto_fix_budget("u", 1, before.policy_revision, Some("v".into()))
         .await
         .unwrap_err();
     assert!(confirmation_required(&wrong), "{wrong:?}");
     let stale_link = p
         .service
-        .reset_auto_fix_budget("u", 2, before.policy_revision, Some("t".into()), &u)
+        .reset_auto_fix_budget("u", 2, before.policy_revision, Some("t".into()))
         .await
         .unwrap_err();
     assert!(
@@ -804,7 +708,7 @@ async fn a_reset_from_another_thread_moves_the_destination_only_when_it_names_th
     );
     let stale_policy = p
         .service
-        .reset_auto_fix_budget("u", 1, before.policy_revision + 1, Some("t".into()), &u)
+        .reset_auto_fix_budget("u", 1, before.policy_revision + 1, Some("t".into()))
         .await
         .unwrap_err();
     assert!(
@@ -819,7 +723,7 @@ async fn a_reset_from_another_thread_moves_the_destination_only_when_it_names_th
 
     let after = p
         .service
-        .reset_auto_fix_budget("u", 1, before.policy_revision, Some("t".into()), &u)
+        .reset_auto_fix_budget("u", 1, before.policy_revision, Some("t".into()))
         .await
         .unwrap();
     assert!(after.enabled && after.used == 0);
@@ -837,22 +741,21 @@ async fn a_reset_naming_a_destination_that_has_since_moved_here_is_refused() {
     snapshot(&p, 'a', false);
     enable(&p, &t).await;
     p.link_directly("u", 1);
-    let u = p.permit("u");
     let s = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
     p.service
-        .change_auto_fix_destination("u", 1, s.policy_revision, Some("t".into()), &u)
+        .change_auto_fix_destination("u", 1, s.policy_revision, Some("t".into()))
         .await
         .unwrap();
     exhaust_budget(&w);
     let s = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
     let error = p
         .service
-        .reset_auto_fix_budget("u", 1, s.policy_revision, Some("t".into()), &u)
+        .reset_auto_fix_budget("u", 1, s.policy_revision, Some("t".into()))
         .await
         .unwrap_err();
     assert!(confirmation_required(&error), "{error:?}");
     p.service
-        .reset_auto_fix_budget("u", 1, s.policy_revision, None, &u)
+        .reset_auto_fix_budget("u", 1, s.policy_revision, None)
         .await
         .unwrap();
 }
@@ -865,7 +768,6 @@ async fn the_global_auto_fix_switch_announces_each_linked_thread_only_when_it_ch
     let mut p = w.process(enabled());
     p.link_directly("t", 1);
     p.link_directly("u", 2);
-    p.permit("v");
     let announced = |events: &[PullRequestEvent]| {
         let mut threads: Vec<_> = events
             .iter()

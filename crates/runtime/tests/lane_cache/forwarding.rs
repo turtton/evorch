@@ -15,7 +15,7 @@ impl LaneDeliveryHost for Host {
         thread: &str,
     ) -> Result<LaneDeliveryTarget, storage::lane_delivery::LaneDeliveryNack> {
         if self.held.load(Ordering::SeqCst) {
-            return Err(storage::lane_delivery::LaneDeliveryNack::Readonly);
+            return Err(storage::lane_delivery::LaneDeliveryNack::BindingConflict);
         }
         let root = if thread == "forward-cache-lead" {
             self.lead
@@ -224,19 +224,9 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
             .unwrap_err(),
         "not_responder"
     );
-    let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            h._directory.sockets(),
-            Default::default(),
-            Arc::new(event_bus::EventBus::new(128)),
-        )
-        .unwrap(),
-    );
-    let permit = owner.start(&thread).unwrap();
     let delivery_owner = storage::lane_delivery::LaneDeliveryOwner {
         root_run_id: lane.to_string(),
         generation: 1,
-        ownership_generation: permit.lease.generation,
     };
     let host = Arc::new(Host {
         lead,
@@ -244,7 +234,6 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
         thread: thread.clone(),
         held: AtomicBool::new(false),
         lane_authority: RunConfig {
-            ownership: Some(permit),
             conversation: true,
             ..Default::default()
         },

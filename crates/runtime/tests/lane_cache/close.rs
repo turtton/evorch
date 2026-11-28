@@ -192,7 +192,6 @@ async fn a_human_end_of_the_ledger_entry_keeps_the_prefix_for_the_next_turn() {
                 surface: "web".into(),
                 client_id: Some("client-1".into()),
             },
-            &[],
         )
         .unwrap();
     assert_eq!(discarded.kind, event_bus::lane::LaneCloseKind::Discarded);

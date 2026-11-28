@@ -21,7 +21,19 @@ pub fn inherited_fixture_proof_with_metadata(
         &RestartMetadata,
     ) -> Result<Option<ToolSnapshot>, StorageError>,
 ) -> Result<Option<core_instance::InheritedHandoffProof>, StorageError> {
-    let mut transactions = db.restart_transactions().map_err(fixture_error)?;
+    // This fixture may share a DB with deliberately corrupt legacy rows.
+    // Like production, select the format relationally before decoding payloads.
+    let mut transactions = db
+        .restart_headers()
+        .map_err(fixture_error)?
+        .into_iter()
+        .filter(|header| header.format_version == RESTART_FORMAT_VERSION)
+        .map(|header| {
+            db.restart_transaction(&header.restart_id)
+                .map_err(fixture_error)
+                .and_then(|tx| tx.ok_or_else(|| fixture_error("restart disappeared")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let tx = if let Some(tx) = transactions.pop() {
         if tx.phase.terminal() {
             return Ok(None);
@@ -55,8 +67,6 @@ pub fn inherited_fixture_proof_with_metadata(
                     thread_id: r.thread,
                     intent_revision: member.intent_revision,
                     snapshot: member.snapshot.clone(),
-                    owner_id: None,
-                    owner_generation: None,
                     lane_id: r.recipe.lane.map(|_| r.root.to_string()),
                 });
             }
@@ -127,7 +137,7 @@ pub fn fixture_restart_metadata(id: &str) -> RestartMetadata {
         old_build: "fixture-build".into(),
         successor_build: "fixture-build".into(),
         target_identity: "fixture-target".into(),
-        handoff_version: 1,
+        handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_version: 1,
         storage_version: 62,
         old_builtin_tool_names: Default::default(),

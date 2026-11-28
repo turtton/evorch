@@ -21,7 +21,7 @@ fn saved_revision(state: &LoopState) -> u64 {
 
 fn save(
     state: &LoopState,
-) -> Result<crate::ownership::SnapshotReference, crate::restore::SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, crate::restore::SnapshotError> {
     crate::restore::persist_prepared_context(state, &state.context)
 }
 
@@ -33,7 +33,7 @@ async fn consecutive_saves_chain_revisions_and_return_the_committed_receipt() {
         let reference = save(&state).unwrap();
         assert_eq!(state.context.snapshot_revision.get(), Some(expected));
         assert_eq!(saved_revision(&state), expected);
-        let crate::ownership::SnapshotReference::RunContext { receipt } = reference else {
+        let crate::checkpoint::SnapshotReference::RunContext { receipt } = reference else {
             panic!("a stored run returns a run-context receipt");
         };
         let record = runtime
@@ -435,7 +435,6 @@ async fn an_escalation_seed_is_a_new_runs_first_snapshot_and_is_not_saved_twice(
             source,
             "memo",
             &crate::RunConfig::default(),
-            false,
             &Default::default(),
             None,
         )

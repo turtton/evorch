@@ -167,6 +167,14 @@ pub fn samples() -> AreaSamples {
                             },
                         },
                     },
+                    RetentionEntry {
+                        thread: thread(),
+                        state: RetentionState::Blocked {
+                            block: RetentionBlock::SafetyHold {
+                                reason: "a runtime-use gate holds the thread".into(),
+                            },
+                        },
+                    },
                 ],
                 next_cursor: None,
                 snapshot_revision: Revision(5),

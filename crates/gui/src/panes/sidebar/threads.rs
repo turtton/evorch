@@ -459,8 +459,8 @@ pub(crate) fn retention_hover_text(status: &RetentionStatus) -> Option<String> {
         RetentionStatus::DueIn { days: 1 } => "Deletes in 1 day".to_owned(),
         RetentionStatus::DueIn { days } => format!("Deletes in {days} days"),
         RetentionStatus::DueNextStartup => "Waiting for online cleanup".to_owned(),
-        RetentionStatus::Blocked(BlockReason::Owner(owner))
-            if owner == runtime::thread_retention::BINDING_MISMATCH_BLOCK =>
+        RetentionStatus::Blocked(BlockReason::SafetyHold(hold))
+            if hold == runtime::thread_retention::BINDING_MISMATCH_BLOCK =>
         {
             "Deletion disabled (configuration mismatch)".to_owned()
         }
@@ -471,21 +471,6 @@ pub(crate) fn retention_hover_text(status: &RetentionStatus) -> Option<String> {
 }
 
 /// An owner block names when it ends as Unix milliseconds; show it as local time.
-fn owner_hold_text(owner: &str) -> String {
-    runtime::thread_retention::owner_block_until_ms(owner)
-        .and_then(|until| i64::try_from(until).ok())
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map_or_else(
-            || owner.to_owned(),
-            |until| {
-                format!(
-                    "owner active until {}",
-                    until.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
-                )
-            },
-        )
-}
-
 fn block_reason_text(reason: &BlockReason) -> String {
     match reason {
         BlockReason::Pinned => "pinned".to_owned(),
@@ -497,7 +482,7 @@ fn block_reason_text(reason: &BlockReason) -> String {
         BlockReason::FamilyUnresolved(thread) => {
             format!("the family of related thread {thread} cannot be resolved")
         }
-        BlockReason::Owner(owner) => owner_hold_text(owner),
+        BlockReason::SafetyHold(hold) => hold.clone(),
         BlockReason::Exploring => "still preparing".to_owned(),
         BlockReason::OverBudget => "exceeds online cleanup budget".to_owned(),
     }
@@ -1315,8 +1300,8 @@ mod tests {
                 "Deletion on hold (the family of related thread t2 cannot be resolved)",
             ),
             (
-                BlockReason::Owner("owner busy".into()),
-                "Deletion on hold (owner busy)",
+                BlockReason::SafetyHold("runtime in use".into()),
+                "Deletion on hold (runtime in use)",
             ),
             (BlockReason::Exploring, "Deletion on hold (still preparing)"),
             (
@@ -1324,7 +1309,7 @@ mod tests {
                 "Deletion on hold (exceeds online cleanup budget)",
             ),
             (
-                BlockReason::Owner(runtime::thread_retention::BINDING_MISMATCH_BLOCK.into()),
+                BlockReason::SafetyHold(runtime::thread_retention::BINDING_MISMATCH_BLOCK.into()),
                 "Deletion disabled (configuration mismatch)",
             ),
         ] {
@@ -1336,37 +1321,6 @@ mod tests {
         // Deletion off, or nothing to delete: no line at all.
         assert_eq!(text(RetentionStatus::Disabled), None);
         assert_eq!(text(RetentionStatus::NotArchived), None);
-    }
-
-    #[test]
-    fn an_owner_hold_shows_the_end_as_a_local_date_not_epoch_milliseconds() {
-        use storage::thread_retention::{BlockReason, RetentionStatus};
-        let until_ms: u64 = 1_794_655_822_228;
-        // The reason the runtime writes for an owner that still claims a turn.
-        let reason = format!("owner active remnant until {until_ms}");
-
-        let text =
-            super::retention_hover_text(&RetentionStatus::Blocked(BlockReason::Owner(reason)))
-                .unwrap();
-
-        let local = chrono::DateTime::from_timestamp_millis(i64::try_from(until_ms).unwrap())
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M")
-            .to_string();
-        assert_eq!(
-            text,
-            format!("Deletion on hold (owner active until {local})")
-        );
-        assert!(!text.contains("1794655822228"));
-        // A reason that is not an owner's time stays as it is.
-        assert_eq!(
-            super::retention_hover_text(&RetentionStatus::Blocked(BlockReason::Owner(
-                "owner busy".into()
-            )))
-            .as_deref(),
-            Some("Deletion on hold (owner busy)")
-        );
     }
 
     #[test]

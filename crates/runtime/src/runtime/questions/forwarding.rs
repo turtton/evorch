@@ -14,16 +14,16 @@ impl AgentRuntime {
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "question storage is not configured")
         })?;
-        // Same completion/ownership lock order as parent answers and lead answers.
+        // Same completion/restore lock order as parent answers and lead answers.
         let _completion = store
             .restore_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.validate_run_mutation(caller)
-            .map_err(|e| LaneError::new("ownership_lost", e))?;
+            .map_err(|e| LaneError::new("binding_conflict", e))?;
         let entry = self
             .entry(caller)
-            .map_err(|e| LaneError::new("ownership_lost", e))?;
+            .map_err(|e| LaneError::new("binding_conflict", e))?;
         if entry.parent.is_some()
             || entry.role != crate::Role::Orchestrator
             || entry.config.lane_scope.is_none()
@@ -38,16 +38,9 @@ impl AgentRuntime {
             AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
         ) || entry.execution.cancel_tx.borrow().is_interrupted()
         {
-            return Err(LaneError::new("ownership_lost", "lane root is not live"));
+            return Err(LaneError::new("binding_conflict", "lane root is not live"));
         }
-        let config = entry.config.clone();
         drop(entry);
-        let _authority = config
-            .ownership
-            .as_ref()
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|e| LaneError::new("ownership_lost", e))?;
         let thread = self
             .goal_thread(caller)
             .ok_or_else(|| LaneError::new("not_attached", "lane thread is unavailable"))?;
@@ -70,7 +63,6 @@ impl AgentRuntime {
         let question = store
             .user_question(question_id)?
             .ok_or_else(|| LaneError::new("unknown_question", "question disappeared"))?;
-        drop(_authority);
         drop(_completion);
         self.cache_wait_question(&question);
         self.shared

@@ -37,8 +37,6 @@ pub enum AnswerOutcome {
 /// An answer failure, preserving ownership errors for host refusal classification.
 #[derive(Debug, thiserror::Error)]
 pub enum AnswerQuestionError {
-    #[error(transparent)]
-    Ownership(#[from] crate::ownership::RegistryError),
     /// The question was cancelled by offline maintenance: terminal, never answered.
     #[error("question cancelled: it was closed without an answer and can no longer be answered")]
     Cancelled,
@@ -199,17 +197,7 @@ impl AgentRuntime {
             answer_origin: None,
             cancelled: false,
         };
-        let permit = self
-            .entry(run)
-            .map_err(|e| e.to_string())?
-            .config
-            .ownership
-            .clone();
-        let guard = permit
-            .as_ref()
-            .map(|permit| permit.mutation_guard())
-            .transpose()
-            .map_err(|e| e.to_string())?;
+        self.validate_run_mutation(run).map_err(|e| e.to_string())?;
         let lane = {
             let entry = self.entry(run).map_err(|e| e.to_string())?;
             let is_lane_root = entry.parent.is_none() && entry.config.lane_scope.is_some();
@@ -280,7 +268,6 @@ impl AgentRuntime {
             }
             question
         };
-        drop(guard);
         self.cache_wait_question(&question);
         self.queue_subagent_question(&question);
         self.shared
@@ -359,17 +346,8 @@ impl AgentRuntime {
             .map_err(|deleted| deleted.to_string())?;
         let child = crate::meta::parse_run_id(&question.run_id)?;
         self.validate_question_parent(caller, child)?;
-        let ownership = self
-            .entry(caller)
-            .map_err(|error| error.to_string())?
-            .config
-            .ownership
-            .clone();
-        let _guard = ownership
-            .as_ref()
-            .map(|permit| permit.mutation_guard())
-            .transpose()
-            .map_err(|error| error.to_string())?;
+        self.validate_run_mutation(caller)
+            .map_err(|e| e.to_string())?;
         let question = self.answer_question(
             id,
             answer,
@@ -444,7 +422,7 @@ impl AgentRuntime {
         answer: &str,
     ) -> Result<AnswerOutcome, String> {
         let _retention_admission = self.retention_admission();
-        self.answer_user_question_if_pending_from_host(id, answer, None)
+        self.answer_user_question_if_pending_from_host(id, answer)
             .map_err(|error| error.to_string())
     }
 
@@ -459,7 +437,6 @@ impl AgentRuntime {
         &self,
         id: &str,
         answer: &str,
-        caller: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<AnswerOutcome, AnswerQuestionError> {
         let _retention_admission = self.retention_admission();
         self.answer_question_with_mode(
@@ -469,7 +446,6 @@ impl AgentRuntime {
                 channel: Default::default(),
             },
             AnswerMode::FirstOnly,
-            caller,
         )
     }
 
@@ -480,7 +456,7 @@ impl AgentRuntime {
         origin: AnswerOrigin,
     ) -> Result<UserQuestion, String> {
         match self
-            .answer_question_with_mode(id, answer, origin, AnswerMode::Idempotent, None)
+            .answer_question_with_mode(id, answer, origin, AnswerMode::Idempotent)
             .map_err(|error| error.to_string())?
         {
             AnswerOutcome::Recorded(question) => Ok(*question),
@@ -494,7 +470,6 @@ impl AgentRuntime {
         answer: &str,
         origin: AnswerOrigin,
         mode: AnswerMode,
-        caller: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<AnswerOutcome, AnswerQuestionError> {
         // Only a host answer is the user's word and becomes review evidence; a
         // parent agent's answer never does, whatever it relays.
@@ -519,27 +494,6 @@ impl AgentRuntime {
                 .user_question_recipients(id)
                 .map_err(|e| e.to_string())?,
         )?;
-        let mut permits: Vec<_> = caller.cloned().into_iter().collect();
-        for recipient in &recipients {
-            let run = crate::meta::parse_run_id(recipient)?;
-            if let Ok(entry) = self.entry(run)
-                && matches!(
-                    *entry.phase_rx.borrow(),
-                    event_bus::AgentRunPhase::Pending
-                        | event_bus::AgentRunPhase::Running
-                        | event_bus::AgentRunPhase::Waiting
-                )
-                && let Some(permit) = &entry.config.ownership
-            {
-                permits.push(permit.clone());
-            } else if let Some(admission) = self.admission_snapshot(run)
-                && admission.result.is_none()
-                && let Some(permit) = admission.ownership
-            {
-                permits.push(permit);
-            }
-        }
-        let guards = crate::ownership::OwnerPermit::mutation_guards(&permits)?;
         // Serialize host evidence writes and resync with the same map fence as chat.
         let reviews = self
             .shared
@@ -663,7 +617,6 @@ impl AgentRuntime {
             stored.map_err(|error| error.to_string())?;
         }
         self.observe_questions([id.to_owned()]);
-        drop(guards);
         let mut reflection_error = None;
         for (recipient, review) in &targets {
             if review.user_requests.is_poisoned() {

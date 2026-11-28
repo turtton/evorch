@@ -1,13 +1,12 @@
 //! PullRequests namespace adapter: translates the protocol's operations into
-//! the `pull_requests` area service (`self.areas.pull_requests`). The adapter
-//! is where the thread's owner permit is obtained, and only for a request the
-//! area has not accepted before. Every command is new work for a planned
+//! the `pull_requests` area service (`self.areas.pull_requests`), which retains
+//! operation identity, thread validation and duplicate suppression. Every
+//! command is new work for a planned
 //! restart: it writes the pull request state, so a preparing host refuses it,
 //! and one that was accepted finishes before the host seals.
 use workbench_protocol::commands::{CommandDisposition, CommandReply, CommandResult};
 use workbench_protocol::envelope::Provenance;
-use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
-use workbench_protocol::ids::ThreadId;
+use workbench_protocol::errors::WorkbenchError;
 use workbench_protocol::namespaces::pull_requests::{
     PullRequestsCommand, PullRequestsQuery, PullRequestsReply, PullRequestsResult,
 };
@@ -22,24 +21,7 @@ impl CommandHost {
         _provenance: &Provenance,
         restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
-        let thread = command.thread().clone();
-        let owner = self.service.ownership().cloned();
-        let submitted = self
-            .areas
-            .pull_requests
-            .submit(command, Some(restart), move || {
-                let denied = |message: &str| {
-                    WorkbenchError::new(
-                        ErrorCode::PermissionDenied,
-                        message,
-                        RetryAdvice::UserActionRequired,
-                    )
-                };
-                owner
-                    .ok_or_else(|| denied("ownership service is unavailable"))?
-                    .owned_permit(thread.as_str())
-                    .map_err(|_| denied("this core does not hold the thread"))
-            })?;
+        let submitted = self.areas.pull_requests.submit(command, Some(restart))?;
         let mut reply = CommandReply::with_result(CommandResult::PullRequests(
             PullRequestsResult::Operation(submitted.view),
         ));
@@ -57,8 +39,7 @@ impl CommandHost {
         let area = &self.areas.pull_requests;
         Ok(QueryReply::PullRequests(match query {
             PullRequestsQuery::GetThreadPullRequest { thread } => {
-                let owned = self.holds(thread);
-                PullRequestsReply::Thread(Box::new(area.thread(thread, owned)?))
+                PullRequestsReply::Thread(Box::new(area.thread(thread)?))
             }
             PullRequestsQuery::GetPullRequestNotice { notice_id } => {
                 PullRequestsReply::Notice(Box::new(area.notice(notice_id)?))
@@ -70,13 +51,6 @@ impl CommandHost {
                 operations: area.operations()?,
             },
         }))
-    }
-
-    /// Whether this core holds `thread` right now.
-    fn holds(&self, thread: &ThreadId) -> bool {
-        self.service
-            .ownership()
-            .is_some_and(|owner| owner.owned_permit(thread.as_str()).is_ok())
     }
 }
 

@@ -80,7 +80,7 @@ async fn missing_handoff_receipt_keeps_the_source_goal_and_execution() {
         .incarnation();
     assert!(
         runtime
-            .handoff_thread_goal_prepared(source, target, None, Some(&incarnation), |_| {})
+            .handoff_thread_goal_prepared(source, target, Some(&incarnation), || {})
             .is_err()
     );
     assert_eq!(runtime.thread_goal("source").unwrap().goal_id, goal.goal_id);
@@ -94,32 +94,13 @@ async fn missing_handoff_receipt_keeps_the_source_goal_and_execution() {
 }
 
 #[tokio::test]
-async fn committed_target_starts_with_its_prepared_permit_after_source_releases() {
+async fn committed_target_starts_once_after_source_stops() {
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: dir.path().join("released-source.db"),
         ..Default::default()
     };
     let db = storage::Storage::open(config.clone()).unwrap();
-    let path = dir.path().join("owners.db");
-    let mut registry = crate::ownership::Registry::open(&path).unwrap();
-    let lease = crate::ownership::Lease {
-        owner_id: "handoff-host".into(),
-        generation: 1,
-        expires_at: u64::MAX,
-    };
-    registry
-        .start(&crate::ownership::ThreadOwner::new(
-            "source".into(),
-            lease.clone(),
-        ))
-        .unwrap();
-    let permit = crate::ownership::OwnerPermit {
-        registry_path: path,
-        thread_id: "source".into(),
-        lease: lease.clone(),
-        run_id: None,
-    };
     let model = Arc::new(Model {
         worker_entered: Notify::new(),
         target_calls: Default::default(),
@@ -127,10 +108,7 @@ async fn committed_target_starts_with_its_prepared_permit_after_source_releases(
     let bus = Arc::new(EventBus::new(128));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
         .with_run_store(crate::RunStore::open(&config, db.handle()).unwrap());
-    let authority = RunConfig {
-        ownership: Some(permit.clone()),
-        ..Default::default()
-    };
+    let authority = RunConfig::default();
     let source = runtime
         .delegate_chat("source", Role::Worker, "work".into(), authority.clone())
         .unwrap();
@@ -141,13 +119,6 @@ async fn committed_target_starts_with_its_prepared_permit_after_source_releases(
         .unwrap();
     runtime.stop(source, crate::StopScope::SelfOnly).unwrap();
     assert_eq!(runtime.wait(source).await.unwrap(), AgentRunPhase::Stopped);
-    registry
-        .update("source", |owner| owner.quiesce(&lease))
-        .unwrap();
-    registry
-        .update("source", |owner| owner.release(&lease))
-        .unwrap();
-    assert!(permit.validate_generation().is_err());
     assert_eq!(
         runtime
             .start_committed_handoff(source, &publication.incarnation(), &authority)
@@ -268,7 +239,7 @@ async fn committed_before_source_terminal_recovers_the_same_target_and_goal() {
                 .unwrap(),
             target
         );
-        assert!(runtime.recover_unstarted_lanes(None).is_err());
+        assert!(runtime.recover_unstarted_lanes().is_err());
         assert_eq!(model.target_calls.load(Ordering::SeqCst), 0);
 
         // Abort the actual task without finalize: exactly the crash window after
@@ -287,7 +258,7 @@ async fn committed_before_source_terminal_recovers_the_same_target_and_goal() {
             runtime.resume_chat(source, RunConfig::default()).is_err(),
             "a crash must not revive the committed source"
         );
-        assert_eq!(runtime.recover_unstarted_lanes(None).unwrap(), vec![target]);
+        assert_eq!(runtime.recover_unstarted_lanes().unwrap(), vec![target]);
         assert_eq!(runtime.wait(target).await.unwrap(), AgentRunPhase::Done);
         assert_eq!(model.target_calls.load(Ordering::SeqCst), 1);
         // Lane roots deliberately normalize quantity caps to Unlimited. The
@@ -324,7 +295,7 @@ async fn committed_before_source_terminal_recovers_the_same_target_and_goal() {
         assert_eq!(lane.lead_thread_id, None);
         assert_eq!(lane.policy, event_bus::LanePolicy::Detached);
         assert_eq!(lane.scope, event_bus::LaneScope::Lane);
-        assert!(runtime.recover_unstarted_lanes(None).unwrap().is_empty());
+        assert!(runtime.recover_unstarted_lanes().unwrap().is_empty());
     }
 }
 

@@ -1,0 +1,3 @@
+DROP TABLE recovery_graph_thread_progress;
+ALTER TABLE recovery_graph_thread_progress_v1 RENAME TO recovery_graph_thread_progress;
+ALTER TABLE restart_transactions DROP COLUMN format_version;

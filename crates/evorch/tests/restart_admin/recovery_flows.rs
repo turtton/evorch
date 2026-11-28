@@ -13,8 +13,8 @@ use workbench_protocol::{
             ActionAvailability, ClaimView, DisposalCompletion, DisposalProgressView,
             GraphAuthorityProblem, GraphControlView, GraphEligibilityView, GraphProblemDetail,
             GraphReference, IncompleteDisposals, OperationLimitView, OwnedGraphBinding,
-            OwnedGraphView, OwnedGraphsCommand, OwnerCas, OwnerView, OwnershipView,
-            RestartDispositionView, RestartPhaseView, StepObservation, UndisposedGraphs,
+            OwnedGraphView, OwnedGraphsCommand, RestartDispositionView, RestartPhaseView,
+            StepObservation, ThreadCas, UndisposedGraphs,
         },
         quarantine::{
             QuarantineClaim, QuarantineCommand, QuarantineCompletion, QuarantineDetail,
@@ -28,11 +28,9 @@ fn never() -> std::future::Pending<()> {
     std::future::pending()
 }
 
-fn owner() -> OwnerCas {
-    OwnerCas {
+fn thread() -> ThreadCas {
+    ThreadCas {
         thread_ref: id("thread-a"),
-        owner_identity: None,
-        owner_generation: None,
     }
 }
 
@@ -47,17 +45,14 @@ fn view(epoch: u64, resume: ActionAvailability) -> OwnedGraphView {
                 capture_id: id("capture-1"),
                 expected_revision: Revision(5),
                 expected_core_epoch: InstanceEpoch(epoch),
-                owner_identity: None,
-                owner_generation: None,
                 operation_id: id("unassigned"),
             },
-            owners: vec![owner()],
+            threads: vec![thread()],
             expected_control_revision: Revision(2),
         },
         restart_phase: RestartPhaseView::Completed,
         disposition: RestartDispositionView::RetryPending,
         claim: ClaimView::Absent,
-        ownership: OwnershipView::Absent,
         control: GraphControlView::ManualIdle,
         eligibility: GraphEligibilityView::AdoptedRetryPending,
         resume,
@@ -65,17 +60,12 @@ fn view(epoch: u64, resume: ActionAvailability) -> OwnedGraphView {
         progress: DisposalProgressView {
             eligibility: StepObservation::NotStarted,
             prepared_release: StepObservation::NotStarted,
-            owners: StepObservation::NotStarted,
             scratch: StepObservation::NotStarted,
             completion: DisposalCompletion::NotStarted,
         },
-        owner_count: Revision(1),
-        owner_refs: vec![OwnerView {
-            binding: owner(),
-            ownership: OwnershipView::Absent,
-            cleanup: StepObservation::NotStarted,
-        }],
-        owner_refs_truncated: false,
+        thread_count: Revision(1),
+        thread_refs: vec![thread()],
+        thread_refs_truncated: false,
         operation_limit: OperationLimitView::WithinLimit,
     }
 }

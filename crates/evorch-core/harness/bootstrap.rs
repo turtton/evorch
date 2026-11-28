@@ -23,7 +23,6 @@ mod linux {
         ffi::OsString,
         io::{BufRead, Write},
         path::PathBuf,
-        sync::Arc,
     };
     use storage::recovery::restart::*;
     use workbench_host::bootstrap::{BootstrapError, BootstrapOptions};
@@ -74,7 +73,7 @@ mod linux {
                     old_build: build.clone(),
                     successor_build: build.clone(),
                     target_identity: "fixture".into(),
-                    handoff_version: 1,
+                    handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
                     snapshot_version: 1,
                     storage_version: 65,
                     old_builtin_tool_names: BTreeSet::new(),
@@ -98,33 +97,6 @@ mod linux {
                     Some(tx.revision),
                     RestartMutation::Commit,
                 )?;
-                let old = runtime::ownership::OwnerHost::open_planned(
-                    &options.ownership_root,
-                    config::OwnershipConfig::default(),
-                    Arc::new(event_bus::EventBus::new(64)),
-                )?;
-                old.start("idle")?;
-                if scenario == "partial_claim" {
-                    old.start("z-idle")?;
-                }
-                for hold in old.hold_for_restart("restart", "capture", &Default::default())? {
-                    tx = writer.mutate_restart(
-                        "restart".into(),
-                        Some(tx.revision),
-                        RestartMutation::OwnerProgress(RestartOwnerProgress {
-                            thread_id: hold.thread_id,
-                            old_owner_id: hold.owner_id,
-                            old_generation: hold.generation,
-                            active_runs: hold.active_runs,
-                            parked_runs: hold.parked_runs,
-                            hold_saved: true,
-                            hold_read_back: true,
-                            worker_joined: false,
-                            socket_unlinked: false,
-                            hold_removed: false,
-                        }),
-                    )?;
-                }
                 writer.mutate_restart(
                     "restart".into(),
                     Some(tx.revision),
@@ -142,8 +114,6 @@ mod linux {
                 if scenario == "storage" {
                     std::fs::write(options.config_dir.join("config.toml"), "[invalid")?;
                 }
-                old.stop_worker_for_exec()?;
-                drop(old);
                 say(serde_json::json!({"status":"exec", "pid":std::process::id()}));
                 let record = HandoffRecord {
                     restart_id: "restart".into(),
@@ -159,7 +129,7 @@ mod linux {
                     successor_build: build,
                     boot_deadline: BootDeadline::start()?,
                 };
-                // No live writer/owner workers or child processes remain.
+                // No live writer or child processes remain.
                 unsafe {
                     instance.exec_handoff(
                         &signals,
@@ -231,7 +201,6 @@ mod linux {
                         "timings_ms":pending.measurements().0.iter()
                             .map(|(s,d)| (format!("{s:?}"),d.as_secs_f64()*1000.))
                             .collect::<Vec<_>>(),
-                        "blocked":pending.blocked_threads,
                     }));
                     wait(automatic);
                     if scenario == "before_ready" {

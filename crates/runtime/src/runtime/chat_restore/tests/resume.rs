@@ -324,7 +324,6 @@ async fn pending_escalation_resume_preserves_seed_and_later_human_evidence() {
         source,
         "worker memo",
         &RunConfig::default(),
-        false,
         &Default::default(),
         None,
     )

@@ -8,6 +8,10 @@ tokio::task_local! {
     pub(super) static AFTER_RECEIPT_BARRIER: Arc<tokio::sync::Barrier>;
     pub(super) static AFTER_RECEIPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
 }
+mod binding;
+thread_local! {
+    pub(super) static BEFORE_STOP_CAS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 mod cancelled_questions;
 mod harness;
 pub(super) mod integration;
@@ -15,7 +19,6 @@ mod lease;
 mod management;
 mod monitor;
 mod questions;
-mod renewed_lease;
 mod scratch;
 
 #[tokio::test]
@@ -838,8 +841,7 @@ async fn nacks_hold_notifications_until_an_explicit_redrive() {
     f.report(&lane, Some(1), LaneStatus::Ready);
     for reason in [
         LaneDeliveryNack::UnknownThread,
-        LaneDeliveryNack::Readonly,
-        LaneDeliveryNack::OwnershipLost,
+        LaneDeliveryNack::BindingConflict,
     ] {
         *host.deny.lock().unwrap() = Some(reason);
         assert_eq!(f.drive().await, LaneDeliveryOutcome::Nacked(reason))
@@ -994,12 +996,12 @@ async fn host_entries_resolve_the_lane_ledger_binding_and_refuse_a_foreign_threa
 
     assert!(
         f.runtime
-            .resume_lane_deliveries("another-thread", lead, None)
+            .resume_lane_deliveries("another-thread", lead)
             .is_err(),
         "a root that is not the named thread's is refused, not ignored"
     );
     f.runtime
-        .resume_lane_deliveries("delivery-lead", lead, None)
+        .resume_lane_deliveries("delivery-lead", lead)
         .unwrap();
 }
 #[tokio::test]
@@ -1012,7 +1014,7 @@ async fn a_host_resume_never_clears_a_stop_and_says_to_continue_the_lead() {
 
     let refused = f
         .runtime
-        .resume_lane_deliveries("delivery-lead", lead, None)
+        .resume_lane_deliveries("delivery-lead", lead)
         .unwrap_err();
 
     assert!(refused.to_string().contains("continue it"), "{refused}");
@@ -1032,7 +1034,7 @@ async fn a_thread_without_lanes_announces_no_delivery_state_change() {
     let (lead, _host) = f.lead().await;
 
     f.runtime
-        .resume_lane_deliveries("delivery-lead", lead, None)
+        .resume_lane_deliveries("delivery-lead", lead)
         .unwrap();
     f.runtime.stop(lead, crate::StopScope::SelfOnly).unwrap();
     // The lead's Stopped phase ends the stop: every announcement of it came before.

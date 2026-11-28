@@ -1,4 +1,4 @@
-//! One runtime Report boundary: immutable scope/current root, ownership guard,
+//! One runtime Report boundary: immutable scope/current root,
 //! then management CAS. Storage deliberately does not authenticate run generations.
 use crate::{AgentRuntime, RunId, lanes::LaneError};
 #[cfg(test)]
@@ -9,7 +9,6 @@ impl AgentRuntime {
     pub(crate) fn append_lane_agent_report(
         &self,
         caller: RunId,
-        execution_authority: Option<&crate::ownership::OwnerPermit>,
         report: event_bus::LaneReportInput,
     ) -> Result<storage::lanes::LaneReportAppended, LaneError> {
         {
@@ -32,13 +31,7 @@ impl AgentRuntime {
             }
         }
         self.validate_run_mutation(caller)
-            .map_err(|e| LaneError::new("ownership_lost", e))?;
-        // Authenticate the original tool execution, not a replacement entry that
-        // happens to reuse the same run ID after restoration.
-        let _authority = execution_authority
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|e| LaneError::new("ownership_lost", e))?;
+            .map_err(|e| LaneError::new("lane_unavailable", e))?;
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;

@@ -273,8 +273,6 @@ pub struct ThreadPullRequest {
     pub thread: ThreadId,
     /// Whether the core tracks pull requests at all (`[pull_requests] enabled`).
     pub tracking_enabled: bool,
-    /// Whether this core holds the thread, and so can change its pull request.
-    pub owned_here: bool,
     /// Quoted by `link_pull_request` and `unlink_pull_request`.
     pub lifecycle_revision: Revision,
     pub transition_seq: Sequence,

@@ -1,6 +1,6 @@
 //! Q1 / Q2 recovery intents: a quarantined graph discarded, an undisposed graph
 //! released or resumed. Like restart, each command is bound to exactly what the
-//! person was shown (revision, core epoch, owners) and can only be built from a
+//! person was shown (revision, core epoch) and can only be built from a
 //! [`Confirmed`]. The core, not this layer, refuses whatever is no longer true.
 use super::{confirmation::Confirmed, intent::IntentError};
 use workbench_protocol::{
@@ -30,8 +30,6 @@ pub fn discard_quarantined(
                 capture_id: detail.item.capture_id.clone(),
                 expected_revision: detail.item.revision,
                 expected_core_epoch: detail.core_epoch,
-                owner_identity: None,
-                owner_generation: None,
                 operation_id,
             },
             confirmed: true,

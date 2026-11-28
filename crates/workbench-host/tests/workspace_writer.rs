@@ -1519,7 +1519,7 @@ fn projection_rows(document: &SidebarDocument) -> Vec<storage::threads::ThreadUp
 }
 
 #[test]
-fn a_legacy_save_and_delayed_mirror_cannot_ack_old_membership_or_roll_back_core_edits() {
+fn a_delayed_core_sidebar_mirror_cannot_ack_old_membership_or_roll_back_edits() {
     use storage::lane_management::{
         LaneManagementAction, LaneManagementActor, LaneManagementRequest,
     };
@@ -1559,7 +1559,7 @@ fn a_legacy_save_and_delayed_mirror_cannot_ack_old_membership_or_roll_back_core_
             .unwrap()
             .len(),
         1,
-        "a stale legacy snapshot cannot ACK the new membership"
+        "a stale sidebar snapshot cannot ACK the new membership"
     );
     let detached = identity("lane-thread", 2);
     applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
@@ -1576,26 +1576,23 @@ fn a_legacy_save_and_delayed_mirror_cannot_ack_old_membership_or_roll_back_core_
     ));
     assert!(f.detail("lane-thread").pinned);
 
-    let base = f.on_disk().sidebar;
-    let mut local = base.clone();
-    local
-        .threads
-        .iter_mut()
-        .find(|t| t.id == ThreadId::new("lane-thread"))
-        .unwrap()
-        .title = "legacy rename".into();
     let store = f.store.clone();
-    let gui = handle.clone();
+    let mirror = handle.clone();
     let (saved_tx, saved_rx) = std::sync::mpsc::channel();
     let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
-        let legacy = scope.spawn(move || {
+        let service = scope.spawn(move || {
             let lock = store.lock().unwrap();
             let mut document = store.read(&lock).unwrap();
-            document.sidebar =
-                workspace_state::SidebarState::merge_three_way(&base, &local, &document.sidebar);
-            // The GUI checks membership under the same file lock before saving.
-            let snapshot = gui
+            document
+                .sidebar
+                .threads
+                .iter_mut()
+                .find(|t| t.id == ThreadId::new("lane-thread"))
+                .unwrap()
+                .title = "core rename".into();
+            // The core service checks membership under the same file lock before saving.
+            let snapshot = mirror
                 .sidebar_projection_snapshot(
                     document
                         .sidebar
@@ -1620,11 +1617,13 @@ fn a_legacy_save_and_delayed_mirror_cannot_ack_old_membership_or_roll_back_core_
             drop(lock);
             let rows = projection_rows(&document);
             saved_tx.send(()).unwrap();
-            // Core edits land between the GUI's durable save and its SQL mirror.
+            // Core edits land between the core service's durable save and its SQL mirror.
             resume_rx.recv().unwrap();
-            gui.project_sidebar_threads(rows.clone(), snapshot.fence.clone(), true)
+            mirror
+                .project_sidebar_threads(rows.clone(), snapshot.fence.clone(), true)
                 .unwrap();
-            gui.project_sidebar_threads(rows, snapshot.fence, true)
+            mirror
+                .project_sidebar_threads(rows, snapshot.fence, true)
                 .unwrap();
         });
         saved_rx.recv().unwrap();
@@ -1643,7 +1642,7 @@ fn a_legacy_save_and_delayed_mirror_cannot_ack_old_membership_or_roll_back_core_
             expected_revision: Revision(1),
         })));
         resume_tx.send(()).unwrap();
-        legacy.join().unwrap();
+        service.join().unwrap();
     });
     assert!(
         handle
@@ -1656,7 +1655,7 @@ fn a_legacy_save_and_delayed_mirror_cannot_ack_old_membership_or_roll_back_core_
         "SELECT title,archived,pinned,archive_revision,pin_revision FROM threads WHERE thread_id='lane-thread'", [],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
     ).unwrap();
-    assert_eq!(row, ("legacy rename".into(), true, false, 1, 2));
+    assert_eq!(row, ("core rename".into(), true, false, 1, 2));
     let revision: u64 = sql
         .query_row(
             "SELECT management_revision FROM lanes WHERE lane_id='lane'",

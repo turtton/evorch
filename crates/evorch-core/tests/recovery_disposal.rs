@@ -7,7 +7,6 @@ fn every_startup_blocked_reason_maps_to_the_closed_public_vocabulary() {
         GraphAuthorityProblem as P, GraphProblemDetail as D,
     };
     for (input, problem, detail) in [
-        (S::OwnerBlocked, P::OwnerBlocked, D::OwnerAbsent),
         (
             S::CurrentBindingRequired,
             P::CurrentBindingRequired,

@@ -1,4 +1,4 @@
-//! Real bootstrap/recorder/SQLite/owner/control composition, not mock receipts.
+//! Real bootstrap/recorder/SQLite/control composition, not mock receipts.
 //! Tracing is an observation seam only. Channels control progress; Instant is
 //! used exclusively for reporting, never for a functional verdict.
 use super::*;
@@ -359,7 +359,7 @@ impl Load {
             (0..=self.queue).collect::<Vec<_>>(),
             "missing or duplicate accepted events, including the post-ACK final snapshot"
         );
-        verify_checkpoints(host, runs, true);
+        verify_checkpoints(host, runs);
         let state = self.trace.state.lock().unwrap();
         let position = |phase: &str| state.events.iter().position(|e| e.0 == phase).unwrap();
         for pair in [
@@ -367,7 +367,7 @@ impl Load {
             ("final_flush_end", "bridge_worker_joined"),
             ("bridge_worker_joined", "subscriber_join_end"),
             ("subscriber_join_end", "writer_barrier_end"),
-            ("writer_barrier_end", "owner_stop_begin"),
+            ("writer_barrier_end", "worker_stop_begin"),
         ] {
             assert!(position(pair.0) < position(pair.1), "{pair:?}");
         }
@@ -405,7 +405,7 @@ impl Load {
                 "signal_transfer_begin",
                 "signal_transfer_end",
             ),
-            ("owner_stop_join", "owner_stop_begin", "owner_stop_end"),
+            ("worker_stop_join", "worker_stop_begin", "worker_stop_end"),
         ] {
             let elapsed = state.events[position(end)]
                 .1
@@ -419,7 +419,7 @@ impl Load {
         }
     }
 }
-fn verify_checkpoints(host: &BootstrappedHost, runs: &[runtime::RunId], held: bool) {
+fn verify_checkpoints(host: &BootstrappedHost, runs: &[runtime::RunId]) {
     let tx = saved(host);
     assert_eq!(tx.expected.len(), runs.len());
     let db = storage::Database::open(&host.composition.storage).unwrap();
@@ -427,21 +427,8 @@ fn verify_checkpoints(host: &BootstrappedHost, runs: &[runtime::RunId], held: bo
         let snapshot = db.run_context(&member.run_id).unwrap().unwrap();
         assert!(member.snapshot.as_ref().unwrap().matches(&snapshot));
     }
-    // Early M2 failures precede the owner-progress capture (stage 6);
-    // receipt/snapshot readback above still covers every parked run.
-    if held {
-        assert_eq!(
-            tx.owner_progress
-                .iter()
-                .find(|p| p.thread_id == "active")
-                .unwrap()
-                .parked_runs,
-            runs.iter()
-                .map(ToString::to_string)
-                .collect::<BTreeSet<_>>()
-        );
-    }
 }
+
 pub(super) async fn run() {
     let current = Current::default();
     tracing::subscriber::set_global_default(
@@ -470,7 +457,13 @@ pub(super) async fn run() {
                     writer_release: Mutex::new(None),
                     ack: Mutex::new(None),
                 };
-                cell_loaded(ExitStage::OwnerStopped, Action::Success, true, Some(&load)).await;
+                cell_loaded(
+                    ExitStage::WorkersStopped,
+                    Action::Success,
+                    true,
+                    Some(&load),
+                )
+                .await;
                 *current.lock().unwrap() = None;
             }
         }
@@ -530,13 +523,11 @@ pub(super) async fn faults() {
                 saved(&host).phase,
                 storage::recovery::restart::RestartPhase::Armed
             );
-            assert!(host.owner.attach("active").unwrap().handoff_hold.is_some());
             sql.execute_batch("DROP TRIGGER deny_invalidation").unwrap();
             assert!(
                 resources.lock().await.cleanup().await.is_err(),
                 "original cleanup error stays sticky after successful invalidation retry"
             );
-            assert!(host.owner.attach("active").unwrap().handoff_hold.is_none());
         } else {
             let last = core.0.state.lock().unwrap().completed_stage;
             assert_eq!(
@@ -548,7 +539,7 @@ pub(super) async fn faults() {
                 })
             );
         }
-        verify_checkpoints(&host, &runs, fault == "invalidation_unknown");
+        verify_checkpoints(&host, &runs);
         assert_eq!(
             saved(&host).phase,
             storage::recovery::restart::RestartPhase::Invalidated
@@ -560,11 +551,11 @@ pub(super) async fn faults() {
                 .unwrap()
                 .events
                 .iter()
-                .all(|e| e.0 != "owner_stop_begin")
+                .all(|e| e.0 != "worker_stop_begin")
         );
         core.transition_to_shutdown();
         assert!(host.shutdown().await.is_err());
-        println!("M2-FAILURE {fault}: retained cleanup, writer and owner; no business resume");
+        println!("M2-FAILURE {fault}: retained cleanup and writer; no business resume");
         println!("M2-CELL {fault}");
         std::io::stdout().flush().unwrap();
         *current.lock().unwrap() = None;

@@ -267,7 +267,6 @@ fn human_closes(f: &Fixture, lane_id: &str, discard: bool) {
                 surface: "web".into(),
                 client_id: Some("client-1".into()),
             },
-            &[],
         )
         .unwrap();
 }

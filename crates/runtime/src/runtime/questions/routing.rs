@@ -103,7 +103,7 @@ impl AgentRuntime {
             .map_err(question_error)
     }
 
-    /// Authenticate once, hold the caller's generation guard through the storage
+    /// Authenticate once, validate the current root binding before the storage
     /// CAS, then publish the committed projection. Never impersonate a parent or
     /// write trusted-user evidence. Offline continuation belongs to the outbox.
     pub(crate) fn resolve_lane_question(
@@ -114,18 +114,12 @@ impl AgentRuntime {
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "question storage is not configured")
         })?;
-        // Match parent-answer/restore lock order: completion gate, then ownership.
+        // Match parent-answer/restore lock order: completion gate, then current root binding.
         let _completion = store
             .restore_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (thread, config) = self.current_question_lead(caller)?;
-        let _guard = config
-            .ownership
-            .as_ref()
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|e| LaneError::new("ownership_lost", e.to_string()))?;
+        let (thread, _config) = self.current_question_lead(caller)?;
         let route = store
             .handle
             .lane_question_routing(request.question_id.clone())?
@@ -154,7 +148,6 @@ impl AgentRuntime {
                 at_ns: crate::run_store::review_time_ns(),
             })
             .map_err(question_error)?;
-        drop(_guard);
         drop(_completion);
         self.cache_wait_question(&question);
         self.shared

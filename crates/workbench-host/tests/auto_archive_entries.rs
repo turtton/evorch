@@ -57,17 +57,17 @@ fn workspace_attachment_and_shutdown_entries_have_canonical_lock_or_admission_ro
         ),
         (
             "ingress.rs",
-            "admin answer_provenance attachment_writer command_receipt connections full_approval_input handle_command handle_query handle_request install_agent_observation_for_test management_enabled new new_with_epoch projection receipts reconcile_attachments reject_error renderer_data_plane renderer_owner renderer_reconnect_grace renderer_reconnect_grace request_provenance reserve_new_chat_thread running_invocations service service_mut status_probe submission_provenance submit_local submit_local_authorized submit_local_chat_with_permit with_admin with_areas with_projects with_receipts",
+            "admin answer_provenance attachment_writer command_receipt connections full_approval_input handle_command handle_query handle_request install_agent_observation_for_test management_enabled new new_with_epoch projection receipts reconcile_attachments reject_error renderer_data_plane renderer_owner renderer_reconnect_grace renderer_reconnect_grace request_provenance reserve_new_chat_thread running_invocations service service_mut status_probe submission_provenance submit_local with_admin with_areas with_projects with_receipts",
             "G2/G4/G8/G9: handle_command registers global admission before dispatch, held through side effects/ACK. Conversation inputs additionally enter runtime/run admission and serialized inbox acceptance; workspace and attachment writers admit before publishing. Host mutex alone is not an online deletion exemption. Read-only provenance/observation changes no work.",
         ),
         (
             "bootstrap/mod.rs",
-            "activate_after_ready area_work_notify graph_collector open open_claimed_for_core open_for_core open_for_core_with_test_seams open_with_mcp_test_seams open_with_service_observer open_with_service_seams open_with_test_seams planned_probe_stats probe_after_ready quiesce_for_restart restart_preparing_services restart_producers shutdown storage_config storage_writer",
+            "activate_after_ready area_work_notify graph_collector open open_adopted_for_core open_for_core open_for_core_with_test_seams open_with_mcp_test_seams open_with_service_observer open_with_service_seams open_with_test_seams planned_probe_stats probe_after_ready quiesce_for_restart restart_preparing_services restart_producers shutdown storage_config storage_writer",
             "G10 delegated: production owners borrow dedicated DB/root writer authority; restart_producers pauses/drains retention and shutdown joins before storage barrier. Probes/test seams cannot forge authority; missing root stays disabled until restart.",
         ),
         (
             "bootstrap/planned_exit.rs",
-            "cleanup completed first_five restart_holds scratch_archive take_planned_exit validate_planned_exit writer",
+            "cleanup completed first_five restart_transaction_guard scratch_archive take_planned_exit validate_planned_exit writer",
             "G10 delegated: retained producers stop/join at WorkersJoined before StorageDrained; scratch_archive only exposes the already-owned worker for stop/join before exec. Getters/cleanup do not admit new work.",
         ),
     ];

@@ -19,21 +19,21 @@ struct Fixture {
     _dir: tempfile::TempDir,
 }
 
-async fn fixture(blocking: bool, owned: bool) -> Fixture {
-    fixture_with_hook(blocking, owned, None).await
+async fn fixture(blocking: bool, bound: bool) -> Fixture {
+    fixture_with_hook(blocking, bound, None).await
 }
 
 async fn fixture_with_hook(
     blocking: bool,
-    owned: bool,
+    bound: bool,
     hook: Option<Arc<dyn tools::post_edit::PostEditHook>>,
 ) -> Fixture {
-    fixture_with_role(blocking, owned, hook, Role::Worker).await
+    fixture_with_role(blocking, bound, hook, Role::Worker).await
 }
 
 async fn fixture_with_role(
     blocking: bool,
-    owned: bool,
+    bound: bool,
     hook: Option<Arc<dyn tools::post_edit::PostEditHook>>,
     role: Role,
 ) -> Fixture {
@@ -72,36 +72,11 @@ async fn fixture_with_role(
     )
     .with_sequential_run_ids()
     .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    let ownership = owned.then(|| {
-        use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
-        let registry_path = dir.path().join("owners.db");
-        let owner = ThreadOwner::new(
-            "thread".into(),
-            Lease {
-                owner_id: "first".into(),
-                generation: 1,
-                expires_at: u64::MAX,
-            },
-        );
-        Registry::open(&registry_path)
-            .unwrap()
-            .start(&owner)
-            .unwrap();
-        OwnerPermit {
-            registry_path,
-            thread_id: owner.thread_id,
-            lease: owner.lease,
-            run_id: None,
-        }
-    });
-    let parent = runtime.delegate_background(
-        Role::Orchestrator,
-        "PARENT".into(),
-        RunConfig {
-            ownership,
-            ..Default::default()
-        },
-    );
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
+    if bound {
+        runtime.bind_thread_root("thread", parent).unwrap();
+    }
     model.wait_for_request(0).await;
     let child = runtime
         .delegate_background_as_child(parent, role, "CHILD", RunConfig::default())
@@ -240,25 +215,9 @@ async fn caller_interruption_releases_finalization_wait_and_preserves_answer() {
         fixture.runtime.wait(fixture.parent).await.unwrap();
         fixture.runtime.wait(fixture.child).await.unwrap();
         if !cancel {
-            let registry_path = fixture._dir.path().join("owners.db");
-            let owner = runtime::ownership::Registry::open(&registry_path)
-                .unwrap()
-                .attach("thread")
-                .unwrap();
             fixture
                 .runtime
-                .resume_chat(
-                    fixture.parent,
-                    RunConfig {
-                        ownership: Some(runtime::ownership::OwnerPermit {
-                            registry_path,
-                            thread_id: owner.thread_id,
-                            lease: owner.lease,
-                            run_id: None,
-                        }),
-                        ..Default::default()
-                    },
-                )
+                .resume_chat(fixture.parent, RunConfig::default())
                 .unwrap();
             fixture
                 .runtime
@@ -342,7 +301,7 @@ async fn interruption_during_finalization_prevents_answer_continuation() {
 
 #[tokio::test]
 async fn delayed_parent_answer_resumes_done_child_once_with_saved_history() {
-    for owned in [false, true] {
+    for bound in [false, true] {
         let Fixture {
             runtime,
             model,
@@ -351,7 +310,7 @@ async fn delayed_parent_answer_resumes_done_child_once_with_saved_history() {
             storage: _storage,
             _dir,
             ..
-        } = fixture(false, owned).await;
+        } = fixture(false, bound).await;
         assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
         let question = runtime.user_answers(child).unwrap().remove(0);
         let before = model.observed().await;
@@ -530,8 +489,8 @@ async fn stopped_and_cancelled_children_are_not_restarted_by_answers() {
 }
 
 #[tokio::test]
-async fn failed_child_resumes_with_the_answer_under_the_parents_current_owner() {
-    // Given: an owned child that failed while waiting for its question.
+async fn failed_child_resumes_with_the_answer_under_its_current_parent() {
+    // Given: a thread-bound child that failed while waiting for its question.
     let fixture = fixture(true, true).await;
     let question = waiting_question(&fixture).await;
     fixture
@@ -590,8 +549,7 @@ async fn waiting_question(fixture: &Fixture) -> event_bus::UserQuestion {
 }
 
 #[tokio::test]
-async fn child_continuation_uses_current_parent_owner_and_fences_stale_parent() {
-    use runtime::ownership::{OwnerPermit, Registry};
+async fn child_continuation_requires_a_live_parent_and_allows_explicit_resume() {
     let fixture = fixture(false, true).await;
     assert_eq!(
         fixture.runtime.wait(fixture.child).await.unwrap(),
@@ -610,22 +568,18 @@ async fn child_continuation_uses_current_parent_owner_and_fences_stale_parent() 
         fixture.runtime.wait(fixture.parent).await.unwrap(),
         AgentRunPhase::Stopped
     );
-    let registry_path = fixture._dir.path().join("owners.db");
-    let mut registry = Registry::open(&registry_path).unwrap();
-    let old_lease = registry.attach("thread").unwrap().lease;
-    registry
-        .update("thread", |owner| {
-            owner.quiesce(&old_lease)?;
-            owner.release(&old_lease)?;
-            owner.claim(&old_lease, "second", 0, 0)
-        })
-        .unwrap();
     let error = fixture
         .runtime
         .answer_subagent_question(fixture.parent, &question.id, "Use A")
         .await
         .unwrap_err();
-    assert!(error.contains("ownership"), "{error}");
+    assert_eq!(
+        error,
+        runtime::RuntimeError::RunTerminated {
+            run_id: fixture.parent.to_string()
+        }
+        .to_string()
+    );
     assert!(
         fixture
             .runtime
@@ -637,18 +591,7 @@ async fn child_continuation_uses_current_parent_owner_and_fences_stale_parent() 
     );
     fixture
         .runtime
-        .resume_chat(
-            fixture.parent,
-            RunConfig {
-                ownership: Some(OwnerPermit {
-                    registry_path,
-                    thread_id: "thread".into(),
-                    lease: registry.attach("thread").unwrap().lease,
-                    run_id: None,
-                }),
-                ..Default::default()
-            },
-        )
+        .resume_chat(fixture.parent, RunConfig::default())
         .unwrap();
     fixture
         .runtime
@@ -659,10 +602,6 @@ async fn child_continuation_uses_current_parent_owner_and_fences_stale_parent() 
         fixture.runtime.wait(fixture.child).await.unwrap(),
         AgentRunPhase::Done
     );
-    let owner = registry.attach("thread").unwrap();
-    assert_eq!(owner.lease.generation, old_lease.generation + 1);
-    assert_eq!(owner.lease.owner_id, "second");
-    assert!(!owner.active_runs.contains(&fixture.child.to_string()));
     let observed = fixture.model.observed().await;
     assert!(
         observed

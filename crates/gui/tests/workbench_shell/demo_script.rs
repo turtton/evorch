@@ -64,7 +64,6 @@ async fn demo_script_drives_three_done_runs_with_messages_and_telemetry() {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
             | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => None,
         })
@@ -96,7 +95,6 @@ async fn demo_script_drives_three_done_runs_with_messages_and_telemetry() {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
             | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => None,
         })

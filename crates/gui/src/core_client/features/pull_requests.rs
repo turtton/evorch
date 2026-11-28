@@ -591,7 +591,7 @@ impl PullRequestsFeature {
             self.say(&thread, failure_label(ErrorCode::StaleRevision, false));
             return;
         }
-        if !view.owned_here || !view.tracking_enabled || view.link.is_none() || self.running() {
+        if !view.tracking_enabled || view.link.is_none() || self.running() {
             return;
         }
         let controls = view::controls(&view, now_ns());
@@ -694,7 +694,7 @@ impl PullRequestsFeature {
             .candidates
             .iter()
             .any(|c| c.candidate_id == candidate_id && c.state == CandidateState::Presented);
-        if offered && view.owned_here && view.tracking_enabled && !self.running() {
+        if offered && view.tracking_enabled && !self.running() {
             self.send(ctx, candidate_command(&thread, &view, candidate_id, choice));
         }
     }
@@ -720,7 +720,7 @@ impl PullRequestsFeature {
         Some(PullRequestChips {
             thread,
             candidates,
-            can_write: view.owned_here && !self.running() && entry.error.is_none(),
+            can_write: !self.running() && entry.error.is_none(),
             seen: BarSeen::of(view),
         })
     }
@@ -780,7 +780,7 @@ impl PullRequestsFeature {
             view::BarShape {
                 expanded: entry.expanded,
                 collapsible: true,
-                actions_enabled: view.owned_here && !self.running() && entry.error.is_none(),
+                actions_enabled: !self.running() && entry.error.is_none(),
                 now_ns: now_ns(),
             },
         )?;
@@ -842,7 +842,7 @@ impl PullRequestsFeature {
                 format!("{READ_FAILED}: {message}. What is shown may be out of date."),
             );
         }
-        let can_write = view.owned_here && !busy && read_error.is_none();
+        let can_write = !busy && read_error.is_none();
         let shape = view::BarShape {
             expanded: true,
             collapsible: false,
@@ -873,10 +873,6 @@ impl PullRequestsFeature {
             }
             None => {
                 ui.label("No pull request is linked to this thread.");
-                if !view.owned_here {
-                    ui.label(muted("Not tracked in this window"))
-                        .on_hover_text("Another window polls this pull request, or none does");
-                }
                 let link = ui
                     .add_enabled_ui(can_write, |ui| primary_button(ui, "Link PR…"))
                     .inner;

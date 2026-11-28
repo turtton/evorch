@@ -1,4 +1,4 @@
-//! Non-executable disposal. Main revocation always precedes owner cleanup.
+//! Non-executable disposal. Durable revocation always precedes physical cleanup.
 use super::*;
 use crate::scratch::usage::DisposalScratchUse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,7 +31,6 @@ impl DisposalReservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisposalThreadResult {
     pub thread_id: String,
-    pub owners: GraphDisposalStep,
     pub scratch: GraphDisposalStep,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,12 +43,8 @@ impl DisposalResult {
     pub fn complete(&self) -> bool {
         self.control.as_ref().is_some_and(|c| c.revoked)
             && !self.unknown
-            && !self.threads.is_empty()
             && self.threads.iter().all(|t| {
                 matches!(
-                    t.owners,
-                    GraphDisposalStep::Applied | GraphDisposalStep::NotApplicable
-                ) && matches!(
                     t.scratch,
                     GraphDisposalStep::Applied | GraphDisposalStep::NotApplicable
                 )
@@ -57,12 +52,11 @@ impl DisposalResult {
     }
 }
 impl AgentRuntime {
-    /// Persist manual execution policy using execution's current permits. This
-    /// never accepts or manufactures DisposalAuthority.
+    /// Persist manual execution policy under the current graph reservation.
+    /// Execution still requires independently resolved runtime authority.
     pub fn begin_owned_graph_resume(
         &self,
         expected: &GraphControlCas,
-        permits: &[crate::ownership::OwnerPermit],
         reservation: &ActivationReservation,
     ) -> Result<GraphControlRecord, RuntimeError> {
         reservation
@@ -75,18 +69,9 @@ impl AgentRuntime {
         else {
             return Err(RuntimeError::GraphControlConflict);
         };
-        if expected.control_revision.checked_add(1) != Some(control_revision)
-            || !matches!(
-                self.reserved_owned_graph_ownership_diagnostic(expected, reservation)
-                    .map_err(|_| RuntimeError::GraphControlNotApplied)?
-                    .state(),
-                OwnedGraphOwnershipState::LiveSelf
-            )
-        {
+        if expected.control_revision.checked_add(1) != Some(control_revision) {
             return Err(RuntimeError::GraphControlConflict);
         }
-        let _owners = crate::ownership::disposal::guard_resume(expected, permits)
-            .map_err(|_| RuntimeError::GraphControlConflict)?;
         let store = self
             .shared
             .run_store
@@ -111,7 +96,7 @@ impl AgentRuntime {
         )
     }
 
-    /// No database, owner registry, provider, binding, or filesystem access.
+    /// No database, provider, binding, or filesystem access.
     pub fn reserve_owned_graph_disposal(
         &self,
         manifest: &str,
@@ -207,23 +192,20 @@ impl AgentRuntime {
                 });
             }
         };
-        let scratch = self
-            .shared
-            .thread_scratch
+        let mut resets = authority
+            .resets
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        // Scratch snapshot BEFORE supplemental reads; later publication must
-        // advance this same epoch before it becomes visible.
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let scratch = authority.scratch();
+        // Snapshot BEFORE supplemental reads. Publication advances this epoch
+        // before a new binding, execution or shell user becomes visible.
         let snapshots = authority
-            .permits()
-            .keys()
+            .threads()
+            .iter()
             .map(|thread| {
                 (
                     thread.clone(),
-                    scratch
-                        .as_ref()
-                        .map_or(DisposalScratchUse::Unknown, |s| s.disposal_usage(thread)),
+                    scratch.map_or(DisposalScratchUse::Unknown, |s| s.disposal_usage(thread)),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -232,111 +214,128 @@ impl AgentRuntime {
             .run_store
             .get()
             .ok_or_else(|| error("no run store"))?;
-        let mut shared = self.disposal_runtime_users(authority.expected())?;
-        shared.extend(
-            store
-                .with_database(|db| db.owned_graph_shared_threads(authority.expected()))
-                .map_err(error)?,
-        );
-        shared.retain(|thread| authority.permits().contains_key(thread));
-        for (thread, observed) in &snapshots {
-            if matches!(observed, DisposalScratchUse::InUse) {
-                shared.insert(thread.clone());
-            }
-        }
-        let receipt = self
-            .cleanup_owned_graph_receipts(authority, effect.clone(), &shared)
-            .or_else(|_| {
-                crate::ownership::disposal_support::read(
-                    authority.registry_path(),
-                    &effect.operation_id,
-                )
-                .map_err(error)?
-                .filter(|r| {
-                    r.effect == effect
-                        && r.manifest_id == control.manifest_id
-                        && r.restart_id == authority.expected().restart_id
-                        && r.capture_id == authority.expected().capture_id
-                })
-                .ok_or_else(|| error("owner cleanup unknown"))
+        let users = self
+            .disposal_runtime_users(authority.expected())
+            .and_then(|mut shared| {
+                let saved = store
+                    .with_database(|db| db.owned_graph_scratch_users(authority.expected()))
+                    .map_err(error)?;
+                shared.extend(saved.shared_threads);
+                let unadvertised_binding = authority.expected().membership.iter().any(|member| {
+                    member.thread_id.is_none()
+                        && member
+                            .root_run_id
+                            .parse::<RunId>()
+                            .map_or(true, |root| self.goal_thread(root).is_some())
+                });
+                Ok((shared, saved.unknown || unadvertised_binding))
             });
         let mut result = DisposalResult {
             control: Some(control.clone()),
             threads: vec![],
-            unknown: false,
+            // An empty advertised thread set is not itself a proof that no
+            // physical thread belongs to this graph. Require relational proof.
+            unknown: authority.threads().is_empty()
+                && (users.is_err() || users.as_ref().is_ok_and(|(_, unknown)| *unknown)),
         };
-        let receipt = match receipt {
-            Ok(r) => r,
-            Err(_) => {
-                result.unknown = true;
-                return Ok(result);
-            }
-        };
-        for (thread, permit) in authority.permits() {
+        for thread in authority.threads() {
             let key = GraphDisposalProgressKey {
                 manifest_id: control.manifest_id.clone(),
                 restart_id: authority.expected().restart_id.clone(),
                 capture_id: authority.expected().capture_id.clone(),
                 thread_id: thread.clone(),
-                owner_generation: permit.as_ref().map_or(0, |p| p.lease.generation),
             };
-            let prior = store
-                .with_database(|db| db.recovery_graph_thread_progress(&key))
-                .map_err(error)?;
-            let owners = if permit.is_none() || receipt.shared_threads.contains(thread) {
-                GraphDisposalStep::NotApplicable
-            } else {
-                GraphDisposalStep::Applied
+            let mut prior = match store.with_database(|db| db.recovery_graph_thread_progress(&key))
+            {
+                Ok(prior) => prior,
+                Err(_) => {
+                    result.unknown = true;
+                    result.threads.push(DisposalThreadResult {
+                        thread_id: thread.clone(),
+                        scratch: GraphDisposalStep::Unknown,
+                    });
+                    continue;
+                }
             };
-            let scratch_step = if let Some(prior) = prior.as_ref().filter(|p| {
+            let terminal = prior.as_ref().filter(|p| {
                 matches!(
                     p.scratch,
                     GraphDisposalStep::Applied | GraphDisposalStep::NotApplicable
                 )
-            }) {
+            });
+            let scratch_step = if let Some(prior) = terminal {
                 prior.scratch
-            } else if permit.is_none() || shared.contains(thread) {
-                GraphDisposalStep::NotApplicable
-            } else if let (Some(scratch), Some(DisposalScratchUse::Unused { epoch, lease })) =
-                (&scratch, snapshots.get(thread))
+            } else if prior
+                .as_ref()
+                .is_some_and(|p| p.scratch == GraphDisposalStep::Unknown)
+                && !resets.contains_key(thread)
             {
-                let effect_key = crate::scratch::GraphDisposalKey::try_from(&key).map_err(error)?;
-                match crate::ownership::disposal::reset_unused(authority, thread, lease, || {
-                    scratch.reset_thread_if_unused(thread, *epoch, lease, &effect_key)
-                }) {
-                    Ok(Some(_)) => GraphDisposalStep::Applied,
-                    Ok(None) | Err(_) => GraphDisposalStep::Unknown,
+                // Another authority (possibly before a crash) may already have
+                // detached scratch. Neither the absent ACK nor a new operation
+                // authorizes deleting a namespace created since that attempt.
+                GraphDisposalStep::Unknown
+            } else if users
+                .as_ref()
+                .is_ok_and(|(shared, unknown)| !unknown && shared.contains(thread))
+                || matches!(snapshots.get(thread), Some(DisposalScratchUse::InUse))
+                    && users.as_ref().is_ok_and(|(_, unknown)| !unknown)
+            {
+                GraphDisposalStep::NotApplicable
+            } else if users.as_ref().is_err() || users.as_ref().is_ok_and(|(_, unknown)| *unknown) {
+                GraphDisposalStep::Unknown
+            } else if let (Some(scratch), Some(DisposalScratchUse::Unused { epoch })) =
+                (scratch, snapshots.get(thread))
+            {
+                if !self.disposal_scratch_authorized(authority, &control, thread) {
+                    GraphDisposalStep::Unknown
+                } else {
+                    // Existing progress is the uncertainty boundary; this must
+                    // be durable BEFORE the rename. It is not a new journal.
+                    let request = GraphThreadProgressWrite {
+                        key: key.clone(),
+                        expected_revision: prior.as_ref().map_or(0, |p| p.revision),
+                        control: control.clone(),
+                        scratch: GraphDisposalStep::Unknown,
+                    };
+                    match write_progress(store, request) {
+                        None => GraphDisposalStep::Unknown,
+                        Some(confirmed) => {
+                            prior = Some(confirmed);
+                            let epoch = *resets.entry(thread.clone()).or_insert(*epoch);
+                            let effect_key =
+                                crate::scratch::GraphDisposalKey::try_from(&key).map_err(error)?;
+                            // Recheck writer, current control and relational
+                            // binding after the writer ACK, immediately at use.
+                            if !self.disposal_scratch_authorized(authority, &control, thread) {
+                                GraphDisposalStep::Unknown
+                            } else {
+                                match scratch.reset_thread_if_unused(thread, epoch, &effect_key) {
+                                    Ok(Some(_)) => GraphDisposalStep::Applied,
+                                    Ok(None) | Err(_) => GraphDisposalStep::Unknown,
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 GraphDisposalStep::Unknown
             };
-            let request = GraphThreadProgressWrite {
-                key: key.clone(),
-                expected_revision: prior.as_ref().map_or(0, |p| p.revision),
-                control: control.clone(),
-                owners,
-                scratch: scratch_step,
-            };
-            let confirmed = store
-                .handle
-                .write_recovery_graph_progress(request)
-                .or_else(|_| {
-                    store
-                        .with_database(|db| db.recovery_graph_thread_progress(&key))?
-                        .filter(|p| {
-                            p.effect == effect && p.owners == owners && p.scratch == scratch_step
-                        })
-                        .ok_or_else(|| {
-                            storage::StorageError::Io("disposal progress unknown".into())
-                        })
-                })
-                .is_ok();
-            if !confirmed {
+            let confirmed = write_progress(
+                store,
+                GraphThreadProgressWrite {
+                    key: key.clone(),
+                    expected_revision: prior.as_ref().map_or(0, |p| p.revision),
+                    control: control.clone(),
+                    scratch: scratch_step,
+                },
+            )
+            .is_some();
+            if !confirmed || scratch_step == GraphDisposalStep::Unknown {
                 result.unknown = true;
             }
             if confirmed
                 && scratch_step == GraphDisposalStep::Applied
-                && let Some(scratch) = &scratch
+                && let Some(scratch) = scratch
             {
                 scratch.forget_durable_reset(
                     &crate::scratch::GraphDisposalKey::try_from(&key).map_err(error)?,
@@ -344,12 +343,12 @@ impl AgentRuntime {
             }
             result.threads.push(DisposalThreadResult {
                 thread_id: thread.clone(),
-                owners,
                 scratch: scratch_step,
             });
         }
-        // Existing deferred trash mechanism only, after owners/scratch locks.
-        if let Some(scratch) = &scratch
+        drop(resets);
+        // Existing deferred trash mechanism only, after scratch locks.
+        if let Some(scratch) = scratch
             && scratch.wake_trash().is_err()
         {
             result.unknown = true;
@@ -410,9 +409,6 @@ impl AgentRuntime {
             let snapshot = admission.snapshot();
             parents.insert(*id, snapshot.parent);
             live.insert(*id);
-            if let Some(p) = snapshot.ownership {
-                result.insert(p.thread_id);
-            }
         }
         for (id, run) in runs.iter() {
             parents.insert(*id, run.parent);
@@ -421,9 +417,6 @@ impl AgentRuntime {
                 AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error
             ) {
                 live.insert(*id);
-                if let Some(p) = &run.config.ownership {
-                    result.insert(p.thread_id.clone());
-                }
             }
         }
         for id in live {
@@ -450,4 +443,26 @@ impl AgentRuntime {
 }
 fn error(reason: impl ToString) -> RuntimeError {
     crate::quiesce::runtime::error(reason)
+}
+
+/// Lost ACKs are settled only by an exact effect/step/revision readback.
+fn write_progress(
+    store: &crate::RunStore,
+    request: GraphThreadProgressWrite,
+) -> Option<storage::recovery::graph_progress::GraphThreadProgress> {
+    let revision = request.expected_revision.checked_add(1)?;
+    let confirmed = |p: &storage::recovery::graph_progress::GraphThreadProgress| {
+        p.key == request.key
+            && p.effect == request.control.effect
+            && p.scratch == request.scratch
+            && p.revision == revision
+    };
+    match store.handle.write_recovery_graph_progress(request.clone()) {
+        Ok(progress) if confirmed(&progress) => Some(progress),
+        _ => store
+            .with_database(|db| db.recovery_graph_thread_progress(&request.key))
+            .ok()
+            .flatten()
+            .filter(confirmed),
+    }
 }

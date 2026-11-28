@@ -1,10 +1,6 @@
-//! The checker the host and the native GUI inject into the owner decides from
-//! the saved shared sidebar alone: archived collects, anything it cannot
-//! establish keeps. These tests drive a real `OwnerHost` through
-//! `scratch_archive::install`, the function both production paths call, and
-//! wait on the archive worker's barrier.
+//! The core archive checker resolves saved family state. Real writer leases,
+//! bidirectional binding and the worker barrier protect each collection attempt.
 
-use runtime::ownership::OwnerHost;
 use sandbox::attachments::AttachmentRoot;
 use sandbox::scratch::ScratchRoot;
 use sha2::{Digest, Sha256};
@@ -17,7 +13,9 @@ use workspace_state::{ProjectId, SidebarDocument, SidebarStore, ThreadId, Thread
 struct World {
     sockets: test_socket_dir::SocketDir,
     data: tempfile::TempDir,
-    host: OwnerHost,
+    scratch: Arc<runtime::scratch::ThreadScratch>,
+    _storage: storage::Storage,
+    _maintenance: storage::SharedLeases,
     archive: runtime::scratch::archive::ArchiveService,
     sidebar: PathBuf,
 }
@@ -31,24 +29,46 @@ fn record(id: &str, parent: Option<&str>) -> ThreadRecord {
 fn world() -> World {
     let sockets = test_socket_dir::SocketDir::new();
     let data = tempfile::tempdir().unwrap();
-    let host = OwnerHost::open(
-        sockets.path(),
-        Default::default(),
-        Arc::new(event_bus::EventBus::new(32)),
-    )
-    .unwrap();
-    let archive = runtime::scratch::archive::ArchiveService::new(
-        &host.thread_scratch(),
-        host.scratch_archive_authority(),
-    )
-    .unwrap();
     let sidebar = data.path().join("sidebar.json");
+    let config = storage::StorageConfig {
+        db_path: data.path().join("archive.db"),
+        ..Default::default()
+    };
+    drop(storage::Database::open(&config).unwrap());
+    let maintenance =
+        storage::shared_with_wait(&config.db_path, sockets.path(), std::time::Duration::ZERO)
+            .unwrap();
+    let leases = Arc::new(
+        storage::WriterLeases::acquire(&config.db_path, sockets.path(), std::time::Duration::ZERO)
+            .unwrap(),
+    );
+    let storage = storage::Storage::open_with_writer_lease(
+        config.clone(),
+        maintenance.db_lease().unwrap(),
+        leases.db_lease(),
+    )
+    .unwrap();
+    let scratch =
+        Arc::new(runtime::scratch::ThreadScratch::for_ownership_root(sockets.path()).unwrap());
+    let archive = runtime::scratch::archive::ArchiveService::new(
+        &scratch,
+        runtime::scratch::archive::authority(
+            config,
+            sockets.path().into(),
+            sidebar.clone(),
+            leases,
+            scratch.clone(),
+        ),
+    )
+    .unwrap();
     World {
         sockets,
         data,
-        host,
+        scratch,
         archive,
         sidebar,
+        _storage: storage,
+        _maintenance: maintenance,
     }
 }
 
@@ -83,9 +103,7 @@ impl World {
 
     /// A scratch directory with content, owned by this process.
     fn scratch(&self, thread: &str) -> PathBuf {
-        self.host.start(thread).unwrap();
-        let scratch = self.host.thread_scratch();
-        let dir = scratch.thread_dir(thread);
+        let dir = self.scratch.thread_dir(thread);
         let name = dir.file_name().unwrap().to_str().unwrap();
         // Same identity-marked root `ThreadScratch::for_ownership_root` builds, so
         // the owner treats the parent as its own.

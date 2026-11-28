@@ -8,8 +8,7 @@
 //! - [`CommandHost::submit_local`] takes the host's own [`HostCommand`] from an
 //!   in-process client (the desktop adapter).
 //!
-//! Both do the same three steps in the same order: ownership first
-//! ([`CommandService::authorize`]), then the submission ledger (a chat whose
+//! Both use host admission, then the submission ledger (a chat whose
 //! submission id was seen is applied once), then the [`CommandService`]. The
 //! service's execution entry points are crate-private, so this type is the only
 //! way to run a command and none of the steps can be skipped.
@@ -41,7 +40,6 @@ use crate::receipts::{Receipts, SubmissionRecord};
 pub struct CommandHost {
     service: CommandService,
     admin: Option<std::sync::Arc<crate::admin::AdminService>>,
-    conversation: namespaces::conversation::ConversationState,
     attachments: Option<crate::attachments::AttachmentService>,
     pub(crate) lane_sidebar_path: Option<std::path::PathBuf>,
     receipts: Receipts,
@@ -340,8 +338,6 @@ impl CommandHost {
     }
 
     /// Reserve an absent thread for a new chat, after resolving its project.
-    /// Reservation never claims an existing row, even a released one. Later execution
-    /// authorization may reclaim an absent foreign owner after its lease and grace expire.
     pub fn reserve_new_chat_thread(&self, send: &SendChat) -> Result<(), WorkbenchError> {
         let _permit = self
             .service
@@ -372,22 +368,12 @@ impl CommandHost {
         fork: Option<(String, u64)>,
     ) -> Result<(), WorkbenchError> {
         let root = self.project_root(project)?;
-        if let Some(owner) = self.service.ownership() {
-            match owner.attach(thread.as_str()) {
-                Ok(_) => (),
-                Err(runtime::ownership::RegistryError::Absent) => {
-                    owner.start(thread.as_str()).map_err(|_| {
-                        reject_error(RejectKind::Fenced, "thread could not be reserved")
-                    })?;
-                }
-                Err(_) => {
-                    return Err(reject_error(
-                        RejectKind::Fenced,
-                        "thread ownership unavailable",
-                    ));
-                }
-            }
-        }
+        crate::lane::current_thread_project(
+            self.service.runtime(),
+            self.lane_sidebar_path.as_deref(),
+            thread.as_str(),
+            Some(&root),
+        )?;
         // The conversation is the core's own now: list it in the sidebar, under
         // the same lock and file as every other sidebar write. Idempotent, and
         // nothing when the workspace service is not wired (a desktop that lists
@@ -426,7 +412,6 @@ impl CommandHost {
             status,
             service,
             admin: None,
-            conversation: Default::default(),
             attachments: None,
             lane_sidebar_path: None,
             projection,
@@ -532,7 +517,7 @@ impl CommandHost {
         self.dispatch_command(command, &provenance, permit.clone())
     }
 
-    /// Run a command through ownership, the submission ledger and the command
+    /// Run a command through host admission, the submission ledger and the command
     /// service, and report what it produced.
     fn run_host_command(
         &mut self,
@@ -548,7 +533,7 @@ impl CommandHost {
         provenance: &Provenance,
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Result<CommandReply, WorkbenchError> {
-        let events = self.authorize_and_execute(command, provenance, restart)?;
+        let events = self.execute_host_command(command, provenance, restart)?;
         reply_from_events(events, None)
     }
 
@@ -697,26 +682,35 @@ impl CommandHost {
             value: approval_id.as_str().to_owned(),
         };
         if let Some(approval) = registry.get(&id) {
-            if !self
-                .service
-                .runtime()
-                .deleted_runs(&[approval.run_id])
-                .map_err(crate::queries::storage_error)?
-                .is_empty()
-            {
-                return Err(reject_error(
-                    RejectKind::NotFound,
-                    "approval conversation was deleted",
-                ));
-            }
-            if let (Some(ownership), Some(thread)) = (self.service.ownership(), approval.thread_id)
-            {
-                ownership.owned_permit(&thread).map_err(|_| {
-                    reject_error(RejectKind::Fenced, "approval conversation is not owned")
-                })?;
-            }
+            self.check_approval_tombstones(&approval)?;
         }
         registry.full_input(&id, revision.get()).map_err(map_error)
+    }
+
+    fn check_approval_tombstones(
+        &self,
+        approval: &sandbox::approval::ApprovalSnapshot,
+    ) -> Result<(), WorkbenchError> {
+        let runtime = self.service.runtime();
+        let deleted = runtime.tombstone_guard().is_some_and(|guard| {
+            guard.check_run(&approval.run_id).is_err()
+                || approval
+                    .thread_id
+                    .as_deref()
+                    .is_some_and(|thread| guard.check_thread(thread).is_err())
+        });
+        if deleted
+            || !runtime
+                .deleted_runs(std::slice::from_ref(&approval.run_id))
+                .map_err(crate::queries::storage_error)?
+                .is_empty()
+        {
+            return Err(reject_error(
+                RejectKind::NotFound,
+                "approval conversation was deleted",
+            ));
+        }
+        Ok(())
     }
 
     fn decide_approval(
@@ -740,24 +734,7 @@ impl CommandHost {
             value: decide.approval_id.as_str().to_owned(),
         };
         if let Some(approval) = registry.get(&id) {
-            if !self
-                .service
-                .runtime()
-                .deleted_runs(std::slice::from_ref(&approval.run_id))
-                .map_err(crate::queries::storage_error)?
-                .is_empty()
-            {
-                return Err(reject_error(
-                    RejectKind::NotFound,
-                    "approval conversation was deleted",
-                ));
-            }
-            if let (Some(ownership), Some(thread)) = (self.service.ownership(), &approval.thread_id)
-            {
-                ownership.owned_permit(thread).map_err(|_| {
-                    reject_error(RejectKind::Fenced, "approval conversation is not owned")
-                })?;
-            }
+            self.check_approval_tombstones(&approval)?;
         }
         let decided = registry
             .resolve(
@@ -862,7 +839,7 @@ impl CommandHost {
     }
 
     /// Run a command from an in-process client (the desktop adapter) as
-    /// `provenance`. It passes the same ownership check and submission ledger as a
+    /// `provenance`. It passes the same admission checks and submission ledger as a
     /// protocol command: a chat resent under a used submission id is not applied
     /// twice, and the first answer saved to a question is remembered with who
     /// saved it.
@@ -871,38 +848,7 @@ impl CommandHost {
         command: HostCommand,
         provenance: &Provenance,
     ) -> Vec<HostEvent> {
-        match self.service.authorize(&command) {
-            Ok(permit) => self.execute_local(command, permit, provenance),
-            Err(refusal) => vec![refusal],
-        }
-    }
-
-    /// [`Self::submit_local`] for a chat sent under a permit the caller already
-    /// holds; the permit is checked against the thread's current ownership first.
-    pub fn submit_local_chat_with_permit(
-        &mut self,
-        chat: ChatInput,
-        permit: runtime::ownership::OwnerPermit,
-        provenance: &Provenance,
-    ) -> Vec<HostEvent> {
-        if let Err(refusal) = self.service.authorize_chat_permit(&chat, &permit) {
-            return vec![refusal];
-        }
-        self.execute_local(HostCommand::SendChat(chat), Some(permit), provenance)
-    }
-
-    /// [`Self::submit_local`] under a permit the caller already authorised (or
-    /// none without an ownership host), skipping the lookup. Skipping the lookup is
-    /// only sound for a test that built the permit itself, so this exists only for
-    /// tests (feature `test-support`).
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn submit_local_authorized(
-        &mut self,
-        command: HostCommand,
-        permit: Option<runtime::ownership::OwnerPermit>,
-        provenance: &Provenance,
-    ) -> Vec<HostEvent> {
-        self.execute_local(command, permit, provenance)
+        self.execute_local(command, provenance)
     }
 
     /// Who sent the accepted chat named `submission`, from memory or from storage.
@@ -926,17 +872,12 @@ impl CommandHost {
         self.receipts.answer_provenance(question).cloned()
     }
 
-    fn execute_local(
-        &mut self,
-        command: HostCommand,
-        permit: Option<runtime::ownership::OwnerPermit>,
-        provenance: &Provenance,
-    ) -> Vec<HostEvent> {
+    fn execute_local(&mut self, command: HostCommand, provenance: &Provenance) -> Vec<HostEvent> {
         let restart = match self.restart_local_permit(&command) {
             Ok(permit) => permit,
             Err(refusal) => return vec![refusal],
         };
-        match self.execute(command, permit, provenance, Some(restart.clone()), false) {
+        match self.execute(command, provenance, Some(restart.clone()), false) {
             Executed::Duplicate { thread_id, run_id } => vec![HostEvent::ChatAccepted {
                 thread_id,
                 run_id: run_id.unwrap_or_default(),
@@ -945,24 +886,22 @@ impl CommandHost {
         }
     }
 
-    fn authorize_and_execute(
+    fn execute_host_command(
         &mut self,
         command: HostCommand,
         provenance: &Provenance,
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Result<Vec<HostEvent>, WorkbenchError> {
-        let permit = self.service.authorize(&command).map_err(refusal_error)?;
-        match self.execute(command, permit, provenance, restart, false) {
+        match self.execute(command, provenance, restart, false) {
             Executed::Events(events) => Ok(events),
             Executed::Duplicate { .. } => unreachable!("only a chat can be a duplicate"),
         }
     }
 
-    /// Deduplicate, run and record. The caller has authorised `permit`.
+    /// Deduplicate, run and record after host admission.
     fn execute(
         &mut self,
         mut command: HostCommand,
-        permit: Option<runtime::ownership::OwnerPermit>,
         provenance: &Provenance,
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
         resolve_wire_choice: bool,
@@ -1030,9 +969,7 @@ impl CommandHost {
         } else {
             None
         };
-        let events = self
-            .service
-            .submit_authorized_tracked(command, permit, restart);
+        let events = self.service.submit_authorized_tracked(command, restart);
         for event in &events {
             match event {
                 HostEvent::ChatAccepted { run_id, .. } => {
@@ -1232,9 +1169,6 @@ impl CommandHost {
                     context_len: seed.context_len.get(),
                 }),
             };
-            self.service
-                .authorize(&HostCommand::SendChat(raw.clone()))
-                .map_err(refusal_error)?;
             let raw_fingerprint = chat_fingerprint(&raw);
             raw.attachments.clear();
             if fingerprint.rsplit_once(':').map(|(wire, _)| wire)
@@ -1252,12 +1186,11 @@ impl CommandHost {
                 "submission was already used for a different message",
             ));
         }
-        // Validate attachments before creating even an owner row; the common
+        // Validate attachments before creating even a thread; the common
         // host gate has already accepted this command.
         let command = HostCommand::SendChat(self.chat_input(send)?);
         self.reserve_chat_after_gate(send)?;
-        let permit = self.service.authorize(&command).map_err(refusal_error)?;
-        match self.execute(command, permit, provenance, None, true) {
+        match self.execute(command, provenance, None, true) {
             Executed::Duplicate { run_id, .. } => Ok(CommandReply {
                 disposition: CommandDisposition::AlreadyApplied,
                 submission_id: Some(send.submission_id.clone()),
@@ -1348,11 +1281,6 @@ impl CommandHost {
         withdraw: &WithdrawFollowUp,
     ) -> Result<CommandReply, WorkbenchError> {
         let thread = withdraw.thread.as_str();
-        if let Some(ownership) = self.service.ownership() {
-            ownership
-                .owned_permit(thread)
-                .map_err(|error| reject_error(RejectKind::Fenced, &error.to_string()))?;
-        }
         let bound = self.service.bindings.root_of(thread);
         if bound.map(|run| run.to_string()).as_deref() != Some(withdraw.run.as_str()) {
             return Err(reject_error(
@@ -1397,14 +1325,6 @@ fn model_preference(preference: &ModelPreference) -> runtime::ModelPreference {
 
 fn unsupported(message: &str) -> WorkbenchError {
     reject_error(RejectKind::Unsupported, message)
-}
-
-/// The error for an authorisation refusal the service reported as an event.
-fn refusal_error(refusal: HostEvent) -> WorkbenchError {
-    match reply_from_events(vec![refusal], None) {
-        Err(error) => error,
-        Ok(_) => reject_error(RejectKind::Failed, "authorisation refused"),
-    }
 }
 
 /// The protocol error for a refusal the command service reported.

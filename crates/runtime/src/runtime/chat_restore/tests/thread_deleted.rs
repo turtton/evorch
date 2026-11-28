@@ -89,7 +89,6 @@ async fn every_entry_refuses_a_deleted_thread_or_run() {
         gone,
         "memo",
         &RunConfig::default(),
-        false,
         &Default::default(),
         None,
     );

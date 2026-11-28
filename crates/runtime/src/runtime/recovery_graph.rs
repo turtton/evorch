@@ -489,7 +489,7 @@ impl AgentRuntime {
                     .collect::<Result<Vec<_>, RuntimeError>>()?;
                 let record = RecoveryManifestRecord {
                     manifest_id: manifest_id.clone(),
-                    schema_version: 1,
+                    schema_version: 2,
                     committed: false,
                     superseded: false,
                     edges: edges(&component),
@@ -560,19 +560,22 @@ impl AgentRuntime {
                 covered.extend(component_runs.iter().copied());
             }
             let mut candidates = Vec::new();
-            let mut required = vec![
-                RequiredRecoveryAuthority::CurrentOwnership,
-                RequiredRecoveryAuthority::CurrentConfiguration,
-            ];
+            let mut required = vec![RequiredRecoveryAuthority::CurrentConfiguration];
             let check = (|| -> Result<(), RecoveryReason> {
-                let manifest = load.record.map_err(|_| RecoveryReason::CorruptComponent)?;
+                let manifest = load.record.map_err(|problem| {
+                    if problem == storage::recovery::RecoveryProblem::UnsupportedFormat {
+                        RecoveryReason::UnknownSchema
+                    } else {
+                        RecoveryReason::CorruptComponent
+                    }
+                })?;
                 if manifest.superseded {
                     return Err(RecoveryReason::SupersededManifest);
                 }
                 if !manifest.committed {
                     return Err(RecoveryReason::PartialManifest);
                 }
-                if manifest.schema_version != 1 {
+                if manifest.schema_version != 2 {
                     return Err(RecoveryReason::UnknownSchema);
                 }
                 let records = manifest

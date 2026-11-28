@@ -473,10 +473,13 @@ async fn closed_writer_refuses_before_enqueue_and_orphan_reconciliation_settles_
             .is_err()
     );
     assert_eq!(inbox.status().pending, 1);
-    fixture
-        .runtime
-        .stop(fixture.run, StopScope::SelfOnly)
-        .unwrap();
+    assert!(
+        fixture
+            .runtime
+            .stop(fixture.run, StopScope::SelfOnly)
+            .is_err(),
+        "memory Stop must remain applied, but a closed writer cannot acknowledge durable Stop"
+    );
     fixture.runtime.wait(fixture.run).await.unwrap();
     let config = storage::StorageConfig {
         db_path: fixture._dir.path().join("receipts.db"),

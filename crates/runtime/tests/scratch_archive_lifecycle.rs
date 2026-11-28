@@ -17,7 +17,6 @@ use std::{
 
 use event_bus::{AgentMessageKind, AgentRunPhase, EventBus, EventKind, EventReceiver, ToolEvent};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole};
-use runtime::ownership::OwnerHost;
 use runtime::{
     AgentRuntime, ExecutionPolicy, Role, RunConfig, RunId, RunStore, SandboxFactory, StopScope,
     WorkspaceMounts,
@@ -116,7 +115,7 @@ impl Gate {
 
 struct World {
     runtime: AgentRuntime,
-    _host: OwnerHost,
+    _maintenance: storage::SharedLeases,
     archive: runtime::scratch::archive::ArchiveService,
     model: Arc<ScriptedModel>,
     bus: Arc<EventBus>,
@@ -137,13 +136,56 @@ impl World {
         let sockets = test_socket_dir::SocketDir::new();
         let bus = Arc::new(EventBus::new(4096));
         let events = bus.subscribe();
-        let host = OwnerHost::open(sockets.path(), Default::default(), bus.clone()).unwrap();
-        host.start(THREAD).unwrap();
-        let scratch = host.thread_scratch();
+        let database = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: database.path().join("runs.db"),
+            ..Default::default()
+        };
+        let sidebar = database.path().join("sidebar.json");
+        // The existing exclusion: shared maintenance and the writer leases the
+        // archive authority proves, with the bidirectional retention binding.
+        drop(storage::Database::open(&config).unwrap());
+        let maintenance =
+            storage::shared_with_wait(&config.db_path, sockets.path(), std::time::Duration::ZERO)
+                .unwrap();
+        let leases = Arc::new(
+            storage::WriterLeases::acquire(
+                &config.db_path,
+                sockets.path(),
+                std::time::Duration::ZERO,
+            )
+            .unwrap(),
+        );
+        let storage = storage::Storage::open_with_writer_lease(
+            config.clone(),
+            maintenance.db_lease().unwrap(),
+            leases.db_lease(),
+        )
+        .unwrap();
+        runtime::thread_retention::binding::ensure_binding(
+            &storage::Database::open(&config).unwrap(),
+            &storage.handle(),
+            &leases.authority().unwrap(),
+            runtime::thread_retention::BindingPaths {
+                ownership_root: sockets.path(),
+                sidebar_path: &sidebar,
+            },
+            &config.db_path,
+            1,
+        )
+        .unwrap();
+        let scratch =
+            Arc::new(runtime::scratch::ThreadScratch::for_ownership_root(sockets.path()).unwrap());
         let (consulted_tx, consulted) = unbounded_channel();
         let archive = runtime::scratch::archive::ArchiveService::new(
             &scratch,
-            host.scratch_archive_authority(),
+            runtime::scratch::archive::authority(
+                config.clone(),
+                sockets.path().into(),
+                sidebar,
+                leases,
+                scratch.clone(),
+            ),
         )
         .unwrap();
         archive.set_checker(Arc::new(move |_| {
@@ -154,12 +196,6 @@ impl World {
         for (marker, script) in scripts {
             model.add_keyed(marker, script.into_iter().map(Ok)).await;
         }
-        let database = tempfile::tempdir().unwrap();
-        let config = storage::StorageConfig {
-            db_path: database.path().join("runs.db"),
-            ..Default::default()
-        };
-        let storage = storage::Storage::open(config.clone()).unwrap();
         let runtime = AgentRuntime::with_sandbox_factory(
             bus.clone(),
             Arc::new(ToolExecutor::with_standard_tools(
@@ -175,7 +211,7 @@ impl World {
         runtime.set_thread_scratch(scratch.clone());
         Self {
             runtime,
-            _host: host,
+            _maintenance: maintenance,
             archive,
             model,
             bus,

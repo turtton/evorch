@@ -89,11 +89,10 @@ fn open_snapshot(failing: bool) -> SnapshotView {
     }
 }
 
-fn view_of(thread: &str, linked: bool, owned_here: bool) -> ThreadPullRequest {
+fn view_of(thread: &str, linked: bool) -> ThreadPullRequest {
     ThreadPullRequest {
         thread: id(thread),
         tracking_enabled: true,
-        owned_here,
         lifecycle_revision: Revision(3),
         transition_seq: Sequence(1),
         link: linked.then(|| LinkView {
@@ -110,8 +109,8 @@ fn view_of(thread: &str, linked: bool, owned_here: bool) -> ThreadPullRequest {
     }
 }
 
-fn view(linked: bool, owned_here: bool) -> ThreadPullRequest {
-    view_of(THREAD, linked, owned_here)
+fn view(linked: bool) -> ThreadPullRequest {
+    view_of(THREAD, linked)
 }
 
 fn failing(mut view: ThreadPullRequest) -> ThreadPullRequest {
@@ -184,7 +183,7 @@ fn pr_command(action: &FeatureAction) -> &PullRequestsCommand {
 
 #[test]
 fn unlink_quotes_the_lifecycle_revision_and_is_not_sent_twice() {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     screen.get_by_label("Unlink").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1, "one click, one command");
@@ -208,7 +207,7 @@ fn unlink_quotes_the_lifecycle_revision_and_is_not_sent_twice() {
 
 #[test]
 fn a_refused_command_says_it_is_stale_and_reads_the_thread_again() {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     screen.get_by_label("Refresh").click();
     let sent = asked(&mut screen);
     answer(
@@ -229,7 +228,7 @@ fn a_refused_command_says_it_is_stale_and_reads_the_thread_again() {
 }
 
 fn unlink_refused_for_a_limit(retry: RetryAdvice) -> Harness<'static, Screen> {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     screen.get_by_label("Unlink").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
@@ -276,7 +275,7 @@ const UNKNOWN: &str = "Pull request: the outcome could not be confirmed. Read it
 
 #[test]
 fn a_lost_reply_is_checked_by_operation_id_and_never_shown_as_done() {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     screen.get_by_label("Unlink").click();
     let sent = asked(&mut screen);
     let PullRequestsCommand::UnlinkPullRequest(unlink) = pr_command(&sent[0]).clone() else {
@@ -316,22 +315,8 @@ fn a_lost_reply_is_checked_by_operation_id_and_never_shown_as_done() {
 }
 
 #[test]
-fn a_thread_the_core_does_not_hold_is_read_only() {
-    let screen = loaded(view(true, false));
-    assert!(
-        screen
-            .query_all_by_label("Not tracked in this window")
-            .next()
-            .is_some()
-    );
-    for label in ["Unlink", "Refresh"] {
-        assert!(screen.get_by_label(label).accesskit_node().is_disabled());
-    }
-}
-
-#[test]
 fn the_limit_notice_is_shown_from_the_core_event_and_decided_nowhere_else() {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     screen.state_mut().feature.event(&UiEvent::PullRequests(
         PullRequestsEvent::AutoFixLimitReached {
             thread: thread(),
@@ -352,7 +337,7 @@ fn the_limit_notice_is_shown_from_the_core_event_and_decided_nowhere_else() {
 
 #[test]
 fn a_notification_the_core_claimed_is_said_in_the_embedded_words() {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     screen.state_mut().feature.event(&UiEvent::PullRequests(
         PullRequestsEvent::PullRequestChanged {
             thread: thread(),
@@ -388,7 +373,7 @@ fn link_button(screen: &Harness<'static, Screen>) -> bool {
 
 #[test]
 fn linking_goes_through_the_dialog_and_closes_when_the_core_links() {
-    let mut screen = loaded(view(false, true));
+    let mut screen = loaded(view(false));
     screen.get_by_label("No pull request is linked to this thread.");
     screen.get_by_label("Link PR…").click();
     screen.run_steps(2);
@@ -431,7 +416,7 @@ fn linking_goes_through_the_dialog_and_closes_when_the_core_links() {
 
 #[test]
 fn a_locator_the_core_refuses_is_said_in_the_dialog() {
-    let mut screen = loaded(view(false, true));
+    let mut screen = loaded(view(false));
     feature(&mut screen).enqueue_sidebar(PullRequestIntent::OpenLink(thread()));
     screen.run_steps(2);
     type_into_link_dialog(&mut screen, "not a pr");
@@ -456,7 +441,7 @@ fn a_locator_the_core_refuses_is_said_in_the_dialog() {
 
 #[test]
 fn a_link_chosen_for_another_thread_waits_for_its_read_and_quotes_its_revision() {
-    let mut screen = loaded(view(false, true));
+    let mut screen = loaded(view(false));
     feature(&mut screen).enqueue_sidebar(PullRequestIntent::OpenLink(id("t2")));
     let read = asked(&mut screen);
     assert_eq!(read.len(), 1);
@@ -467,7 +452,7 @@ fn a_link_chosen_for_another_thread_waits_for_its_read_and_quotes_its_revision()
         !link_button(&screen),
         "the revision to quote is not read yet"
     );
-    let mut other = view_of("t2", false, true);
+    let mut other = view_of("t2", false);
     other.lifecycle_revision = Revision(8);
     answer(&mut screen, read[0].tag, thread_reply(other));
     assert!(link_button(&screen));
@@ -481,7 +466,7 @@ fn a_link_chosen_for_another_thread_waits_for_its_read_and_quotes_its_revision()
 }
 
 fn linked_with(shape: impl FnOnce(&mut AutoFixView)) -> ThreadPullRequest {
-    let mut view = failing(view(true, true));
+    let mut view = failing(view(true));
     shape(view.auto_fix.as_mut().unwrap());
     view
 }
@@ -553,7 +538,7 @@ fn taking_over_the_notices_names_the_thread_it_takes_them_from() {
 
 #[test]
 fn the_toggle_turns_auto_fix_off_here_and_on_again() {
-    let mut screen = loaded(failing(view(true, true)));
+    let mut screen = loaded(failing(view(true)));
     screen.get_by_label("2 left");
     screen.get_by_label("Auto fix").click();
     let sent = asked(&mut screen);
@@ -580,7 +565,7 @@ fn the_toggle_turns_auto_fix_off_here_and_on_again() {
 
 #[test]
 fn send_to_agent_quotes_the_failing_head_and_the_link() {
-    let mut screen = loaded(failing(view(true, true)));
+    let mut screen = loaded(failing(view(true)));
     screen.get_by_label("Send to agent").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
@@ -593,15 +578,11 @@ fn send_to_agent_quotes_the_failing_head_and_the_link() {
 
 #[test]
 fn the_bar_is_offered_only_for_the_selected_linked_thread() {
-    let mut screen = loaded(view(false, true));
+    let mut screen = loaded(view(false));
     assert!(feature(&mut screen).bar().is_none(), "nothing is linked");
     feature(&mut screen).enqueue_sidebar(PullRequestIntent::Want(id("t2")));
     let read = asked(&mut screen);
-    answer(
-        &mut screen,
-        read[0].tag,
-        thread_reply(view_of("t2", true, true)),
-    );
+    answer(&mut screen, read[0].tag, thread_reply(view_of("t2", true)));
     assert!(
         feature(&mut screen).bar().is_none(),
         "another thread's pull request is not this conversation's"
@@ -617,7 +598,7 @@ fn the_bar_is_offered_only_for_the_selected_linked_thread() {
 
 #[test]
 fn a_move_into_failure_expands_the_bar_once() {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     let expanded =
         |screen: &mut Harness<'static, Screen>| feature(screen).bar().unwrap().view.expanded;
     assert!(!expanded(&mut screen));
@@ -636,7 +617,7 @@ fn a_move_into_failure_expands_the_bar_once() {
         assert_eq!(read.len(), 1);
         answer(screen, read[0].tag, thread_reply(view));
     };
-    refresh(&mut screen, failing(view(true, true)));
+    refresh(&mut screen, failing(view(true)));
     assert!(expanded(&mut screen), "a move into failure expands the bar");
     let toggle = feature(&mut screen)
         .bar()
@@ -645,7 +626,7 @@ fn a_move_into_failure_expands_the_bar_once() {
     feature(&mut screen).enqueue_bar(toggle);
     screen.run_steps(2);
     assert!(!expanded(&mut screen));
-    refresh(&mut screen, failing(view(true, true)));
+    refresh(&mut screen, failing(view(true)));
     assert!(
         !expanded(&mut screen),
         "a re-poll of the same failure keeps the bar the person closed"
@@ -654,14 +635,10 @@ fn a_move_into_failure_expands_the_bar_once() {
 
 #[test]
 fn a_change_of_a_thread_not_selected_reads_it_again() {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     feature(&mut screen).enqueue_sidebar(PullRequestIntent::Want(id("t2")));
     let read = asked(&mut screen);
-    answer(
-        &mut screen,
-        read[0].tag,
-        thread_reply(view_of("t2", true, true)),
-    );
+    answer(&mut screen, read[0].tag, thread_reply(view_of("t2", true)));
     assert!(asked(&mut screen).is_empty());
     feature(&mut screen).event(&UiEvent::PullRequests(
         PullRequestsEvent::PullRequestChanged {
@@ -697,7 +674,7 @@ fn rows_are_read_once_and_at_most_four_at_a_time() {
     answer(
         &mut screen,
         first[0].tag,
-        thread_reply(view_of("t2", false, true)),
+        thread_reply(view_of("t2", false)),
     );
     let next = asked(&mut screen);
     assert_eq!(next.len(), 1);
@@ -751,11 +728,7 @@ fn the_selected_thread_is_read_while_the_tab_is_hidden() {
     let read = asked(&mut screen);
     assert_eq!(read.len(), 1);
     assert!(is_read_of(&read[0], THREAD));
-    answer(
-        &mut screen,
-        read[0].tag,
-        thread_reply(failing(view(true, true))),
-    );
+    answer(&mut screen, read[0].tag, thread_reply(failing(view(true))));
     let (bar_thread, bar) = feature(&mut screen)
         .bar()
         .map(|bar| (bar.thread.clone(), bar.view.ci))
@@ -776,7 +749,7 @@ fn the_selected_thread_is_read_while_the_tab_is_hidden() {
 
 #[test]
 fn candidates_are_offered_by_their_label_and_linked_at_the_revision_read() {
-    let mut view = view(false, true);
+    let mut view = view(false);
     view.candidates = vec![
         workbench_protocol::namespaces::pull_requests::CandidateView {
             candidate_id: 5,
@@ -814,7 +787,7 @@ fn candidate(id: u64, state: CandidateState, run: &str, call: &str) -> Candidate
 // Then: a call is offered only the open suggestions of its own run and call id
 #[test]
 fn candidate_chips_are_scoped_to_run_and_call() {
-    let mut view = view(false, true);
+    let mut view = view(false);
     view.candidates = vec![
         candidate(5, CandidateState::Presented, "run-1", "call-1"),
         candidate(6, CandidateState::Presented, "run-2", "call-1"),
@@ -840,7 +813,7 @@ fn candidate_chips_are_scoped_to_run_and_call() {
 //       from the older read is dropped
 #[test]
 fn a_chip_press_sends_the_candidate_command_and_is_dropped_when_stale() {
-    let mut view = view(false, true);
+    let mut view = view(false);
     view.candidates = vec![candidate(5, CandidateState::Presented, "run-1", "call-1")];
     let mut screen = loaded(view.clone());
     let press = |screen: &mut Harness<'static, Screen>, choice| {
@@ -902,7 +875,7 @@ fn a_failed_read_of_the_selected_thread_is_said_instead_of_a_spinner() {
 
 #[test]
 fn a_failed_read_for_the_link_dialog_is_said_there_and_read_again_on_reopening() {
-    let mut screen = loaded(view(false, true));
+    let mut screen = loaded(view(false));
     feature(&mut screen).enqueue_sidebar(PullRequestIntent::OpenLink(id("t2")));
     let read = asked(&mut screen);
     assert!(is_read_of(&read[0], "t2"));
@@ -924,7 +897,7 @@ fn a_failed_read_for_the_link_dialog_is_said_there_and_read_again_on_reopening()
     answer(
         &mut screen,
         again[0].tag,
-        thread_reply(view_of("t2", false, true)),
+        thread_reply(view_of("t2", false)),
     );
     type_into_link_dialog(&mut screen, "o/r#7");
     assert!(link_button(&screen));
@@ -932,14 +905,10 @@ fn a_failed_read_for_the_link_dialog_is_said_there_and_read_again_on_reopening()
 
 #[test]
 fn a_link_of_another_thread_is_not_reported_on_the_selected_thread() {
-    let mut screen = loaded(view(false, true));
+    let mut screen = loaded(view(false));
     feature(&mut screen).enqueue_sidebar(PullRequestIntent::OpenLink(id("t2")));
     let read = asked(&mut screen);
-    answer(
-        &mut screen,
-        read[0].tag,
-        thread_reply(view_of("t2", false, true)),
-    );
+    answer(&mut screen, read[0].tag, thread_reply(view_of("t2", false)));
     type_into_link_dialog(&mut screen, "o/r#7");
     screen.get_by_role_and_label(Role::Button, "Link").click();
     let sent = asked(&mut screen);
@@ -974,7 +943,7 @@ fn changed(thread: &str) -> UiEvent {
 
 #[test]
 fn a_failed_read_again_marks_what_is_shown_out_of_date_and_acts_on_none_of_it() {
-    let mut screen = loaded(view(true, true));
+    let mut screen = loaded(view(true));
     let press = feature(&mut screen)
         .bar()
         .unwrap()
@@ -1009,7 +978,7 @@ fn a_failed_read_again_marks_what_is_shown_out_of_date_and_acts_on_none_of_it() 
 
 #[test]
 fn a_bar_press_is_dropped_when_a_newer_read_lands_before_it_is_applied() {
-    let mut screen = loaded(failing(view(true, true)));
+    let mut screen = loaded(failing(view(true)));
     let press = feature(&mut screen)
         .bar()
         .unwrap()

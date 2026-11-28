@@ -132,7 +132,7 @@ fn excluded_session_rows_advance_the_cursor_without_being_returned() {
     let handle = storage.handle();
     for (session, label) in [("me", "m0"), ("other", "o1"), ("me", "m2"), ("me", "m3")] {
         handle
-            .append_stream_event(session, &started(label), None)
+            .append_stream_event(session, &started(label))
             .expect("append");
     }
     let reader = Database::open_read_only(&config.db_path).expect("read-only open");
@@ -169,7 +169,6 @@ fn events_of_runs_can_be_read_in_pages_bounded_by_ids() {
                     run_id: run.into(),
                     text: format!("m{index}"),
                 }),
-                None,
             )
             .expect("append");
     }
@@ -239,7 +238,7 @@ fn compressed_payloads_are_followed_excluded_and_paged_like_plain_ones() {
     for (session, event) in &events {
         storage
             .handle()
-            .append_stream_event(session, event, None)
+            .append_stream_event(session, event)
             .expect("append");
     }
     assert_eq!(payload_classes(&config.db_path), ["blob"; 4]);
@@ -289,7 +288,7 @@ fn a_corrupt_compressed_row_is_skipped_by_the_follower_and_never_read_when_exclu
     let storage = Storage::open(config.clone()).expect("storage must open");
     storage
         .handle()
-        .append_stream_event("other", &big_tool_output("ok", "r1"), None)
+        .append_stream_event("other", &big_tool_output("ok", "r1"))
         .expect("append");
     let damaged: Vec<u8> = [0x28, 0xB5, 0x2F, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF].to_vec();
     let conn = Connection::open(&config.db_path).expect("raw connection");

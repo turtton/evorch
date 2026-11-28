@@ -172,7 +172,6 @@ impl NotificationsModel {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
             | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => return,
         };

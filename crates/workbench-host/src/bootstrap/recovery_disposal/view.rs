@@ -1,13 +1,9 @@
 use crate::admin::{
-    self, AdminFailure, GraphOwnershipSummary, GraphReferences, RevocationObservation,
-};
-use runtime::{
-    AgentRuntime, OwnedGraphOwnershipState, OwnedThreadCas,
-    ownership::{OwnerHost, RegistryError},
+    self, AdminFailure, GraphDisposalFacts, GraphReferences, RevocationObservation,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use storage::recovery::{
-    RecoveryClaimState,
+    RecoveryClaimState, RecoveryGraphHeader,
     graph_control::GraphControlCas,
     graph_progress::GraphDisposalStep,
     owned_graphs::OwnedGraphSnapshot,
@@ -29,53 +25,39 @@ fn unavailable() -> AdminFailure {
     )
 }
 
-/// Complete raw expectations remain server-side. Neither returned value grants
-/// execution/disposal authority; the operation resolves its own typed authority.
+/// The threads of a graph's captured members, in canonical order.
+pub(super) fn thread_ids(cas: &GraphControlCas) -> BTreeSet<String> {
+    cas.membership
+        .iter()
+        .filter_map(|m| m.thread_id.clone())
+        .collect()
+}
+
+/// Complete raw expectations remain server-side. The returned value grants no
+/// execution or disposal authority; the operation resolves its own typed
+/// authority from current bindings.
 pub fn binding_for(
-    owner: &OwnerHost,
     cas: &GraphControlCas,
     operation_id: AdminId,
-) -> Result<(OwnedGraphBinding, Vec<OwnedThreadCas>), AdminFailure> {
+) -> Result<OwnedGraphBinding, AdminFailure> {
     let mut refs = GraphReferences::default();
     let manifest = &cas.manifest.manifest_id;
     let graph_id = refs.graph_reference(&cas.restart_id, &cas.capture_id, manifest)?;
     let restart_tx_id = refs.graph_reference("transaction", &cas.restart_id, &cas.restart_id)?;
     let capture_id = refs.graph_reference("capture", &cas.restart_id, &cas.capture_id)?;
-    let mut raw = Vec::new();
-    let mut owners = Vec::new();
-    for thread in cas
-        .membership
-        .iter()
-        .filter_map(|m| m.thread_id.clone())
-        .collect::<BTreeSet<_>>()
-    {
-        let row = match owner.attach(&thread) {
-            Ok(row) => Some(row),
-            Err(RegistryError::Absent) => None,
-            Err(_) => return Err(unavailable()),
-        };
-        raw.push(OwnedThreadCas {
-            thread_id: thread.clone(),
-            owner_identity: row.as_ref().map(|r| r.lease.owner_id.clone()),
-            owner_generation: row.as_ref().map(|r| r.lease.generation),
-        });
-        let owner_identity = row
-            .as_ref()
-            .map(|r| refs.graph_reference("owner", &r.lease.owner_id, &r.lease.owner_id))
-            .transpose()?;
-        owners.push(OwnerCas {
+    let mut threads = Vec::new();
+    for thread in thread_ids(cas) {
+        threads.push(ThreadCas {
             thread_ref: refs.thread_reference(
                 &cas.restart_id,
                 &cas.capture_id,
                 manifest,
                 &thread,
             )?,
-            owner_identity,
-            owner_generation: row.map(|r| Revision(r.lease.generation)),
         });
     }
-    owners.sort_by(|a, b| a.thread_ref.cmp(&b.thread_ref));
-    owners.truncate(64);
+    threads.sort_by(|a, b| a.thread_ref.cmp(&b.thread_ref));
+    threads.truncate(64);
     let binding = OwnedGraphBinding {
         graph: GraphCas {
             graph_id,
@@ -83,80 +65,45 @@ pub fn binding_for(
             capture_id,
             expected_revision: Revision(cas.component.revision),
             expected_core_epoch: InstanceEpoch(cas.successor_epoch),
-            owner_identity: owners.first().and_then(|o| o.owner_identity.clone()),
-            owner_generation: owners.first().and_then(|o| o.owner_generation),
             operation_id,
         },
-        owners,
+        threads,
         expected_control_revision: Revision(cas.control_revision),
     };
     binding.validate().map_err(|_| unavailable())?;
-    Ok((binding, raw))
-}
-
-fn ownership(state: OwnedGraphOwnershipState) -> OwnershipView {
-    match state {
-        OwnedGraphOwnershipState::LiveSelf => OwnershipView::LiveSelf,
-        OwnedGraphOwnershipState::MixedSelfAndAbsent => OwnershipView::MixedSelfAndAbsent,
-        OwnedGraphOwnershipState::Absent => OwnershipView::Absent,
-        OwnedGraphOwnershipState::Foreign => OwnershipView::Foreign,
-        OwnedGraphOwnershipState::GenerationChanged => OwnershipView::GenerationChanged,
-        OwnedGraphOwnershipState::Unavailable => OwnershipView::Unknown,
-        OwnedGraphOwnershipState::Cold => OwnershipView::Cold,
-    }
+    Ok(binding)
 }
 
 pub(super) fn progress(graph: &OwnedGraphSnapshot) -> DisposalProgressView {
     let revoked = graph.control.as_ref().is_some_and(|c| c.revoked);
-    let threads = graph
-        .cas
-        .membership
-        .iter()
-        .filter_map(|m| m.thread_id.as_ref())
-        .collect::<BTreeSet<_>>();
+    let threads = thread_ids(&graph.cas);
     let n = threads.len();
-    let mut latest = BTreeMap::<_, &storage::recovery::graph_progress::GraphThreadProgress>::new();
-    for p in &graph.progress {
-        if !threads.contains(&p.key.thread_id) {
-            continue;
-        }
-        let current = latest.entry(&p.key.thread_id).or_insert(p);
-        if (p.key.owner_generation, p.revision) > (current.key.owner_generation, current.revision) {
-            *current = p;
-        }
-    }
-    let aggregate = |owner: bool| {
-        let steps = latest
-            .values()
-            .map(|p| if owner { p.owners } else { p.scratch })
-            .collect::<Vec<_>>();
-        if steps.contains(&GraphDisposalStep::Unknown) {
-            StepObservation::Unknown
-        } else if !steps.is_empty()
-            && steps.len() == n
-            && steps.iter().all(|s| {
-                matches!(
-                    s,
-                    GraphDisposalStep::Applied | GraphDisposalStep::NotApplicable
-                )
-            })
-        {
-            if steps.iter().all(|s| *s == GraphDisposalStep::NotApplicable) {
-                StepObservation::NotApplicable
-            } else {
-                StepObservation::ConfirmedApplied
-            }
+    // One row per thread: the key no longer carries a generation.
+    let latest = graph
+        .progress
+        .iter()
+        .filter(|p| threads.contains(&p.key.thread_id))
+        .map(|p| (&p.key.thread_id, p))
+        .collect::<BTreeMap<_, _>>();
+    let steps = latest.values().map(|p| p.scratch).collect::<Vec<_>>();
+    let scratch = if steps.contains(&GraphDisposalStep::Unknown) {
+        StepObservation::Unknown
+    } else if !steps.is_empty()
+        && steps.len() == n
+        && steps.iter().all(|s| {
+            matches!(
+                s,
+                GraphDisposalStep::Applied | GraphDisposalStep::NotApplicable
+            )
+        })
+    {
+        if steps.iter().all(|s| *s == GraphDisposalStep::NotApplicable) {
+            StepObservation::NotApplicable
         } else {
-            StepObservation::NotStarted
+            StepObservation::ConfirmedApplied
         }
-    };
-    let owners = aggregate(true);
-    let scratch = aggregate(false);
-    let done = |s| {
-        matches!(
-            s,
-            StepObservation::ConfirmedApplied | StepObservation::NotApplicable
-        )
+    } else {
+        StepObservation::NotStarted
     };
     DisposalProgressView {
         eligibility: if revoked {
@@ -171,13 +118,15 @@ pub(super) fn progress(graph: &OwnedGraphSnapshot) -> DisposalProgressView {
             }
             _ => StepObservation::NotStarted,
         },
-        owners,
         scratch,
         completion: if !revoked {
             DisposalCompletion::NotStarted
-        } else if done(owners) && done(scratch) {
+        } else if matches!(
+            scratch,
+            StepObservation::ConfirmedApplied | StepObservation::NotApplicable
+        ) {
             DisposalCompletion::Complete
-        } else if owners == StepObservation::Unknown || scratch == StepObservation::Unknown {
+        } else if scratch == StepObservation::Unknown {
             DisposalCompletion::Unknown
         } else {
             DisposalCompletion::Partial
@@ -207,34 +156,27 @@ fn disposition(d: RestartDisposition) -> RestartDispositionView {
 }
 fn blocked(detail: GraphProblemDetail) -> ActionAvailability {
     ActionAvailability::Blocked {
-        problem: GraphAuthorityProblem::OwnerBlocked,
+        problem: GraphAuthorityProblem::CurrentBindingRequired,
         detail,
     }
 }
 /// Project independent persisted facts, not a second lifecycle state machine.
-/// Execution authority is separately checked again inside the core port.
+/// Execution authority is separately checked again inside the core port, against
+/// the thread and root bindings current at that moment.
+///
+/// `live_epoch` is the epoch of this core. A graph is acted on only when it was
+/// adopted by that very epoch: one adopted by an earlier core (and left by its
+/// crash) is cold, whatever its row says.
 pub fn detail(
-    runtime: &AgentRuntime,
-    owner: &OwnerHost,
     graph: &OwnedGraphSnapshot,
+    live_epoch: Option<InstanceEpoch>,
 ) -> Result<OwnedGraphView, AdminFailure> {
-    let (binding, raw) = binding_for(
-        owner,
+    let binding = binding_for(
         &graph.cas,
         AdminId::new("unassigned").map_err(|_| unavailable())?,
     )?;
-    let state = if graph.adopted_epoch == Some(graph.cas.successor_epoch) {
-        runtime
-            .owned_graph_ownership_diagnostic(&graph.cas)
-            .map_err(|_| unavailable())?
-            .state()
-    } else {
-        OwnedGraphOwnershipState::Cold
-    };
-    if state == OwnedGraphOwnershipState::Unavailable {
-        return Err(unavailable());
-    }
-    let own = ownership(state);
+    let thread_count = thread_ids(&graph.cas).len();
+    let cold = !adopted_by(graph, live_epoch);
     let claim = match graph.cas.claim.as_ref().map(|c| &c.state) {
         None => ClaimView::Absent,
         Some(RecoveryClaimState::Prepared) => ClaimView::Prepared,
@@ -275,15 +217,15 @@ pub fn detail(
         GraphEligibilityView::TerminalCleanupOnly
     } else if graph.cas.phase == RestartPhase::Completed {
         GraphEligibilityView::CompletedCleanupOnly
-    } else if own == OwnershipView::Cold {
+    } else if cold {
         GraphEligibilityView::ColdIsolated
     } else if graph.cas.component.disposition == RestartDisposition::RetryPending {
         GraphEligibilityView::AdoptedRetryPending
     } else {
         GraphEligibilityView::NeedsAttention
     };
-    let release = if raw.len() > 64 {
-        blocked(GraphProblemDetail::TooManyOwners)
+    let release = if thread_count > 64 {
+        blocked(GraphProblemDetail::TooManyThreads)
     } else if preadoption {
         blocked(GraphProblemDetail::PreAdoption)
     } else if activated {
@@ -292,16 +234,8 @@ pub fn detail(
         && claim == ClaimView::Prepared
     {
         blocked(GraphProblemDetail::NeedsAttention)
-    } else if !matches!(
-        own,
-        OwnershipView::LiveSelf | OwnershipView::MixedSelfAndAbsent
-    ) {
-        blocked(match own {
-            OwnershipView::Foreign => GraphProblemDetail::ForeignOwner,
-            OwnershipView::GenerationChanged => GraphProblemDetail::GenerationChanged,
-            OwnershipView::Absent => GraphProblemDetail::OwnerAbsent,
-            _ => GraphProblemDetail::Cold,
-        })
+    } else if cold {
+        blocked(GraphProblemDetail::Cold)
     } else if matches!(
         control,
         GraphControlView::ManualRunning | GraphControlView::RevokedRunning
@@ -324,48 +258,203 @@ pub fn detail(
         } else {
             GraphProblemDetail::Released
         })
-    } else if own != OwnershipView::LiveSelf {
-        blocked(GraphProblemDetail::OwnerAbsent)
     } else {
         ActionAvailability::Available
     };
-    let owner_refs = binding
-        .owners
-        .iter()
-        .map(|o| OwnerView {
-            binding: o.clone(),
-            ownership: if o.owner_identity.is_none() {
-                OwnershipView::Absent
-            } else {
-                own
-            },
-            cleanup: StepObservation::NotStarted,
-        })
-        .collect();
     let result = OwnedGraphView {
         graph_ref: binding.graph.graph_id.clone(),
         snapshot_revision: Revision(graph.cas.component.revision),
+        thread_refs: binding.threads.clone(),
         binding,
         restart_phase: phase(graph.cas.phase),
         disposition: disposition(graph.cas.component.disposition),
         claim,
-        ownership: own,
         control,
         eligibility,
         resume,
         release,
         progress: progress(graph),
-        owner_count: Revision(raw.len() as u64),
-        owner_refs,
-        owner_refs_truncated: raw.len() > 64,
-        operation_limit: if raw.len() > 64 {
-            OperationLimitView::TooManyOwners { limit: 64 }
+        thread_count: Revision(thread_count as u64),
+        thread_refs_truncated: thread_count > 64,
+        operation_limit: if thread_count > 64 {
+            OperationLimitView::TooManyThreads { limit: 64 }
         } else {
             OperationLimitView::WithinLimit
         },
     };
     result.validate().map_err(|_| unavailable())?;
     Ok(result)
+}
+
+/// Whether this core's own epoch adopted the graph (the sealed live inventory).
+pub fn adopted_by(graph: &OwnedGraphSnapshot, live_epoch: Option<InstanceEpoch>) -> bool {
+    graph.adopted_epoch == Some(graph.cas.successor_epoch)
+        && live_epoch.is_some_and(|epoch| epoch.0 == graph.cas.successor_epoch)
+}
+
+/// A graph whose recipe is in a format this build does not execute. Only its
+/// relational header is read; the recipe is never decoded, and nothing here is
+/// authority. `restart` is absent for a manifest recorded outside a transaction.
+pub fn is_legacy(header: &RecoveryGraphHeader) -> bool {
+    !header.is_current()
+}
+
+/// A legacy graph worth showing: not yet discarded, and its component is
+/// neither released nor resumed. A finished old graph needs no action.
+pub fn legacy_listed(header: &RecoveryGraphHeader) -> bool {
+    is_legacy(header)
+        && !header.superseded
+        && header.component.as_ref().is_none_or(|c| {
+            matches!(
+                c.disposition,
+                RestartDisposition::RetryPending | RestartDisposition::Quarantined
+            )
+        })
+}
+
+fn legacy_threads(header: &RecoveryGraphHeader) -> BTreeSet<&str> {
+    header
+        .bindings
+        .iter()
+        .map(|(thread, _)| thread.as_str())
+        .collect()
+}
+
+fn legacy_ids(header: &RecoveryGraphHeader) -> (&str, &str) {
+    header
+        .restart
+        .as_ref()
+        .map_or(("", ""), |r| (r.restart_id.as_str(), r.capture_id.as_str()))
+}
+
+/// The binding a client quotes to discard a legacy graph. The recipe is never
+/// read: the quoted revisions come from the relational header. The core epoch is
+/// not recorded for such a graph and is quoted as 0.
+pub fn legacy_binding_for(
+    header: &RecoveryGraphHeader,
+    operation_id: AdminId,
+) -> Result<OwnedGraphBinding, AdminFailure> {
+    let mut refs = GraphReferences::default();
+    let (restart, capture) = legacy_ids(header);
+    let manifest = &header.manifest_id;
+    let graph_id = refs.graph_reference(restart, capture, manifest)?;
+    let restart_tx_id = refs.graph_reference("transaction", restart, restart)?;
+    let capture_id = refs.graph_reference("capture", restart, capture)?;
+    let mut threads = Vec::new();
+    for thread in legacy_threads(header) {
+        threads.push(ThreadCas {
+            thread_ref: refs.thread_reference(restart, capture, manifest, thread)?,
+        });
+    }
+    threads.sort_by(|a, b| a.thread_ref.cmp(&b.thread_ref));
+    threads.truncate(64);
+    let binding = OwnedGraphBinding {
+        graph: GraphCas {
+            graph_id,
+            restart_tx_id,
+            capture_id,
+            expected_revision: Revision(header.component.as_ref().map_or_else(
+                || header.restart.as_ref().map_or(0, |r| r.revision),
+                |c| c.revision,
+            )),
+            expected_core_epoch: InstanceEpoch(0),
+            operation_id,
+        },
+        threads,
+        expected_control_revision: Revision(0),
+    };
+    binding.validate().map_err(|_| unavailable())?;
+    Ok(binding)
+}
+
+/// Mirrors what the storage writer accepts for an explicit discard: a graph of
+/// an unfinished transaction is first isolated by the cold start, never here.
+pub fn legacy_discardable(header: &RecoveryGraphHeader) -> bool {
+    header.restart.as_ref().is_none_or(|r| {
+        matches!(
+            r.phase,
+            RestartPhase::Invalidated
+                | RestartPhase::Aborted
+                | RestartPhase::Superseded
+                | RestartPhase::Completed
+        )
+    }) && header
+        .component
+        .as_ref()
+        .is_none_or(|c| c.disposition != RestartDisposition::RetryPending)
+}
+
+/// The display of a legacy graph: not executable, nothing of it is claimed to
+/// be done, and its scratch is retained because relational membership is not
+/// evidence that an external effect is ours.
+pub fn legacy_detail(header: &RecoveryGraphHeader) -> Result<OwnedGraphView, AdminFailure> {
+    let binding = legacy_binding_for(
+        header,
+        AdminId::new("unassigned").map_err(|_| unavailable())?,
+    )?;
+    let thread_count = legacy_threads(header).len();
+    let release = if thread_count > 64 {
+        blocked(GraphProblemDetail::TooManyThreads)
+    } else if legacy_discardable(header) {
+        ActionAvailability::Available
+    } else {
+        blocked(GraphProblemDetail::NeedsAttention)
+    };
+    let result = OwnedGraphView {
+        graph_ref: binding.graph.graph_id.clone(),
+        snapshot_revision: binding.graph.expected_revision,
+        thread_refs: binding.threads.clone(),
+        binding,
+        // A manifest outside any transaction is shown as invalidated: it can
+        // never run, and no transaction exists to be pending.
+        restart_phase: header
+            .restart
+            .as_ref()
+            .map_or(RestartPhaseView::Invalidated, |r| phase(r.phase)),
+        disposition: header
+            .component
+            .as_ref()
+            .map_or(RestartDispositionView::Quarantined, |c| {
+                disposition(c.disposition)
+            }),
+        // The old recipe and its claim are not interpreted.
+        claim: ClaimView::Unreadable,
+        control: GraphControlView::Unknown,
+        eligibility: GraphEligibilityView::ColdIsolated,
+        resume: blocked(GraphProblemDetail::Cold),
+        release,
+        progress: DisposalProgressView {
+            eligibility: StepObservation::NotStarted,
+            prepared_release: StepObservation::NotStarted,
+            scratch: StepObservation::NotApplicable,
+            completion: DisposalCompletion::NotStarted,
+        },
+        thread_count: Revision(thread_count as u64),
+        thread_refs_truncated: thread_count > 64,
+        operation_limit: if thread_count > 64 {
+            OperationLimitView::TooManyThreads { limit: 64 }
+        } else {
+            OperationLimitView::WithinLimit
+        },
+    };
+    result.validate().map_err(|_| unavailable())?;
+    Ok(result)
+}
+
+pub(super) fn legacy_reference(
+    header: &RecoveryGraphHeader,
+) -> Result<GraphReference, AdminFailure> {
+    let mut refs = GraphReferences::default();
+    let (restart, capture) = legacy_ids(header);
+    Ok(GraphReference {
+        graph_id: refs.graph_reference(restart, capture, &header.manifest_id)?,
+        restart_tx_id: refs.graph_reference("transaction", restart, restart)?,
+        capture_id: refs.graph_reference("capture", restart, capture)?,
+        revision: Revision(header.component.as_ref().map_or_else(
+            || header.restart.as_ref().map_or(0, |r| r.revision),
+            |c| c.revision,
+        )),
+    })
 }
 
 pub(super) fn next_action(
@@ -411,13 +500,12 @@ pub(super) struct GraphFact {
     pub undisposed: bool,
     pub incomplete: bool,
     pub over_limit: bool,
-    pub ownership: (OwnedGraphOwnershipState, u64, u64),
+    pub threads: usize,
 }
 pub(super) fn graph_fact(
     graph: &OwnedGraphSnapshot,
-    diagnostic: &runtime::OwnedGraphOwnershipDiagnostic,
+    live_epoch: Option<InstanceEpoch>,
 ) -> Result<GraphFact, AdminFailure> {
-    let summary = GraphOwnershipSummary::try_from(diagnostic)?;
     let complete = progress(graph).completion == DisposalCompletion::Complete;
     let resumed = graph
         .cas
@@ -442,21 +530,28 @@ pub(super) fn graph_fact(
         capture_id: refs.graph_reference("capture", &cas.restart_id, &cas.capture_id)?,
         revision: Revision(cas.component.revision),
     };
-    let adopted = graph.adopted_epoch == Some(cas.successor_epoch);
+    let threads = thread_ids(cas).len();
+    let facts = GraphDisposalFacts {
+        verified_live_adoption: adopted_by(graph, live_epoch),
+        thread_count: threads,
+        resume_committed: resumed,
+        disposal_complete: complete,
+        revocation: revoked,
+    };
     Ok(GraphFact {
         reference,
-        undisposed: adopted && summary.is_undisposed(resumed, complete, revoked),
-        incomplete: adopted && summary.is_incomplete_disposal(complete, revoked),
-        over_limit: diagnostic.owner_count() > 64,
-        ownership: (
-            diagnostic.state(),
-            diagnostic.retained_owner_count(),
-            diagnostic.owner_count(),
-        ),
+        undisposed: facts.is_undisposed(),
+        incomplete: facts.is_incomplete_disposal(),
+        over_limit: threads > 64,
+        threads,
     })
 }
+/// `legacy` are graphs in a format this build does not execute. They are
+/// listed with the warnings (never as restart blockers) so that a person can
+/// find and explicitly discard them.
 pub(super) fn aggregate_facts<'a>(
     facts: impl Iterator<Item = &'a GraphFact>,
+    legacy: impl Iterator<Item = &'a GraphReference>,
     revision: Revision,
 ) -> Result<UndisposedGraphs, AdminFailure> {
     let mut references = Vec::new();
@@ -473,6 +568,7 @@ pub(super) fn aggregate_facts<'a>(
             incomplete.push(fact.reference.clone());
         }
     }
+    incomplete.extend(legacy.cloned());
     references.sort_by(|a, b| a.graph_id.cmp(&b.graph_id));
     incomplete.sort_by(|a, b| a.graph_id.cmp(&b.graph_id));
     let count = references.len();
@@ -496,18 +592,19 @@ pub(super) fn aggregate_facts<'a>(
 }
 /// Read-only diagnostic helper. Admission exclusively uses LiveGraphCollector.
 pub fn collect_undisposed(
-    runtime: &AgentRuntime,
-    _owner: &OwnerHost,
     graphs: &[OwnedGraphSnapshot],
+    legacy: &[RecoveryGraphHeader],
+    live_epoch: Option<InstanceEpoch>,
 ) -> Result<UndisposedGraphs, AdminFailure> {
     let facts = graphs
         .iter()
-        .map(|g| {
-            runtime
-                .owned_graph_ownership_diagnostic(&g.cas)
-                .map_err(|_| unavailable())
-                .and_then(|d| graph_fact(g, &d))
-        })
+        .filter(|g| adopted_by(g, live_epoch))
+        .map(|g| graph_fact(g, live_epoch))
         .collect::<Result<Vec<_>, _>>()?;
-    aggregate_facts(facts.iter(), Revision(0))
+    let legacy = legacy
+        .iter()
+        .filter(|h| legacy_listed(h))
+        .map(legacy_reference)
+        .collect::<Result<Vec<_>, _>>()?;
+    aggregate_facts(facts.iter(), legacy.iter(), Revision(0))
 }

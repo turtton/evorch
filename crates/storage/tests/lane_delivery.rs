@@ -144,7 +144,6 @@ fn owner() -> LaneDeliveryOwner {
     LaneDeliveryOwner {
         root_run_id: "lead-root".into(),
         generation: 1,
-        ownership_generation: 7,
     }
 }
 fn request(now: i64) -> LaneClaimRequest {
@@ -360,7 +359,7 @@ fn route_cas_invalidates_old_notice_and_republishes_projection_without_new_id() 
             .is_err()
     );
     f.h()
-        .nack_lane_delivery(claim, LaneDeliveryNack::OwnershipLost, 4)
+        .nack_lane_delivery(claim, LaneDeliveryNack::StorageFailed, 4)
         .unwrap();
     assert_eq!(f.count("user_question_links"), 0);
 }
@@ -649,6 +648,8 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(concat!(
+        include_str!("../undo/undo_v81.sql"),
+        include_str!("../undo/undo_v80.sql"),
         include_str!("../undo/undo_v79.sql"),
         include_str!("../undo/undo_v78.sql"),
         include_str!("../undo/undo_v77.sql"),
@@ -714,7 +715,7 @@ fn owner_rebind_does_not_clear_stop_but_explicit_resume_does() {
         .bind_lane_delivery_destination("lead".into(), 0, owner(), LaneDestinationAction::Stop)
         .unwrap();
     let mut next = owner();
-    next.ownership_generation += 1;
+    next.generation += 1;
     let epoch = f
         .h()
         .bind_lane_delivery_destination(
@@ -904,11 +905,11 @@ fn lease_expiry_nack_and_owner_epochs_fence_old_claimants() {
     assert!(new.claim_epoch > old.claim_epoch);
     assert!(
         f.h()
-            .nack_lane_delivery(old, LaneDeliveryNack::Readonly, 111)
+            .nack_lane_delivery(old, LaneDeliveryNack::Stopped, 111)
             .is_err()
     );
     f.h()
-        .nack_lane_delivery(new, LaneDeliveryNack::Readonly, 111)
+        .nack_lane_delivery(new, LaneDeliveryNack::Stopped, 111)
         .unwrap();
     let newer = claim(&f.h(), 112);
     let epoch = f

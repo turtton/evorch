@@ -79,6 +79,7 @@ async fn chat_fixture() -> ChatFixture {
                 interactive: true,
                 keep_alive: true,
                 conversation: true,
+                project_root: Some(dir.path().into()),
                 ..Default::default()
             },
         )
@@ -119,20 +120,15 @@ async fn stop_pending_continue_reaches_runtime_but_ordinary_live_continue_is_not
     } = chat_fixture().await;
     assert!(!runtime.graceful_stop_requested(run));
     assert!(matches!(
-        service
-            .submit_authorized(continuation(false), None)
-            .as_slice(),
+        service.submit_authorized(continuation(false)).as_slice(),
         [HostEvent::ChatNotice {
             outcome: NoticeOutcome::NotApplied,
             ..
         }]
     ));
-    service.submit_authorized(
-        HostCommand::StopChat {
-            thread_id: "stop-pending".into(),
-        },
-        None,
-    );
+    service.submit_authorized(HostCommand::StopChat {
+        thread_id: "stop-pending".into(),
+    });
     // No await: Stop is recorded, but this executor cannot retire the old run yet.
     assert_eq!(
         runtime.inspect_agent(run).unwrap().phase,
@@ -140,15 +136,13 @@ async fn stop_pending_continue_reaches_runtime_but_ordinary_live_continue_is_not
     );
     assert!(runtime.graceful_stop_requested(run));
     assert!(matches!(
-        service
-            .submit_authorized(continuation(true), None)
-            .as_slice(),
+        service.submit_authorized(continuation(true)).as_slice(),
         [HostEvent::ChatNotice {
             outcome: NoticeOutcome::NotApplied,
             ..
         }]
     ));
-    let accepted = service.submit_authorized(continuation(false), None);
+    let accepted = service.submit_authorized(continuation(false));
     assert!(
         matches!(accepted.as_slice(), [HostEvent::ChatAccepted { run_id, .. }] if run_id == &run.to_string()),
         "graceful Stop-pending Continue must reach runtime: {accepted:?}"
@@ -157,9 +151,7 @@ async fn stop_pending_continue_reaches_runtime_but_ordinary_live_continue_is_not
     waiting(&mut events, run).await;
     assert!(!runtime.graceful_stop_requested(run));
     assert!(matches!(
-        service
-            .submit_authorized(continuation(false), None)
-            .as_slice(),
+        service.submit_authorized(continuation(false)).as_slice(),
         [HostEvent::ChatNotice {
             outcome: NoticeOutcome::NotApplied,
             ..
@@ -201,7 +193,7 @@ async fn resume_race_cancel_after_host_guard_rejects_old_continue_but_accepts_fr
                 worker_release.wait();
             }))
         });
-        let result = service.submit_authorized(continuation(false), None);
+        let result = service.submit_authorized(continuation(false));
         result_tx.send((service, result)).ok().unwrap();
     });
     // Block this current-thread executor only until the host guard passes, so
@@ -240,7 +232,7 @@ async fn resume_race_cancel_after_host_guard_rejects_old_continue_but_accepts_fr
     );
     // A genuinely newer user action observes the completed Cancel and is not
     // rejected merely because the previous incarnation was cancelled.
-    let fresh_result = service.submit_authorized(continuation(false), None);
+    let fresh_result = service.submit_authorized(continuation(false));
     let fresh = matches!(fresh_result.as_slice(), [HostEvent::ChatAccepted { .. }]);
     runtime.stop(run, runtime::StopScope::Subtree).unwrap();
     runtime.wait(run).await.unwrap();

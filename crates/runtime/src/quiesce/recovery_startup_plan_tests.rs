@@ -66,10 +66,7 @@ fn outcome(manifest: Option<&String>, runs: &[RunId], reason: RecoveryReason) ->
 }
 
 fn authority() -> Vec<RequiredRecoveryAuthority> {
-    vec![
-        RequiredRecoveryAuthority::CurrentOwnership,
-        RequiredRecoveryAuthority::CurrentConfiguration,
-    ]
+    vec![RequiredRecoveryAuthority::CurrentConfiguration]
 }
 
 /// What one durable component is expected to turn into.

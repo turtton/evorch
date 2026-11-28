@@ -25,7 +25,6 @@ struct Inner {
     peak_pending_bytes: AtomicUsize,
     persisted_events: AtomicU64,
     coalesced_events: AtomicU64,
-    skipped_heartbeats: AtomicU64,
     skipped_diagnostics: AtomicU64,
     skipped_message_deltas: AtomicU64,
     skipped_run_progress: AtomicU64,
@@ -67,7 +66,6 @@ pub struct StorageBridgeSnapshot {
     pub persisted_events: u64,
     /// Original deltas merged into an earlier delta rather than stored separately.
     pub coalesced_events: u64,
-    pub skipped_heartbeats: u64,
     pub skipped_diagnostics: u64,
     /// `MessageDelta` events left to the durable `MessageCompleted` text.
     pub skipped_message_deltas: u64,
@@ -121,7 +119,6 @@ impl StorageBridgeMonitor {
                 .map_or(Duration::ZERO, |(_, age)| age.elapsed()),
             persisted_events: self.0.persisted_events.load(Ordering::Relaxed),
             coalesced_events: self.0.coalesced_events.load(Ordering::Relaxed),
-            skipped_heartbeats: self.0.skipped_heartbeats.load(Ordering::Relaxed),
             skipped_diagnostics: self.0.skipped_diagnostics.load(Ordering::Relaxed),
             skipped_message_deltas: self.0.skipped_message_deltas.load(Ordering::Relaxed),
             skipped_run_progress: self.0.skipped_run_progress.load(Ordering::Relaxed),
@@ -142,10 +139,6 @@ impl StorageBridgeMonitor {
         self.0.failed_events.fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         self.0.changes.0.send_replace(());
-    }
-
-    pub(super) fn skipped_heartbeat(&self) {
-        self.0.skipped_heartbeats.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn skipped_diagnostic(&self) {

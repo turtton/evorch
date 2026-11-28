@@ -7,18 +7,11 @@ use super::{
 };
 
 impl CommandService {
-    pub(super) fn submit_goal(
-        &mut self,
-        submission: GoalInput,
-        permit: Option<runtime::ownership::OwnerPermit>,
-    ) -> Vec<HostEvent> {
+    pub(super) fn submit_goal(&mut self, submission: GoalInput) -> Vec<HostEvent> {
         let thread_id = submission.thread_id.clone();
         let objective = submission.goal.clone();
         let criteria = vec![objective.clone()];
         let prompt = render_entry_prompt(&submission);
-        self.bindings
-            .goal_projects
-            .insert(thread_id.clone(), submission.project_id.clone());
         let mut initial = RunConfig::default();
         if let Some(value) = submission.delegation_value {
             if value.trim().is_empty() {
@@ -43,6 +36,10 @@ impl CommandService {
             initial.finding_store = Some(config.db_path.clone());
         }
         initial.initial_thread_goal = Some((objective, criteria));
+        let previous_project = self
+            .bindings
+            .goal_projects
+            .insert(thread_id.clone(), submission.project_id.clone());
         let mut events = self.submit_chat_config(
             ChatInput {
                 submission_id: String::new(),
@@ -55,15 +52,24 @@ impl CommandService {
                 fork_seed: None,
                 skills: Vec::new(),
             },
-            permit,
             false,
             initial,
         );
-        if events
+        let accepted = events
             .iter()
-            .any(|event| matches!(event, HostEvent::ChatAccepted { .. }))
-            && let Some(goal) = self.runtime.thread_goal(&thread_id)
-        {
+            .any(|event| matches!(event, HostEvent::ChatAccepted { .. }));
+        if !accepted {
+            match previous_project {
+                Some(project) => {
+                    self.bindings.goal_projects.insert(thread_id, project);
+                }
+                None => {
+                    self.bindings.goal_projects.remove(&thread_id);
+                }
+            }
+            return events;
+        }
+        if let Some(goal) = self.runtime.thread_goal(&thread_id) {
             events.push(HostEvent::GoalAccepted {
                 thread_id,
                 goal_id: goal.goal_id,
@@ -74,33 +80,8 @@ impl CommandService {
 
     pub(super) fn goal_control(
         &self,
-        thread_id: &str,
-        permit: Option<runtime::ownership::OwnerPermit>,
         control: impl FnOnce(&AgentRuntime) -> Result<(), String>,
     ) -> Vec<HostEvent> {
-        if permit
-            .as_ref()
-            .is_some_and(|permit| permit.thread_id != thread_id)
-            || (self.ownership.is_some() && permit.is_none())
-        {
-            return vec![HostEvent::CommandRejected {
-                kind: RejectKind::Fenced,
-                reason: runtime::ownership::OwnershipError::Fenced.to_string(),
-            }];
-        }
-        let _guard = match permit
-            .as_ref()
-            .map(|permit| permit.mutation_guard())
-            .transpose()
-        {
-            Ok(guard) => guard,
-            Err(error) => {
-                return vec![HostEvent::CommandRejected {
-                    kind: RejectKind::Fenced,
-                    reason: error.to_string(),
-                }];
-            }
-        };
         let _runtime = self.handle.enter();
         match control(&self.runtime) {
             Ok(()) => Vec::new(),

@@ -69,30 +69,6 @@ impl Fixture {
     async fn request_text(&self, index: usize) -> String {
         serde_json::to_string(&self.model.wait_for_request(index).await).unwrap()
     }
-
-    /// Thread ownership: a root holding it cannot be restored from disk alone.
-    fn permit(&self) -> runtime::ownership::OwnerPermit {
-        use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
-        let registry_path = self._dir.path().join("owners.db");
-        let owner = ThreadOwner::new(
-            "thread".into(),
-            Lease {
-                owner_id: "host".into(),
-                generation: 1,
-                expires_at: u64::MAX,
-            },
-        );
-        Registry::open(&registry_path)
-            .unwrap()
-            .start(&owner)
-            .unwrap();
-        OwnerPermit {
-            registry_path,
-            thread_id: owner.thread_id,
-            lease: owner.lease,
-            run_id: None,
-        }
-    }
 }
 
 async fn wake_requested(receiver: &mut EventReceiver, root: RunId) {
@@ -569,7 +545,8 @@ fn tool_result(messages: &[providers::Message], id: &str) -> String {
 #[tokio::test]
 async fn wake_with_live_child_releases_held_message_once() {
     let fixture = fixture().await;
-    let permit = fixture.permit();
+    // A live memory boundary must be renewed by the trusted root wake, not from disk.
+    let memory = runtime::memory::MemoryBoundary::default();
     fixture.script("ROOT", &["root done"]).await;
     let _child_gate = fixture.gate("CHILD").await;
     let root_gate = fixture.gate("ROOT").await;
@@ -578,10 +555,11 @@ async fn wake_with_live_child_releases_held_message_once() {
         Role::Orchestrator,
         "ROOT".into(),
         RunConfig {
-            ownership: Some(permit.clone()),
+            memory: Some(memory.clone()),
             ..Default::default()
         },
     );
+    fixture.runtime.bind_thread_root("thread", root).unwrap();
     fixture.model.wait_for_request(0).await;
     let child = fixture
         .runtime
@@ -619,7 +597,7 @@ async fn wake_with_live_child_releases_held_message_once() {
         .wake_chat(
             root,
             RunConfig {
-                ownership: Some(permit),
+                memory: Some(memory),
                 ..Default::default()
             },
         )
@@ -644,7 +622,8 @@ async fn wake_with_live_child_releases_held_message_once() {
 async fn delayed_wake_cannot_cross_operator_stop_of_done_or_error_root() {
     for terminal in [AgentRunPhase::Done, AgentRunPhase::Error] {
         let fixture = fixture().await;
-        let permit = fixture.permit();
+        // A live memory boundary must be renewed by the trusted root wake, not from disk.
+        let memory = runtime::memory::MemoryBoundary::default();
         let first = if terminal == AgentRunPhase::Done {
             Ok(text_response("root done", FinishReason::Stop))
         } else {
@@ -662,10 +641,11 @@ async fn delayed_wake_cannot_cross_operator_stop_of_done_or_error_root() {
             Role::Orchestrator,
             "ROOT".into(),
             RunConfig {
-                ownership: Some(permit.clone()),
+                memory: Some(memory.clone()),
                 ..Default::default()
             },
         );
+        fixture.runtime.bind_thread_root("thread", root).unwrap();
         fixture.model.wait_for_request(0).await;
         let child = fixture
             .runtime
@@ -701,7 +681,7 @@ async fn delayed_wake_cannot_cross_operator_stop_of_done_or_error_root() {
                 fixture.runtime.wake_chat(
                     root,
                     RunConfig {
-                        ownership: Some(permit.clone()),
+                        memory: Some(memory.clone()),
                         ..Default::default()
                     }
                 ),
@@ -731,7 +711,7 @@ async fn delayed_wake_cannot_cross_operator_stop_of_done_or_error_root() {
                 .resume_chat(
                     root,
                     RunConfig {
-                        ownership: Some(permit),
+                        memory: Some(memory),
                         ..Default::default()
                     }
                 )
@@ -927,10 +907,11 @@ async fn subagent_message_to_a_finished_root_is_held_and_wakes_it() {
         Role::Orchestrator,
         "ROOT".into(),
         RunConfig {
-            ownership: Some(fixture.permit()),
+            memory: Some(runtime::memory::MemoryBoundary::default()),
             ..Default::default()
         },
     );
+    fixture.runtime.bind_thread_root("thread", root).unwrap();
     let child = fixture
         .runtime
         .delegate_background_as_child(root, Role::Worker, "CHILD", RunConfig::default())
