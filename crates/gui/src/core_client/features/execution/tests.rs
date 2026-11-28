@@ -16,6 +16,8 @@ pub(crate) struct Screen {
     pub selection: Selection,
     pub cache: Cache,
     pub frame: FeatureFrame,
+    /// False draws nothing and maintains the feature as a collapsed one.
+    pub visible: bool,
 }
 
 pub(crate) fn screen(feature: Box<dyn Feature>, thread: Option<&str>) -> Harness<'static, Screen> {
@@ -27,6 +29,7 @@ pub(crate) fn screen(feature: Box<dyn Feature>, thread: Option<&str>) -> Harness
         },
         cache: Cache::default(),
         frame: FeatureFrame::default(),
+        visible: true,
     };
     Harness::new_ui_state(
         |ui, screen: &mut Screen| {
@@ -46,12 +49,14 @@ pub(crate) fn screen(feature: Box<dyn Feature>, thread: Option<&str>) -> Harness
             // As the dock draws a tab: maintained, then rendered.
             let visibility = super::super::Visibility {
                 available: true,
-                expanded: true,
+                expanded: screen.visible,
                 minimized: false,
             };
             screen.feature.maintain(&mut ctx, visibility);
-            screen.feature.render(ui, &mut ctx);
-            screen.feature.render_overlay(&ui.ctx().clone(), &mut ctx);
+            if screen.visible {
+                screen.feature.render(ui, &mut ctx);
+                screen.feature.render_overlay(&ui.ctx().clone(), &mut ctx);
+            }
         },
         state,
     )

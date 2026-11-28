@@ -422,10 +422,11 @@ fn an_update_of_unknown_outcome_is_asked_for_and_never_counted_as_done() {
 }
 
 #[test]
-fn the_approval_filter_and_refresh_each_begin_a_new_list() {
+fn the_approval_filter_begins_a_new_list_and_no_refresh_button_is_drawn() {
     let mut screen = screen(Box::<MemoryFeature>::default(), None);
     let first = list_of(&asked(&mut screen)[0]);
     assert_eq!(first.favorite, None);
+    assert!(screen.query_by_label("Refresh").is_none());
 
     screen.get_by_label("Approval").click();
     screen.run();
@@ -435,13 +436,223 @@ fn the_approval_filter_and_refresh_each_begin_a_new_list() {
     let filtered = list_of(&filtered[0]);
     assert_eq!(filtered.favorite, Some(false), "unconfirmed lessons only");
     assert_ne!(filtered.operation_id, first.operation_id);
+    assert!(
+        asked(&mut screen).is_empty(),
+        "nothing is asked by itself again"
+    );
+}
 
-    screen.get_by_label("Refresh").click();
-    let refreshed = asked(&mut screen);
-    assert_eq!(refreshed.len(), 1);
-    let refreshed = list_of(&refreshed[0]);
-    assert_eq!(refreshed.favorite, Some(false), "the filter is kept");
-    assert_ne!(refreshed.operation_id, filtered.operation_id);
+fn failed_list_reply(id: &OperationId) -> FeatureReply {
+    FeatureReply::Query(Ok(QueryReply::Memory(MemoryReply::List(Box::new(
+        ReadOutcome {
+            operation: view(
+                id,
+                OperationState::Failed {
+                    code: ErrorCode::StorageUnavailable,
+                },
+            ),
+            data: None,
+        },
+    )))))
+}
+
+fn list_page_reply(id: &OperationId, items: Vec<MemorySummary>, more: bool) -> FeatureReply {
+    FeatureReply::Query(Ok(QueryReply::Memory(MemoryReply::List(Box::new(
+        ReadOutcome {
+            operation: view(id, OperationState::Ready),
+            data: Some(Page {
+                items,
+                next_cursor: more.then(|| PageCursor::new("page-2").unwrap()),
+                snapshot_revision: Revision(1),
+            }),
+        },
+    )))))
+}
+
+#[test]
+fn showing_the_lessons_again_reads_them_once_and_staying_shown_never_does() {
+    let mut screen = screen(Box::<MemoryFeature>::default(), None);
+    let first = asked(&mut screen);
+    let list = list_of(&first[0]);
+    answer(
+        &mut screen,
+        first[0].tag,
+        list_reply(&list.operation_id, vec![summary("lesson-a", false)]),
+    );
+    for _ in 0..3 {
+        assert!(
+            asked(&mut screen).is_empty(),
+            "no read while they stay shown"
+        );
+    }
+
+    screen.state_mut().visible = false;
+    assert!(
+        asked(&mut screen).is_empty(),
+        "no read while they are hidden"
+    );
+    screen.state_mut().visible = true;
+    let again = asked(&mut screen);
+    assert_eq!(again.len(), 1, "one read when they come back");
+    assert_ne!(list_of(&again[0]).operation_id, list.operation_id);
+    assert!(asked(&mut screen).is_empty());
+
+    // A read still out when the lessons are hidden answers for itself.
+    screen.state_mut().visible = false;
+    screen.run_steps(2);
+    screen.state_mut().visible = true;
+    assert!(asked(&mut screen).is_empty());
+}
+
+#[test]
+fn a_reset_and_a_return_together_read_the_lessons_and_the_open_one_once_each() {
+    let mut screen = screen_with_detail();
+    screen.state_mut().visible = false;
+    screen.run_steps(2);
+    screen.state_mut().feature.reset();
+    screen.state_mut().visible = true;
+    let asks = asked(&mut screen);
+    assert_eq!(asks.len(), 2, "{asks:?}");
+    assert_eq!(
+        asks.iter()
+            .filter(|ask| matches!(query_of(ask), Query::Memory(MemoryQuery::ListMemory(_))))
+            .count(),
+        1
+    );
+    assert_eq!(
+        asks.iter()
+            .filter(|ask| matches!(query_of(ask), Query::Memory(MemoryQuery::GetMemory(_))))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_failed_list_is_retried_from_the_first_page_and_an_old_answer_is_dropped() {
+    let mut screen = screen(Box::<MemoryFeature>::default(), None);
+    let first = asked(&mut screen);
+    let list = list_of(&first[0]);
+    answer(
+        &mut screen,
+        first[0].tag,
+        list_page_reply(&list.operation_id, vec![summary("lesson-a", false)], true),
+    );
+    assert!(screen.query_by_label("Retry list").is_none());
+
+    screen.get_by_label("Load more lessons").click();
+    let more = asked(&mut screen);
+    assert_eq!(more.len(), 1);
+    assert!(matches!(
+        query_of(&more[0]),
+        Query::Memory(MemoryQuery::ListMemory(ListMemory {
+            page: PageRequest {
+                cursor: Some(_),
+                ..
+            },
+            ..
+        }))
+    ));
+    answer(
+        &mut screen,
+        more[0].tag,
+        FeatureReply::Query(Err(FeatureError::new("the core went away"))),
+    );
+    screen.get_by_label("Retry list").click();
+    let retry = asked(&mut screen);
+    assert_eq!(retry.len(), 1, "one click, one read");
+    let retried = list_of(&retry[0]);
+    assert!(
+        matches!(
+            query_of(&retry[0]),
+            Query::Memory(MemoryQuery::ListMemory(ListMemory {
+                page: PageRequest { cursor: None, .. },
+                ..
+            }))
+        ),
+        "an old cursor does not join the new list"
+    );
+    assert_ne!(retried.operation_id, list.operation_id);
+    assert!(
+        screen.query_by_label("lesson-a").is_none(),
+        "the rows start over"
+    );
+
+    // The answer of the failed ask's generation is dropped, the new one is shown.
+    answer(
+        &mut screen,
+        more[0].tag,
+        list_reply(&list.operation_id, vec![summary("stale", false)]),
+    );
+    assert!(screen.query_by_label_contains("stale").is_none());
+    answer(
+        &mut screen,
+        retry[0].tag,
+        list_reply(&retried.operation_id, vec![summary("fresh", false)]),
+    );
+    screen.get_by_label("fresh");
+    assert!(screen.query_by_label("Retry list").is_none());
+}
+
+#[test]
+fn a_failed_first_list_offers_retry_and_a_failed_detail_offers_its_own() {
+    let mut screen = screen(Box::<MemoryFeature>::default(), None);
+    let first = asked(&mut screen);
+    let list = list_of(&first[0]);
+    answer(
+        &mut screen,
+        first[0].tag,
+        failed_list_reply(&list.operation_id),
+    );
+    screen.get_by_label("The storage could not be read.");
+    screen.get_by_label("Retry list").click();
+    let retry = asked(&mut screen);
+    assert_eq!(retry.len(), 1);
+    let retried = list_of(&retry[0]);
+    assert_ne!(retried.operation_id, list.operation_id);
+    answer(
+        &mut screen,
+        retry[0].tag,
+        list_reply(&retried.operation_id, vec![summary("lesson-b", false)]),
+    );
+
+    screen.get_by_label("lesson-b").click();
+    let detail = asked(&mut screen);
+    let Query::Memory(MemoryQuery::GetMemory(get)) = query_of(&detail[0]) else {
+        panic!("a detail was expected");
+    };
+    let get = get.clone();
+    answer(
+        &mut screen,
+        detail[0].tag,
+        FeatureReply::Query(Err(FeatureError::new("no detail"))),
+    );
+    assert!(screen.query_by_label("Retry list").is_none());
+    screen.get_by_label("Retry detail").click();
+    let again = asked(&mut screen);
+    assert_eq!(again.len(), 1);
+    let Query::Memory(MemoryQuery::GetMemory(next)) = query_of(&again[0]) else {
+        panic!("a detail was expected");
+    };
+    assert_eq!(next.id, get.id);
+    assert_ne!(next.operation_id, get.operation_id);
+    assert!(
+        asked(&mut screen).is_empty(),
+        "the list was not asked for again"
+    );
+}
+
+#[test]
+fn what_the_update_line_says_never_asks_for_a_refresh() {
+    assert!(!UNKNOWN_LINE.to_lowercase().contains("refresh"));
+    let cancelled = update_line(
+        OperationState::Cancelled {
+            reason: workbench_protocol::operation::CancelReason::Restart,
+        },
+        None,
+        None,
+        None,
+    );
+    assert!(!cancelled.to_lowercase().contains("refresh"));
 }
 
 #[test]

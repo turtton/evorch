@@ -167,6 +167,13 @@ pub(crate) fn phase_label(ui: &mut egui::Ui, phase: &Phase) {
     }
 }
 
+/// [`phase_label`], and a button named `retry` beside a failure. True when it was clicked.
+/// A read that is not failed has nothing to retry: the screen reads again by itself.
+pub(crate) fn phase_label_retry(ui: &mut egui::Ui, phase: &Phase, retry: &str) -> bool {
+    phase_label(ui, phase);
+    matches!(phase, Phase::Failed(_)) && ui.button(retry).clicked()
+}
+
 /// The note under a text the core cut for the wire.
 pub(crate) fn cut_note(shown: usize, total: u64) -> String {
     format!("Showing the first {shown} of {total} bytes.")

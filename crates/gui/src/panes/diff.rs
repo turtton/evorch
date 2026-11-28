@@ -69,9 +69,6 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
                 requested = Some(mode.clone());
             }
         }
-        if ui.button("Refresh").clicked() {
-            requested = Some(mode.clone());
-        }
         ui.label(
             RichText::new(if diff.is_snapshot() {
                 "Snapshot"
@@ -82,7 +79,7 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
             .color(palette().TEXT_MUTED),
         )
         .on_hover_text(if diff.is_snapshot() {
-            "Restored snapshot. Choose a scope or Refresh to return to live changes."
+            "Restored snapshot. Choose a scope to return to live changes."
         } else {
             "Changes update automatically every 2 seconds while this tab is visible."
         });
@@ -444,6 +441,30 @@ fn rows(document: &DiffDocument, view: View) -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_refresh_button_is_drawn_live_or_restored_and_a_scope_choice_still_reads() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let restored = {
+            let mut model = DiffModel::new();
+            model.show_snapshot("diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new\n".into());
+            model
+        };
+        for model in [DiffModel::new(), restored] {
+            let mut requested = None;
+            let mut harness = Harness::new_ui(|ui| {
+                if let Some(mode) = diff_pane(ui, &model) {
+                    requested = Some(mode);
+                }
+            });
+            harness.run();
+            assert!(harness.query_by_label("Refresh").is_none());
+            harness.get_by_label("Branch vs main").click();
+            harness.run();
+            drop(harness);
+            assert_eq!(requested, Some(DiffMode::Branch));
+        }
+    }
 
     #[test]
     fn split_pairs_replacements_and_keeps_unpaired_additions() {

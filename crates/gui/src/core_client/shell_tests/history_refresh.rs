@@ -111,7 +111,7 @@ fn a_full_queue_does_not_lose_the_selected_first_page_read() {
 }
 
 #[test]
-fn a_failed_first_page_can_be_refreshed_and_a_new_projection_retries_it_once() {
+fn a_failed_first_page_offers_retry_and_a_new_projection_retries_it_once() {
     let mut screen = screen(egui::vec2(1440.0, 900.0));
     screen.settle();
     new_session(&screen);
@@ -131,15 +131,25 @@ fn a_failed_first_page_can_be_refreshed_and_a_new_projection_retries_it_once() {
         "a failure is not a hot retry loop"
     );
 
-    // The retained Refresh history uses this enqueue path. No new Retry UI is
-    // introduced here; the later reload PR can use the recorded failure.
-    let tx = screen.harness.state().actions.clone();
-    crate::core_client::enqueue(
-        &tx,
-        &mut screen.shared.lock().unwrap(),
-        Action::History(ThreadId::new("thr-1").unwrap(), None, false),
+    // The failure replaces the empty-conversation text, and Retry history is the
+    // only way back besides a new projection.
+    screen
+        .harness
+        .get_by_label("Could not read this conversation's history");
+    assert!(
+        screen
+            .harness
+            .query_by_label("Start the conversation")
+            .is_none()
     );
+    assert!(screen.harness.query_by_label("Refresh history").is_none());
+    screen.harness.get_by_label("Retry history").click();
     assert_eq!(first_pages(&screen.settle(), "thr-1"), 1);
+    screen.harness.run_steps(2);
+    assert!(
+        screen.harness.query_by_label("Retry history").is_none(),
+        "one click asks once, and the button is gone while the read is out"
+    );
     assert!(
         !screen
             .shared

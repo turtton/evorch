@@ -118,6 +118,8 @@ pub struct ArtifactsFeature {
     list: Option<ListState>,
     list_tag: Option<u64>,
     list_after: Option<String>,
+    /// Whether the last pass drew the list: drawing it again reads it again.
+    shown: bool,
     items: Vec<ArtifactMetadata>,
     next: Option<String>,
     open: Option<Open>,
@@ -753,8 +755,20 @@ impl Feature for ArtifactsFeature {
     }
 
     /// Every pass, collapsed, minimized or disconnected too: queued cancels go out.
-    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, _visibility: Visibility) {
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
         self.enter_scope(ctx);
+        let shown = visibility.is_visible();
+        if shown
+            && !self.shown
+            && matches!(self.list, Some(ListState::Ready | ListState::Failed(_)))
+        {
+            // What the thread produced while the list was out of sight is read once it is
+            // back, from the first page and by the one request the next draw sends. An
+            // opened artifact stays as it is, so its content is not fetched again; a list
+            // still being read, and a first read or a new scope, already ask.
+            self.list = None;
+        }
+        self.shown = shown;
         self.flush(ctx);
     }
 

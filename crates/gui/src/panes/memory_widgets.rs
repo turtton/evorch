@@ -13,7 +13,6 @@ use crate::theme::text::badge;
 
 pub const NO_PROJECT: &str = "Select a project to browse memory.";
 pub const ALL_STATUSES: &str = "All statuses";
-pub const REFRESH: &str = "Refresh";
 pub const EMPTY: &str = "No matching lessons.";
 pub const EVIDENCE: &str = "Evidence";
 

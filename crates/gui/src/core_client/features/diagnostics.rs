@@ -434,8 +434,9 @@ impl DiagnosticsFeature {
         }
     }
 
-    /// Returns whether a refresh was asked for. The Live view has no refresh to ask
-    /// for: it reads again by itself.
+    /// Returns whether a refresh was asked for. Only the Context view has one: a read of
+    /// one moment, paged, that a replacement would pull from under the reader. The other
+    /// views read again by themselves, a failed read as well.
     fn toolbar(&mut self, ui: &mut egui::Ui) -> bool {
         let waiting = *self.active_phase() == Phase::Waiting;
         ui.horizontal_wrapped(|ui| {
@@ -460,7 +461,7 @@ impl DiagnosticsFeature {
                     )));
                 }
             }
-            let refresh = self.view != View::Live && ui.button("Refresh").clicked();
+            let refresh = self.view == View::Context && ui.button("Refresh").clicked();
             if waiting {
                 crate::theme::widgets::spinner(ui);
             }
@@ -809,9 +810,6 @@ impl Feature for DiagnosticsFeature {
             }
             self.live_body(ui);
             return;
-        }
-        if refresh {
-            self.usage_due = true;
         }
         let now = Instant::now();
         self.keep_usage(ctx, now);

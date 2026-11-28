@@ -230,7 +230,7 @@ fn backoff(attempts: u8) -> Duration {
 impl BrowserFeature {
     fn with_clock(clock: Clock) -> Self {
         Self {
-            observation: Default::default(),
+            observation: observation::ObservationFeature::with_clock(clock.clone()),
             clock,
             decoders: Decoders::default(),
             pending_cancel: Vec::new(),
@@ -1566,6 +1566,9 @@ impl Feature for BrowserFeature {
         self.drive(ctx);
         if let Some(at) = self.wake {
             egui_ctx.request_repaint_after(at.saturating_duration_since(self.clock.now()));
+        }
+        if let Some(wait) = self.observation.relist_in(self.clock.now()) {
+            egui_ctx.request_repaint_after(wait);
         }
     }
 }

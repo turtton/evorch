@@ -149,7 +149,7 @@ fn the_usage_tab_draws_the_live_view_and_offers_no_refresh_in_it() {
     screen.settle();
     screen.harness.get_by_label("Usage").click();
     drain(&mut screen);
-    screen.harness.get_by_label("Refresh");
+    assert!(screen.harness.query_by_label("Refresh").is_none());
     screen
         .harness
         .get_by_role_and_label(egui::accesskit::Role::Button, "Live")
