@@ -2479,3 +2479,65 @@ fn the_preview_reads_in_english() {
             .is_some()
     );
 }
+
+// ---- an open nobody took before the session or the conversation changed -------
+
+// Given: previews asked for through `Features` (a card's Open, an artifact's preview), not yet taken
+//        by the browser area
+// Then: a disconnect, a new snapshot or another selected project drops them, and one asked for while
+//       disconnected is gone when the session is back: no session is created and nothing is opened
+#[test]
+fn an_open_not_yet_taken_does_not_outlive_its_session_or_conversation() {
+    let mut comp = Comp::new();
+    comp.harness.state_mut().features.open_preview(artifact(1));
+    comp.harness.state_mut().features.disconnected();
+    comp.pump();
+    comp.harness.state_mut().features.open_preview(artifact(2));
+    comp.harness
+        .state_mut()
+        .features
+        .begin_session(&[], Vec::new());
+    comp.pump();
+    comp.harness.state_mut().features.open_preview(artifact(3));
+    comp.harness.state_mut().selection.project = Some(ProjectId::new("other").unwrap());
+    comp.pump();
+    assert_eq!(comp.core.count("create"), 0);
+    assert_eq!(comp.core.count("open"), 0);
+    comp.with(|f| {
+        assert!(f.queue.is_empty());
+        assert!(f.previews.is_empty());
+    });
+    // The same ask, with nothing in between, still opens.
+    comp.harness.state_mut().selection.project = Some(ProjectId::new("p").unwrap());
+    comp.pump();
+    comp.harness.state_mut().features.open_preview(artifact(4));
+    comp.pump();
+    assert_eq!(comp.core.count("open"), 1);
+}
+
+// Given: a preview that was accepted and is waiting for its session
+// Then: a new snapshot makes it lost instead of opening it later, and only an explicit reopen does
+#[test]
+fn a_preview_waiting_for_its_session_is_lost_when_the_snapshot_is_replaced() {
+    let mut rig = Rig::new();
+    rig.core.script("create", Script::Hold);
+    rig.feature().open_preview(artifact(1));
+    rig.pump();
+    assert_eq!(rig.preview(0).phase, Phase::Waiting);
+    let operation = rig.core.held.keys().next().unwrap().clone();
+    rig.core.keys.clear();
+    rig.reset();
+    assert!(matches!(rig.preview(0).phase, Phase::Lost(_)));
+    rig.core
+        .states
+        .insert(operation.clone(), RendererOperationState::Running);
+    rig.pump();
+    rig.release(&operation);
+    rig.pump();
+    assert_eq!(rig.core.count("open"), 0);
+    assert!(matches!(rig.preview(0).phase, Phase::Lost(_)));
+    let id = rig.preview(0).id;
+    rig.request(UiRequest::Reopen(id));
+    assert_eq!(rig.preview(0).phase, Phase::Open);
+    assert_eq!(rig.core.count("open"), 1);
+}

@@ -128,17 +128,6 @@ Presentations are `ToolEvent::ArtifactsPresented` events. Restored
 conversations replay them and show the same cards; replay grants no tool
 authority.
 
-### Core-client GUI
-
-The core-client GUI draws one minimal card per presentation, at the position
-where the conversation's `present` call was saved (it comes back at the same
-position after a reconnect or a history reload). The card shows the title, the
-caption, each artifact's title, caption and type, and an **Open** button; it
-has no preview and no external-app action. **Open** on an HTML artifact starts
-an in-app browser preview ([browser.md](browser.md)); on any other artifact it
-opens the Artifacts pane. A card whose artifact was deleted stays, and **Open**
-reports it as unavailable.
-
 ## Not yet supported
 
 Multiple viewports, self-review of HTML when CEF cannot start, and attaching

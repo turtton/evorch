@@ -1400,6 +1400,9 @@ impl Feature for BrowserFeature {
     fn reset(&mut self) {
         self.observation.reset();
         let now = self.clock.now();
+        // An open that was asked for and not yet taken belongs to the session it was asked in
+        // (a card's Open, an artifact's preview): a new snapshot does not carry it over.
+        self.queue.clear();
         self.pending_cancel.clear();
         self.ops.on_reset(now);
         self.data_tags.clear();
@@ -1414,6 +1417,9 @@ impl Feature for BrowserFeature {
         for p in &mut self.previews {
             p.forget_connection();
             p.lane = p.lane.filter(|op| self.ops.contains(*op));
+            if p.phase == Phase::Waiting {
+                p.phase = Phase::Lost("The connection was replaced before this opened".into());
+            }
             if p.tab.is_some() && matches!(p.phase, Phase::Open | Phase::Suspended) {
                 p.phase = Phase::Suspended;
             }
@@ -1514,6 +1520,7 @@ impl Feature for BrowserFeature {
 
     fn disconnected(&mut self) {
         self.observation.disconnected();
+        self.queue.clear();
         // The data connections are gone with the control session: no texture,
         // decoded image or stream state may outlive it. What was asked of the
         // core is settled by `reset` when a session is back.
@@ -1533,6 +1540,12 @@ impl Feature for BrowserFeature {
     }
 
     fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
+        // What waits to be taken was asked for in the conversation that was selected then.
+        let now = ctx.selection();
+        self.queue.retain(|artifact| {
+            now.project.as_ref() == Some(&artifact.project)
+                && now.thread.as_ref() == Some(&artifact.thread)
+        });
         self.observation.selection_changed(ctx);
     }
 
