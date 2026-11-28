@@ -35,6 +35,14 @@
 #     gui-evidence), the main-only-gui suite, the PR screenshot producer and its
 #     publisher workflow are gone; every event runs cache, io and remaining; no
 #     step may continue on error.
+#  9. The release expiry cells (core_expiry and core_browser_expiry) run in one
+#     job, release-expiry, that the `ci` gate needs: both release test binaries
+#     are prepared once and their listing is checked against the three groups
+#     before the product is installed, nothing compiles after the install, the
+#     six cells run once each from that one prepared metadata, and the CEF
+#     distribution reaches only the CEF helper build and the CEF cells' step (never
+#     GITHUB_ENV; core and Chromium cells run without it). The shards, browser-e2e
+#     and cef-e2e no longer run them, and their SIGKILL cells stay.
 # Each check also fails on a mutated copy of the real files.
 # shellcheck disable=SC2016 # the workflow expression is matched literally
 set -euo pipefail
@@ -141,8 +149,8 @@ check_producer_overwrite() { # <ci.yml>
 }
 
 cache_key='${{ runner.os }}-ci-workspace-v2'
-cargo_step_re='(guard-cargo\.sh |cargo (build|test|run|nextest|clippy|check) )'
-readers=(lint docs-schema otel tests browser-e2e cef-e2e)
+cargo_step_re='(guard-cargo\.sh |release-expiry\.sh |cargo (build|test|run|nextest|clippy|check) )'
+readers=(lint docs-schema otel tests browser-e2e cef-e2e release-expiry)
 
 # Prints "<job> <shared-key> <save-if>" (tab separated) for each rust-cache step.
 cache_steps() { # <ci.yml>
@@ -208,7 +216,7 @@ check_e2e_target() { # <ci.yml>
   local ci=$1 dir job bad=0
   dir=$(mktemp -d "$work/target.XXXXXX")
   split_jobs "$ci" "$dir"
-  for job in browser-e2e cef-e2e; do
+  for job in browser-e2e cef-e2e release-expiry; do
     awk -v job="$job" -v re="$cargo_step_re" '
       function flush() { if (step ~ re && step !~ /CARGO_TARGET_DIR: target\/ci-shared\n/) { print job ": a cargo step without CARGO_TARGET_DIR: target/ci-shared:" step; bad = 1 } }
       /^      - / { flush(); step = "" }
@@ -224,7 +232,7 @@ check_e2e_target() { # <ci.yml>
 }
 
 recipe_lines() { # <job file>: the prepare selections, cargo build and check lines, target installs
-  sed -n -e 's/^ *scripts\/guard-cargo\.sh prepare "\$warm\/[a-z0-9-]*" /prepare /p' -e 's/^ *\(cargo build .*\)$/\1/p' -e 's/^ *\(cargo check .*\)$/\1/p' -e 's/^ *\(rustup target add .*\)$/\1/p' "$1" | sort -u
+  sed -n -e 's/^ *scripts\/guard-cargo\.sh prepare "[^"]*" /prepare /p' -e 's/^ *\(cargo build .*\)$/\1/p' -e 's/^ *\(cargo check .*\)$/\1/p' -e 's/^ *\(rustup target add .*\)$/\1/p' "$1" | sort -u
 }
 
 # Every prepare selection, cargo build and cargo check of the readers is also built by cache-save.
@@ -232,7 +240,7 @@ check_recipe_covers_readers() { # <ci.yml>
   local ci=$1 dir job bad=0 missing
   dir=$(mktemp -d "$work/recipe.XXXXXX")
   split_jobs "$ci" "$dir"
-  for job in lint browser-e2e cef-e2e; do
+  for job in lint browser-e2e cef-e2e release-expiry; do
     [[ -n "$(recipe_lines "$dir/$job")" ]] || { echo "$job: no prepare, cargo build or check lines found" >&2; bad=1; continue; }
     missing=$(comm -23 <(recipe_lines "$dir/$job") <(recipe_lines "$dir/cache-save"))
     if [[ -n "$missing" ]]; then
@@ -323,7 +331,8 @@ check_scheduling() { # <ci.yml>
   # docs-schema starts after the producer, browser-e2e after quick-checks; every
   # other job keeps the needs it had.
   declare -A expected=(
-    [ci]='docs-schema lint otel product-artifact quick-checks scope-gate tests '
+    [ci]='docs-schema lint otel product-artifact quick-checks release-expiry scope-gate tests '
+    [release-expiry]='scope-gate '
     [docs-schema]='product-artifact '
     [browser-e2e]='quick-checks scope-gate '
     [tests]='scope-gate '
@@ -410,6 +419,195 @@ check_cache_hit_truth() { # <ci.yml>
   return "$bad"
 }
 
+# --- release-expiry ---------------------------------------------------------
+expiry_prepare='scripts/guard-cargo.sh prepare "$RUNNER_TEMP/release-expiry" -p evorch-core --release --features bootstrap-test-support --test core_expiry --test core_browser_expiry --locked'
+expiry_run() { # <group>
+  printf 'scripts/release-expiry.sh run "$RUNNER_TEMP/release-expiry" %s "$RUNNER_TEMP/release-expiry-evidence"' "$1"
+}
+
+# The first step of a job file that contains the needle (comments already dropped).
+step_with() { # <job file> <needle>
+  awk -v needle="$2" '
+    function flush() { if (!found && index(step, needle)) { print step; found = 1 } }
+    /^      - / { flush(); step = "" }
+    { step = step "\n" $0 }
+    END { flush(); exit !found }
+  ' "$1"
+}
+
+check_release_expiry() { # <ci.yml>
+  local dir f bad=0 line prev=0 group step label
+  dir=$(mktemp -d "$work/expiry.XXXXXX")
+  split_jobs "$1" "$dir"
+  f="$dir/release-expiry"
+  [[ -s "$f" ]] || { echo "no release-expiry job" >&2; return 1; }
+  if ! grep -E '^    needs:' "$dir/ci" | grep -q 'release-expiry'; then
+    echo "the ci job must need release-expiry" >&2
+    bad=1
+  fi
+  # One prepare of both release test binaries, then the inventory check, the
+  # helper builds, the product and the three groups, in that order; nothing
+  # compiles after the install.
+  if [[ "$(grep -cF -- "$expiry_prepare" "$f")" != 1 ]]; then
+    echo "release-expiry must prepare both release test binaries exactly as: $expiry_prepare" >&2
+    bad=1
+  fi
+  local -a order=(
+    "$expiry_prepare"
+    'scripts/release-expiry.sh check-inventory "$RUNNER_TEMP/release-expiry"'
+    'cargo build -p browser-cef --features cef --bin evorch-cef-helper'
+    'cargo build -p evorch-renderer'
+    'run: scripts/wait-product-artifact.sh'
+    'wait-product-artifact.sh check-source'
+    'scripts/product-artifact.sh install'
+    "$(expiry_run core)"
+    "$(expiry_run chromium)"
+    "$(expiry_run cef)"
+  )
+  for label in "${order[@]}"; do
+    line=$(grep -nF -m1 -- "$label" "$f" | cut -d: -f1 || true)
+    if [[ -z "$line" ]]; then
+      echo "release-expiry lacks: $label" >&2
+      bad=1
+      continue
+    fi
+    if ((line <= prev)); then
+      echo "release-expiry: out of order: $label" >&2
+      bad=1
+    fi
+    prev=$line
+  done
+  for group in core chromium cef; do
+    if [[ "$(grep -cF -- "$(expiry_run "$group")" "$f")" != 1 ]]; then
+      echo "release-expiry must run group $group exactly once" >&2
+      bad=1
+    fi
+  done
+  line=$(line_of 'scripts/product-artifact.sh install' "$f")
+  if [[ -n "$line" ]] && tail -n +"$((line + 1))" "$f" | grep -Eq '(^|[^-A-Za-z_])cargo |guard-cargo\.sh|nextest|scripts/release-expiry\.sh (prepare|check-inventory)'; then
+    echo "release-expiry: a cargo invocation follows the product install" >&2
+    bad=1
+  fi
+  # The environment: GITHUB_ENV is written once, by the product install. The CEF
+  # paths reach only the CEF helper build and the CEF cells' step, the browser only
+  # the Chromium cells' step.
+  if [[ "$(grep -c 'GITHUB_ENV' "$f")" != 1 ]] || ! grep -q 'product-artifact.sh install .* >> "\$GITHUB_ENV"' "$f"; then
+    echo "release-expiry may write GITHUB_ENV only through the product install" >&2
+    bad=1
+  fi
+  step=$(step_with "$f" 'uses: ./.github/actions/setup-cef') || step=''
+  if ! grep -q '^        id: cef$' <<< "$step" || ! grep -q '^          runtime-path: full$' <<< "$step" \
+    || ! grep -q '^          export-env: "false"$' <<< "$step"; then
+    echo "release-expiry must call setup-cef with id: cef, runtime-path: full and export-env: \"false\"" >&2
+    bad=1
+  fi
+  if [[ -n "$(job_env "$f" LD_LIBRARY_PATH)$(job_env "$f" CEF_PATH)$(job_env "$f" CHROME)" ]]; then
+    echo "release-expiry: the CEF paths and the browser do not belong on the job" >&2
+    bad=1
+  fi
+  for label in 'Build the CEF helper and renderer' 'Real CEF navigation then ten-second expiry'; do
+    step=$(step_with "$f" "name: $label") || step=''
+    [[ -n "$step" ]] || { echo "release-expiry lacks the step: $label" >&2; bad=1; continue; }
+    grep -qF 'CEF_PATH: ${{ steps.cef.outputs.cef-path }}' <<< "$step" \
+      || { echo "release-expiry: '$label' lacks CEF_PATH from the setup-cef output" >&2; bad=1; }
+  done
+  step=$(step_with "$f" "$(expiry_run cef)") || step=''
+  grep -qF 'LD_LIBRARY_PATH: ${{ steps.cef.outputs.loader-path }}' <<< "$step" \
+    || { echo "release-expiry: the CEF cells' step lacks the CEF loader path" >&2; bad=1; }
+  grep -q 'export EVORCH_RENDERER_EXE="\$PWD/target/ci-shared/debug/evorch-renderer"' <<< "$step" \
+    || { echo "release-expiry: the CEF cells' step lacks EVORCH_RENDERER_EXE" >&2; bad=1; }
+  step=$(step_with "$f" "$(expiry_run chromium)") || step=''
+  grep -qF 'CHROME: ${{ steps.chrome.outputs.path }}' <<< "$step" \
+    || { echo "release-expiry: the Chromium cells' step lacks CHROME" >&2; bad=1; }
+  awk '
+    function flush() {
+      if (step ~ /(LD_LIBRARY_PATH|CEF_PATH|steps\.cef\.outputs)/ \
+          && step !~ /name: Build the CEF helper and renderer/ \
+          && step !~ /name: Real CEF navigation then ten-second expiry/ \
+          && step !~ /actions\/setup-cef/) { print "a step other than the CEF ones names the CEF environment:" step; bad = 1 }
+      if (step ~ /(CHROME:|steps\.chrome\.outputs)/ && step !~ /name: Real Chromium navigation then ten-second expiry/) {
+        print "a step other than the Chromium cells names CHROME:" step; bad = 1
+      }
+    }
+    /^      - / { flush(); step = "" }
+    { step = step "\n" $0 }
+    END { flush(); exit bad }
+  ' "$f" >&2 || bad=1
+  step=$(step_with "$f" 'name: release-expiry-evidence') || step=''
+  if ! grep -q 'if: always()' <<< "$step" || ! grep -q 'if-no-files-found: error' <<< "$step" \
+    || ! grep -qF 'path: ${{ runner.temp }}/release-expiry-evidence' <<< "$step"; then
+    echo "release-expiry must always upload release-expiry-evidence and fail when it is empty" >&2
+    bad=1
+  fi
+  # The cells moved: no other job runs or builds them, the SIGKILL cells stay.
+  for label in tests browser-e2e cef-e2e; do
+    if grep -Eq 'core_expiry|core_browser_expiry|--release' "$dir/$label"; then
+      echo "$label still names the expiry cells or a release build" >&2
+      bad=1
+    fi
+  done
+  [[ "$(grep -c -- '--test core_browser_sigkill' "$dir/browser-e2e")" == 1 ]] || { echo "browser-e2e lost the Chromium SIGKILL cell" >&2; bad=1; }
+  [[ "$(grep -c -- '--test core_browser_sigkill' "$dir/cef-e2e")" == 1 ]] || { echo "cef-e2e lost the CEF SIGKILL cell" >&2; bad=1; }
+  grep -q 'name: core-sigkill-evidence-' "$dir/tests" || { echo "tests lost the SIGKILL evidence upload" >&2; bad=1; }
+  grep -q 'Prepare real caller SIGKILL matrix dependencies' "$dir/tests" || { echo "tests lost the SIGKILL matrix preparation" >&2; bad=1; }
+  for label in core_expiry core_browser_expiry; do
+    grep -q "^filter = 'binary(=$label)'\$" .config/nextest.toml || { echo ".config/nextest.toml lost the override of $label" >&2; bad=1; }
+  done
+  return "$bad"
+}
+
+# The script keeps every flag of the cells and the one definition of the groups.
+check_release_expiry_script() { # <release-expiry.sh>
+  local s=$1 bad=0 want
+  local -a wants=(
+    '-E "$filter" --run-ignored only --test-threads 1 --success-output immediate --no-tests fail'
+    "core) echo 'binary(=core_expiry)' ;;"
+    "chromium) echo 'binary(=core_browser_expiry) & (test(=expiry_chromium_t) | test(=expiry_chromium_stopped_t))' ;;"
+    "cef) echo 'binary(=core_browser_expiry) & (test(=expiry_cef_t) | test(=expiry_cef_stopped_t))' ;;"
+    '--cargo-metadata "$dir/cargo.json" --binaries-metadata "$dir/default-binaries.json"'
+    '--run-ignored only "${extra[@]}" --message-format json'
+    '*-$cell-*-death.json'
+    'evorch-core::core_expiry expiry_capture_first \'
+    'evorch-core::core_expiry expiry_signal_first \'
+    'evorch-core::core_browser_expiry expiry_chromium_t \'
+    'evorch-core::core_browser_expiry expiry_chromium_stopped_t \'
+    'evorch-core::core_browser_expiry expiry_cef_t \'
+    'evorch-core::core_browser_expiry expiry_cef_stopped_t \'
+    '[[ "$all" != "$(expected_cells)" ]]'
+  )
+  for want in "${wants[@]}"; do
+    grep -qF -- "$want" "$s" || { echo "release-expiry.sh lacks: $want" >&2; bad=1; }
+  done
+  if grep -Eq -- '--release|cargo (build|test|run)' "$s"; then
+    echo "release-expiry.sh must not compile or select a profile" >&2
+    bad=1
+  fi
+  return "$bad"
+}
+
+# setup-cef puts CEF_PATH and LD_LIBRARY_PATH on GITHUB_ENV (the whole job) only
+# for export-env true, which stays the default; the outputs carry them either way.
+# Only release-expiry turns the export off.
+check_setup_cef_action() { # <action.yml> <ci.yml>
+  local a=$1 workflow=$2 bad=0 n_case n_true n_env n_false
+  awk '/^  export-env:/ { on = 1; next } on && /^    default: / { print $2; exit } on && /^[a-z]/ { exit }' "$a" | grep -qx '"true"' \
+    || { echo "export-env must default to \"true\"" >&2; bad=1; }
+  { grep -q '^  cef-path:$' "$a" && grep -q '^  loader-path:$' "$a"; } || { echo "setup-cef must output cef-path and loader-path" >&2; bad=1; }
+  [[ "$(grep -c '>> "\$GITHUB_ENV"' "$a")" == 1 ]] || { echo "setup-cef must write GITHUB_ENV exactly once" >&2; bad=1; }
+  n_case=$(line_of 'case "$EXPORT_ENV" in' "$a")
+  n_true=$(line_of '^          true)$' "$a")
+  n_env=$(line_of '>> "\$GITHUB_ENV"' "$a")
+  n_false=$(line_of '^          false) ;;$' "$a")
+  if ! [[ -n "$n_case" && -n "$n_true" && -n "$n_env" && -n "$n_false" ]] \
+    || ! ((n_case < n_true && n_true < n_env && n_env < n_false)); then
+    echo "the GITHUB_ENV write must sit in the export-env true arm only" >&2
+    bad=1
+  fi
+  grep -qF 'EXPORT_ENV: ${{ inputs.export-env }}' "$a" || { echo "the export-env input must reach the script" >&2; bad=1; }
+  [[ "$(grep -c 'export-env:' "$workflow")" == 1 ]] || { echo "only release-expiry may turn the environment export off" >&2; bad=1; }
+  return "$bad"
+}
+
 # Every event runs the same suites, and the jobs and files of the former embedded GUI
 # verification are gone, not paused.
 check_every_event() { # <ci.yml>
@@ -491,6 +689,9 @@ ok "browser-e2e and cef-e2e build into the shared target" check_e2e_target "$ci"
 ok "cache-save builds what browser-e2e and cef-e2e build" check_recipe_covers_readers "$ci"
 ok "cef-e2e is one job with the six invocations" check_cef_single "$ci"
 ok "docs-schema, browser-e2e and the other jobs have the intended needs" check_scheduling "$ci"
+ok "the release expiry cells run in one job, the ci gate needs it, CEF stays off the other cells" check_release_expiry "$ci"
+ok "release-expiry.sh keeps the expiry selection and evidence" check_release_expiry_script scripts/release-expiry.sh
+ok "setup-cef exports its environment only when asked to" check_setup_cef_action .github/actions/setup-cef/action.yml "$ci"
 ok "cache-save skips its recipe steps only on an exact hit" check_cache_hit "$ci"
 ok "the cache-hit condition runs the recipe unless the output is exactly true" check_cache_hit_truth "$ci"
 ok "every event runs the same suites and the embedded GUI verification is gone" check_every_event "$ci"
@@ -563,8 +764,108 @@ mutate ci-browser-quick.yml 's/needs: \[scope-gate, quick-checks\]/needs: scope-
 rejects "browser-e2e without quick-checks" check_scheduling "$work/ci-browser-quick.yml"
 awk '/^  tests:/ { on = 1 } on && /^    needs: scope-gate$/ && !done { print "    needs: [scope-gate, quick-checks]"; done = 1; next } { print }' "$ci" > "$work/ci-tests-needs.yml"
 rejects "another job gaining a needs" check_scheduling "$work/ci-tests-needs.yml"
-mutate ci-agg-needs.yml 's/needs: \[quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests\]/needs: [quick-checks, scope-gate, lint, docs-schema, otel, product-artifact]/' "$ci"
+mutate ci-agg-needs.yml 's/needs: \[quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests, release-expiry\]/needs: [quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, release-expiry]/' "$ci"
 rejects "an aggregate that stops needing tests" check_scheduling "$work/ci-agg-needs.yml"
+mutate ci-agg-expiry.yml 's/needs: \[quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests, release-expiry\]/needs: [quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests]/' "$ci"
+rejects "an aggregate that stops needing release-expiry" check_scheduling "$work/ci-agg-expiry.yml"
+rejects "an aggregate that stops needing release-expiry (job check)" check_release_expiry "$work/ci-agg-expiry.yml"
+
+# release-expiry: one job, one prepare, the groups, the CEF environment, the gate.
+mutate ci-expiry-release.yml 's/ --release --features bootstrap-test-support --test core_expiry --test core_browser_expiry/ --features bootstrap-test-support --test core_expiry --test core_browser_expiry/' "$ci"
+rejects "a debug (not --release) expiry prepare" check_release_expiry "$work/ci-expiry-release.yml"
+mutate ci-expiry-feature.yml 's/ --release --features bootstrap-test-support --test core_expiry --test core_browser_expiry/ --release --test core_expiry --test core_browser_expiry/' "$ci"
+rejects "an expiry prepare without bootstrap-test-support" check_release_expiry "$work/ci-expiry-feature.yml"
+mutate ci-expiry-one-binary.yml 's/ --test core_expiry --test core_browser_expiry --locked$/ --test core_expiry --locked/' "$ci"
+rejects "an expiry prepare of one binary only" check_release_expiry "$work/ci-expiry-one-binary.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /scripts\/release-expiry.sh check-inventory/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-noinv.yml"
+rejects "an expiry job without the inventory check" check_release_expiry "$work/ci-expiry-noinv.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /scripts\/release-expiry.sh run .* chromium / && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-nochromium.yml"
+rejects "an expiry job without the Chromium cells" check_release_expiry "$work/ci-expiry-nochromium.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /scripts\/release-expiry.sh run .* core "/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-nocore.yml"
+rejects "an expiry job without the core cells" check_release_expiry "$work/ci-expiry-nocore.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /scripts\/release-expiry.sh run .* cef / && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-nocef.yml"
+rejects "an expiry job without the CEF cells" check_release_expiry "$work/ci-expiry-nocef.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /scripts\/release-expiry.sh run .* chromium / && !done { done = 1; print; print; next } { print }' "$ci" > "$work/ci-expiry-twice.yml"
+rejects "an expiry group that runs twice" check_release_expiry "$work/ci-expiry-twice.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /scripts\/product-artifact.sh install/ && !done { done = 1; print; print "      - run: cargo build -p evorch-core"; next } { print }' "$ci" > "$work/ci-expiry-late-cargo.yml"
+rejects "a cargo build after the product install" check_release_expiry "$work/ci-expiry-late-cargo.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /export-env: "false"/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-export.yml"
+rejects "setup-cef exporting CEF to the whole expiry job" check_release_expiry "$work/ci-expiry-export.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /^      RUSTFLAGS:/ && !done { done = 1; print; print "      LD_LIBRARY_PATH: /opt/cef"; next } { print }' "$ci" > "$work/ci-expiry-ld-job.yml"
+rejects "the CEF loader path on the expiry job" check_release_expiry "$work/ci-expiry-ld-job.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /scripts\/release-expiry.sh run .* core "/ && !done { done = 1; print "        env:"; print "          LD_LIBRARY_PATH: ${{ steps.cef.outputs.loader-path }}" } { print }' "$ci" > "$work/ci-expiry-ld-core.yml"
+rejects "the CEF loader path on a non-CEF cell" check_release_expiry "$work/ci-expiry-ld-core.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /LD_LIBRARY_PATH: \$\{\{ steps.cef.outputs.loader-path \}\}/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-no-ld-cef.yml"
+rejects "CEF cells without the CEF loader path" check_release_expiry "$work/ci-expiry-no-ld-cef.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /export EVORCH_RENDERER_EXE=/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-no-renderer.yml"
+rejects "CEF cells without their renderer binary" check_release_expiry "$work/ci-expiry-no-renderer.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /CHROME: \$\{\{ steps.chrome.outputs.path \}\}/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-no-chrome.yml"
+rejects "Chromium cells without CHROME" check_release_expiry "$work/ci-expiry-no-chrome.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /echo "path=\$CHROME_PATH" >> "\$GITHUB_OUTPUT"/ && !done { done = 1; print "          echo \"CHROME=$CHROME_PATH\" >> \"$GITHUB_ENV\""; next } { print }' "$ci" > "$work/ci-expiry-chrome-env.yml"
+rejects "CHROME exported to the whole expiry job" check_release_expiry "$work/ci-expiry-chrome-env.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /if-no-files-found: error/ && !done { done = 1; print "          if-no-files-found: warn"; next } { print }' "$ci" > "$work/ci-expiry-evidence.yml"
+rejects "an optional expiry evidence upload" check_release_expiry "$work/ci-expiry-evidence.yml"
+awk '/^  tests:/ { on = 1 } on && /name: Remaining tests/ && !done { done = 1; print "      - run: scripts/guard-cargo.sh run -p evorch-core --release --features bootstrap-test-support --locked --test core_expiry --run-ignored only" } { print }' "$ci" > "$work/ci-expiry-in-tests.yml"
+rejects "the expiry cells back in a runtime shard" check_release_expiry "$work/ci-expiry-in-tests.yml"
+awk '/^  browser-e2e:/ { on = 1 } on && /name: Run web workbench browser test/ && !done { done = 1; print "      - run: scripts/guard-cargo.sh run -p evorch-core --release --test core_browser_expiry -E test(=expiry_chromium_t)" } { print }' "$ci" > "$work/ci-expiry-in-browser.yml"
+rejects "the Chromium expiry cells back in browser-e2e" check_release_expiry "$work/ci-expiry-in-browser.yml"
+mutate ci-expiry-no-sigkill.yml 's/--test core_browser_sigkill/--test core_browser_x/' "$ci"
+rejects "a dropped SIGKILL cell" check_release_expiry "$work/ci-expiry-no-sigkill.yml"
+mutate ci-expiry-recipe.yml '/prepare "\$warm\/expiry"/d' "$ci"
+rejects "an expiry selection cache-save does not build" check_recipe_covers_readers "$work/ci-expiry-recipe.yml"
+mutate ci-expiry-recipe-sel.yml '/prepare "\$warm\/expiry"/s/ --test core_browser_expiry//' "$ci"
+rejects "an expiry selection cache-save builds differently" check_recipe_covers_readers "$work/ci-expiry-recipe-sel.yml"
+awk '/^  [a-z0-9-]+:[[:space:]]*$/ { on = ($1 == "cache-save:") } on && /^          cargo build -p evorch-renderer$/ { next } { print }' "$ci" > "$work/ci-expiry-helper-recipe.yml"
+rejects "a renderer build cache-save does not make" check_recipe_covers_readers "$work/ci-expiry-helper-recipe.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /shared-key: / && !done { done = 1; sub(/-v2$/, ""); } { print }' "$ci" > "$work/ci-expiry-reader-key.yml"
+rejects "release-expiry on another cache key" check_cache_wiring "$work/ci-expiry-reader-key.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /save-if: false/ && !done { sub(/false/, "true"); done = 1 } { print }' "$ci" > "$work/ci-expiry-saves.yml"
+rejects "release-expiry saving the shared cache" check_cache_wiring "$work/ci-expiry-saves.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /CARGO_PROFILE_TEST_DEBUG/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-env.yml"
+rejects "release-expiry without the writer's job-level env" check_cache_wiring "$work/ci-expiry-env.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /CARGO_TARGET_DIR: target\/ci-shared/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-target.yml"
+rejects "a release-expiry cargo step outside the shared target" check_e2e_target "$work/ci-expiry-target.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /^    needs: scope-gate$/ && !done { done = 1; print "    needs: [scope-gate, product-artifact]"; next } { print }' "$ci" > "$work/ci-expiry-needs.yml"
+rejects "release-expiry that needs the producer and waits" check_consumers "$work/ci-expiry-needs.yml"
+rejects "release-expiry with other needs" check_scheduling "$work/ci-expiry-needs.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /wait-product-artifact.sh check-source/ && !done { done = 1; print "        run: true"; next } { print }' "$ci" > "$work/ci-expiry-nosource.yml"
+rejects "release-expiry that skips the source check" check_consumers "$work/ci-expiry-nosource.yml"
+awk '/^  release-expiry:/ { on = 1 } on && /^      actions: read$/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-expiry-perm.yml"
+rejects "release-expiry without actions: read" check_consumers "$work/ci-expiry-perm.yml"
+
+# release-expiry.sh: the flags and the group definitions.
+script=scripts/release-expiry.sh
+mutate expiry-no-threads.sh 's/ --test-threads 1//' "$script"
+rejects "an expiry run that may use several threads" check_release_expiry_script "$work/expiry-no-threads.sh"
+mutate expiry-no-notests.sh 's/ --no-tests fail//' "$script"
+rejects "an expiry run that may select no test" check_release_expiry_script "$work/expiry-no-notests.sh"
+mutate expiry-no-ignored.sh 's/ --run-ignored only --test-threads/ --test-threads/' "$script"
+rejects "an expiry run that skips the ignored cells" check_release_expiry_script "$work/expiry-no-ignored.sh"
+mutate expiry-filter.sh 's/ | test(=expiry_cef_stopped_t)//' "$script"
+rejects "a CEF group that lost a cell" check_release_expiry_script "$work/expiry-filter.sh"
+mutate expiry-compile.sh 's/^  cargo nextest list /  cargo build --release\n  cargo nextest list /' "$script"
+rejects "an expiry script that compiles" check_release_expiry_script "$work/expiry-compile.sh"
+for cell in expiry_capture_first expiry_signal_first expiry_chromium_t expiry_chromium_stopped_t expiry_cef_t expiry_cef_stopped_t; do
+  mutate "expiry-expected-$cell.sh" "/^    evorch-core::core_[a-z_]* $cell \\\\$/d" "$script"
+  rejects "an expected-cell list without $cell" check_release_expiry_script "$work/expiry-expected-$cell.sh"
+done
+mutate expiry-no-expected.sh 's/\[\[ "\$all" != "\$(expected_cells)" \]\]/false/' "$script"
+rejects "an inventory check that does not compare the expected cells" check_release_expiry_script "$work/expiry-no-expected.sh"
+mutate expiry-evidence.sh 's/-death.json/-x.json/' "$script"
+rejects "an expiry script that does not need the death evidence" check_release_expiry_script "$work/expiry-evidence.sh"
+
+# setup-cef: the environment export is opt-out per call and on by default.
+action=.github/actions/setup-cef/action.yml
+mutate action-default.yml '/^  export-env:/,/^outputs:/ s/default: "true"/default: "false"/' "$action"
+rejects "setup-cef not exporting by default" check_setup_cef_action "$work/action-default.yml" "$ci"
+mutate action-always.yml 's/^          true)$/          true | false)/' "$action"
+rejects "setup-cef exporting for every value" check_setup_cef_action "$work/action-always.yml" "$ci"
+mutate action-noout.yml '/^  loader-path:$/d' "$action"
+rejects "setup-cef without the loader-path output" check_setup_cef_action "$work/action-noout.yml" "$ci"
+mutate action-input.yml 's/^        EXPORT_ENV: .*$/        EXPORT_ENV: true/' "$action"
+rejects "setup-cef ignoring its export-env input" check_setup_cef_action "$work/action-input.yml" "$ci"
+{ cat "$ci"; printf '#   - uses: ./.github/actions/setup-cef\n#     with:\n#       export-env: "false"\n'; } > "$work/ci-export-twice.yml"
+rejects "another job turning the export off" check_setup_cef_action "$action" "$work/ci-export-twice.yml"
 
 # cef-e2e: one job, six invocations, their prerequisites.
 awk '/^  cef-e2e:/ { print; print "    strategy:"; print "      matrix:"; print "        cell: [engine, client]"; next } { print }' "$ci" > "$work/ci-cef-matrix.yml"

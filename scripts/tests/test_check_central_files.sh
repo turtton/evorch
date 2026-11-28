@@ -371,6 +371,11 @@ expect fail "another feature cannot enable the watchdog target" watchdog_manifes
 # installs it; the artifact job builds it.
 ci_job() { awk -v job="$1" '$0 ~ "^  " job ":$" { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$ci"; }
 job_has() { ci_job "$1" | grep -q -e "$2"; }
+# The `ci` job's needs list (the aggregate gate) holds the product artifact job,
+# wherever the list puts it.
+gate_needs_product() { # <ci.yml>
+  awk '/^  ci:$/ { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$1" | grep -Eq '^    needs: \[([^]]*, )?product-artifact(,[^]]*)?\]$'
+}
 # A job that runs a product test is not ordered after the artifact job by `needs`:
 # it waits for that job's success and installs the artifact before its first
 # guard-cargo.sh / run-test-group.sh run (comment lines are ignored).
@@ -397,7 +402,11 @@ for product_job in tests browser-e2e cef-e2e; do
   expect fail "$product_job running a test before the wait and install" product_gate_in "$work/ci-run-first" "$product_job"
 done
 expect ok "the product artifact job builds and seals it" job_has product-artifact 'scripts/product-artifact.sh build'
-expect ok "the aggregate gate requires the product artifact job" bash -c "grep -q 'otel, product-artifact, tests\]' $ci"
+expect ok "the aggregate gate requires the product artifact job" gate_needs_product "$ci"
+sed 's/^\(    needs: \[.*\), product-artifact\(.*\]\)$/\1\2/' "$ci" > "$work/ci-gate-no-product"
+expect fail "an aggregate gate that stops requiring the product artifact job" gate_needs_product "$work/ci-gate-no-product"
+sed -e 's/^\(    needs: \[.*\), product-artifact\(.*\]\)$/\1\2/' -e 's/^    needs: \[scope-gate, quick-checks\]$/    needs: [scope-gate, quick-checks, product-artifact]/' "$ci" > "$work/ci-gate-other-needs"
+expect fail "the product artifact job needed by another job instead of the aggregate gate" gate_needs_product "$work/ci-gate-other-needs"
 expect fail "a job that runs no product test does not install the artifact" job_has lint 'scripts/product-artifact.sh install'
 
 # 5a-I: the public restart management leaves (R, Q1, Q2, CN, CW). Each owner passes on

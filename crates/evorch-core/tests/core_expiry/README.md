@@ -1,9 +1,11 @@
 # B3-07 real ten-second expiry and exit 74 (Linux, release only)
 
 Separate `harness = false` leaf. Every cell is an **ignored** test (the debug
-inventory never runs it); CI runs it once, in a **release** build, with
-`scripts/guard-cargo.sh run -p evorch-core --release --features
-bootstrap-test-support --test core_expiry --run-ignored only`. The controller
+inventory never runs it); CI runs it once per event, in a **release** build, in the
+`release-expiry` job of `.github/workflows/ci.yml` (`scripts/release-expiry.sh`, which
+runs `scripts/guard-cargo.sh run --run-ignored only` over metadata prepared with
+`-p evorch-core --release --features bootstrap-test-support --test core_expiry
+--test core_browser_expiry`). The controller
 refuses to run when built with debug assertions.
 
 ## What it is, and is not
