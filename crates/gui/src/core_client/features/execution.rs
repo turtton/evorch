@@ -21,6 +21,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 mod card;
+mod side_commands;
+
+pub use side_commands::{BtwCardView, CardState};
 
 use super::layout::main_paged_list;
 use super::{
@@ -37,10 +40,13 @@ use workbench_protocol::{
     errors::{ErrorCode, RetryAdvice},
     events::UiEvent,
     handshake::Capability,
-    ids::{PageCursor, RunId, ThreadId},
+    ids::{OperationId, PageCursor, RunId, ThreadId},
     namespaces::{
         ExecutionCommand, ExecutionEvent, ExecutionQuery, ExecutionReply,
-        execution::{GoalView, RunDetail, RunDetailsQuery, RunRef, RunScope, ThreadExecution},
+        execution::{
+            CancelBtw, GetBtw, GoalView, RunDetail, RunDetailsQuery, RunRef, RunScope,
+            ThreadExecution,
+        },
     },
     queries::{PageRequest, Query, QueryReply},
 };
@@ -71,6 +77,10 @@ enum Pending {
     },
     Name(RunRef),
     Command(&'static str),
+    Btw {
+        thread: ThreadId,
+        operation: OperationId,
+    },
     Plan {
         kind: ReadKind,
         generation: u64,
@@ -111,6 +121,7 @@ pub struct ExecutionFeature {
     execution_stale: bool,
     more_requested: bool,
     plan: PlanState,
+    btw: side_commands::SideQuestions,
     /// The Plan tab was drawn since the last `maintain`.
     plan_drawn: bool,
     /// The Plan tab was drawn before the last `maintain`: its reads are due.
@@ -165,6 +176,20 @@ impl ExecutionFeature {
                     .filter(|summary| &summary.thread == thread),
             },
         })
+    }
+
+    /// The composer sent a side question as `operation`.
+    pub fn ask_btw(&mut self, thread: ThreadId, operation: OperationId, question: String) {
+        self.btw.ask(thread, operation, question);
+    }
+
+    /// The side question's card was closed.
+    pub fn close_btw(&mut self, thread: &ThreadId) {
+        self.btw.close(thread);
+    }
+
+    pub fn btw_card(&self, thread: &ThreadId) -> Option<BtwCardView<'_>> {
+        self.btw.card(thread)
     }
 
     pub fn plan_state(&self) -> &PlanState {
@@ -315,6 +340,29 @@ impl ExecutionFeature {
                 _ => continue,
             };
             self.command(ctx, label, command);
+        }
+    }
+
+    fn send_btw(&mut self, ctx: &mut FeatureContext<'_>) {
+        let outgoing = self.btw.take_outgoing();
+        for (thread, operation) in outgoing.reads {
+            let tag = self.tag(Pending::Btw {
+                thread,
+                operation: operation.clone(),
+            });
+            ctx.query(
+                tag,
+                Query::Execution(ExecutionQuery::GetBtw(GetBtw {
+                    operation_id: operation,
+                })),
+            );
+        }
+        for operation_id in outgoing.cancels {
+            self.command(
+                ctx,
+                "Side question",
+                Command::Execution(ExecutionCommand::CancelBtw(CancelBtw { operation_id })),
+            );
         }
     }
 
@@ -600,6 +648,7 @@ impl Feature for ExecutionFeature {
 
     fn reset(&mut self) {
         self.shell_jobs.reset();
+        self.btw.reset();
         // What came from the core is dropped and asked for again; `pending`
         // stays, because a tag may still be answered.
         let loaded_pages = self.loaded_pages;
@@ -621,9 +670,11 @@ impl Feature for ExecutionFeature {
             return;
         };
         self.shell_jobs.event(event);
+        self.btw.event(event);
         let changed = match event {
             ExecutionEvent::ShellJobChanged { .. } | ExecutionEvent::ShellJobOutput { .. } => None,
             ExecutionEvent::ToolStarted { .. } | ExecutionEvent::ToolFinished { .. } => None,
+            ExecutionEvent::BtwChanged { .. } => None,
             ExecutionEvent::RunChanged { run } => Some(&run.thread),
             ExecutionEvent::ThreadExecutionChanged { thread, .. } => Some(thread),
             ExecutionEvent::ConversationPlanChanged { thread, .. } => Some(thread),
@@ -633,6 +684,7 @@ impl Feature for ExecutionFeature {
             match event {
                 ExecutionEvent::ShellJobChanged { .. } | ExecutionEvent::ShellJobOutput { .. } => {}
                 ExecutionEvent::ToolStarted { .. } | ExecutionEvent::ToolFinished { .. } => (),
+                ExecutionEvent::BtwChanged { .. } => {}
                 ExecutionEvent::RunChanged { run } => {
                     self.runs_stale = true;
                     // The ledger and goal shown belong to the thread's current root:
@@ -755,6 +807,9 @@ impl Feature for ExecutionFeature {
                     self.want_name(target.thread, target.run);
                 }
             }
+            (Pending::Btw { thread, operation }, FeatureReply::Query(reply)) => {
+                self.btw.read(&thread, &operation, reply);
+            }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
                 self.status = format!("{label}: accepted");
                 self.runs_stale = true;
@@ -784,6 +839,9 @@ impl Feature for ExecutionFeature {
                 tag,
                 Query::Execution(ExecutionQuery::ReadShellOutput(request)),
             );
+        }
+        if visibility.available {
+            self.send_btw(ctx);
         }
         let selected = ctx.selection().thread.clone();
         if selected != self.thread {

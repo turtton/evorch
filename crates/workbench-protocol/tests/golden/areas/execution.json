@@ -1,4 +1,33 @@
 {
+  "command/execution/ask_btw": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "question": "what did you just change?",
+        "thread": "thread-1"
+      },
+      "type": "ask_btw"
+    },
+    "type": "execution"
+  },
+  "command/execution/cancel_btw": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "cancel_btw"
+    },
+    "type": "execution"
+  },
+  "query/execution/get_btw": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_btw"
+    },
+    "type": "execution"
+  },
   "query/execution/get_conversation_plan": {
     "payload": {
       "payload": {
@@ -80,6 +109,28 @@
         "thread": "thread-1"
       },
       "type": "read_conversation_plan_tree"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/btw": {
+    "payload": {
+      "payload": {
+        "answer": "**done**",
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        },
+        "source": {
+          "run": "run-1",
+          "settled": true
+        },
+        "thread": "thread-1",
+        "truncated": false
+      },
+      "type": "btw"
     },
     "type": "execution"
   },
@@ -333,6 +384,22 @@
         "thread": "thread-1"
       },
       "type": "thread_execution"
+    },
+    "type": "execution"
+  },
+  "ui_event/execution/btw_changed": {
+    "payload": {
+      "payload": {
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        },
+        "thread": "thread-1"
+      },
+      "type": "btw_changed"
     },
     "type": "execution"
   },

@@ -1,6 +1,8 @@
 //! Execution namespace adapter: stopping runs, goals, execution settings and
 //! CLI invocations.
-use workbench_protocol::commands::{CommandReply, CommandResult, ComposerRole, SendChat};
+use workbench_protocol::commands::{
+    CommandDisposition, CommandReply, CommandResult, ComposerRole, SendChat,
+};
 use workbench_protocol::envelope::{Actor, Provenance, Surface};
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::ids::{ClientId, ProjectId, SubmissionId, ThreadId};
@@ -21,7 +23,7 @@ impl CommandHost {
         &mut self,
         command: ExecutionCommand,
         provenance: &Provenance,
-        _restart: crate::bootstrap::restart::HostCommandPermit,
+        restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         let host_command = match command {
             ExecutionCommand::StopChat(target) => HostCommand::StopChat {
@@ -51,9 +53,28 @@ impl CommandHost {
             ExecutionCommand::EndInvocation(end) => {
                 return self.end_invocation(&end, provenance);
             }
+            ExecutionCommand::AskBtw(ask) => {
+                let root = self.service.bindings.root_of(ask.thread.as_str());
+                let accepted = self.areas.execution.ask_btw(root, &ask, restart)?;
+                return Ok(btw_reply(accepted));
+            }
+            ExecutionCommand::CancelBtw(cancel) => {
+                let accepted = self.areas.execution.cancel_btw(&cancel.operation_id)?;
+                return Ok(btw_reply(accepted));
+            }
         };
         self.run_host_command(host_command, provenance)
     }
+}
+
+fn btw_reply(accepted: crate::areas::execution::side_commands::AcceptedBtw) -> CommandReply {
+    let mut reply = CommandReply::with_result(CommandResult::Execution(ExecutionResult::Btw(
+        accepted.view.operation,
+    )));
+    if accepted.already_applied {
+        reply.disposition = CommandDisposition::AlreadyApplied;
+    }
+    reply
 }
 
 /// The client of an invocation request: a human on the local CLI surface.
@@ -314,6 +335,19 @@ impl CommandHost {
                 Ok(QueryReply::Execution(ExecutionReply::Invocation(Box::new(
                     view,
                 ))))
+            }
+            workbench_protocol::namespaces::ExecutionQuery::GetBtw(get) => {
+                let view = self.areas.execution.get_btw(&get.operation_id)?;
+                // A deleted thread keeps no side question to read.
+                if self
+                    .service
+                    .bindings
+                    .root_of(view.thread.as_str())
+                    .is_none()
+                {
+                    return Err(reject_error(RejectKind::NotFound, "unknown side question"));
+                }
+                Ok(QueryReply::Execution(ExecutionReply::Btw(Box::new(view))))
             }
             _ => self.areas.execution.query(query, namespace_query),
         }

@@ -17,10 +17,13 @@ use serde::{Deserialize, Serialize};
 pub mod invocation;
 pub mod plan;
 pub mod shell;
+pub mod side_commands;
+use crate::operation::OperationView;
 pub use invocation::{
     EndInvocation, GetInvocation, InvocationEnded, InvocationStarted, InvocationView,
     StartInvocation,
 };
+pub use side_commands::{AskBtw, BtwSource, BtwView, CancelBtw, GetBtw};
 
 pub const COMMAND_OPERATIONS: &[&str] = &[
     "stop_chat",
@@ -31,6 +34,8 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "set_agent_web_tools_enabled",
     "start_invocation",
     "end_invocation",
+    "ask_btw",
+    "cancel_btw",
 ];
 pub const QUERY_OPERATIONS: &[&str] = &[
     "list_runs",
@@ -43,6 +48,7 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "read_conversation_plan_history",
     "get_invocation",
     "read_shell_output",
+    "get_btw",
 ];
 pub const EVENT_TYPES: &[&str] = &[
     "run_changed",
@@ -52,6 +58,7 @@ pub const EVENT_TYPES: &[&str] = &[
     "shell_job_output",
     "thread_execution_changed",
     "conversation_plan_changed",
+    "btw_changed",
 ];
 /// Tagged choices inside a command's payload that classification names (none).
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
@@ -281,6 +288,8 @@ pub enum ExecutionCommand {
     SetAgentWebToolsEnabled(SetAgentWebToolsEnabled),
     StartInvocation(StartInvocation),
     EndInvocation(EndInvocation),
+    AskBtw(AskBtw),
+    CancelBtw(CancelBtw),
 }
 
 impl ExecutionCommand {
@@ -292,7 +301,9 @@ impl ExecutionCommand {
         match self {
             Self::SubmitGoal(goal) => goal.validate(),
             Self::StartInvocation(start) => start.validate(),
+            Self::AskBtw(ask) => ask.validate(),
             Self::StopChat(_)
+            | Self::CancelBtw(_)
             | Self::StopRun(_)
             | Self::EndInvocation(_)
             | Self::SetGoalReview(_)
@@ -312,6 +323,8 @@ impl ExecutionCommand {
 pub enum ExecutionResult {
     InvocationStarted(InvocationStarted),
     InvocationEnded(InvocationEnded),
+    /// A side question was accepted or cancelled; read it with `get_btw`.
+    Btw(OperationView),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +348,7 @@ pub enum ExecutionQuery {
     ReadConversationPlanHistory(plan::PlanHistoryQuery),
     GetInvocation(GetInvocation),
     ReadShellOutput(shell::ReadShellOutput),
+    GetBtw(GetBtw),
 }
 
 impl ExecutionQuery {
@@ -347,7 +361,7 @@ impl ExecutionQuery {
             Self::ListRuns(q) => q.page.validate(),
             Self::ListRunDetails(q) => q.page.validate(),
             Self::GetRun(_) | Self::GetThreadExecution(_) | Self::GetConversationPlan(_) => Ok(()),
-            Self::GetInvocation(_) => Ok(()),
+            Self::GetInvocation(_) | Self::GetBtw(_) => Ok(()),
             Self::ReadShellOutput(q) => q.validate(),
             Self::ReadConversationPlanTree(q) => {
                 plan::limit(q.limit, 100)?;
@@ -379,6 +393,7 @@ pub enum ExecutionReply {
     ConversationPlanHistory(Box<plan::PlanHistoryPage>),
     Invocation(Box<InvocationView>),
     ShellOutput(shell::ShellOutput),
+    Btw(Box<BtwView>),
 }
 
 impl ExecutionReply {
@@ -394,6 +409,7 @@ impl ExecutionReply {
             Self::ConversationPlanHistory(v) => v.validate(),
             Self::Invocation(v) => v.validate(),
             Self::ShellOutput(v) => v.validate(),
+            Self::Btw(v) => v.validate(),
         }
     }
 }
@@ -435,6 +451,11 @@ pub enum ExecutionEvent {
     },
     RunChanged {
         run: RunSummary,
+    },
+    /// A side question changed. Invalidation only, without the answer: read it with `get_btw`.
+    BtwChanged {
+        thread: ThreadId,
+        operation: OperationView,
     },
     /// The goal of a thread changed; absent means none now.
     ThreadExecutionChanged {
@@ -507,6 +528,7 @@ impl ExecutionEvent {
                 check_bytes("call_id", call_id, MAX_NAME_BYTES, false)
             }
             Self::RunChanged { .. } | Self::ConversationPlanChanged { .. } => Ok(()),
+            Self::BtwChanged { operation, .. } => operation.validate(),
             Self::ThreadExecutionChanged { goal, .. } => {
                 goal.as_ref().map_or(Ok(()), GoalView::validate)
             }

@@ -1,6 +1,6 @@
 //! The slash commands the core client carries out, with the embedded workbench's
-//! wording. A command the protocol has no way to carry (`/btw`, `/run`, external
-//! commands) is not offered and reads as unknown.
+//! wording. A command the core client has no way to carry (external commands) is not
+//! offered and reads as unknown.
 use workbench_protocol::commands::{
     Command, ComposerRole, ContinueChat, Delegation, SubmitGoal, ThreadTarget,
 };
@@ -10,7 +10,16 @@ use workbench_protocol::namespaces::{ConversationCommand, ExecutionCommand};
 use crate::composer_input::slash::{ComposerInput, help_text_among, parse_input};
 
 /// The built-in commands offered here, in the embedded workbench's order.
-pub(super) const OFFERED: &[&str] = &["team", "goal", "help", "new", "compaction", "continue"];
+pub(super) const OFFERED: &[&str] = &[
+    "team",
+    "goal",
+    "help",
+    "new",
+    "compaction",
+    "continue",
+    "run",
+    "btw",
+];
 
 pub(super) struct Ctx<'a> {
     pub project: &'a ProjectId,
@@ -33,6 +42,11 @@ pub(super) enum Outcome {
     Usage(String),
     /// A new conversation in the project; the draft is cleared.
     NewConversation,
+    /// A side question about the thread, asked without joining its conversation.
+    Btw(String),
+    /// A background Worker run in a new thread of the project, started without
+    /// leaving the screen.
+    Run(String),
 }
 
 pub(super) fn dispatch(text: &str, ctx: &Ctx<'_>) -> Outcome {
@@ -59,6 +73,11 @@ pub(super) fn dispatch(text: &str, ctx: &Ctx<'_>) -> Outcome {
                 model_preference: None,
             }),
         ))),
+        "btw" if args.is_empty() => Outcome::Usage("usage: /btw <question>".into()),
+        "btw" if !ctx.exists => Outcome::Usage("Select or start a thread first".into()),
+        "btw" => Outcome::Btw(args.into()),
+        "run" if args.is_empty() => Outcome::Usage("usage: /run <text>".into()),
+        "run" => Outcome::Run(args.into()),
         "goal" if args.is_empty() => Outcome::Usage("usage: /goal <text>".into()),
         "goal" => goal(ctx, args, None),
         "team" => match args.split_once('|') {
@@ -169,8 +188,9 @@ mod tests {
             ),
             ("/compaction now", true, "usage: /compaction"),
             ("/compaction", false, "Select or start a thread first"),
-            ("/btw why?", true, "unknown command /btw — type /help"),
-            ("/run x", true, "unknown command /run — type /help"),
+            ("/btw", true, "usage: /btw <question>"),
+            ("/btw why?", false, "Select or start a thread first"),
+            ("/run", true, "usage: /run <text>"),
             ("/continue now", true, "usage: /continue"),
             ("/continue", false, "Select or start a thread first"),
             ("/foo", true, "unknown command /foo — type /help"),
@@ -204,11 +224,11 @@ mod tests {
             panic!("help")
         };
         assert!(help.starts_with("/team <delegation value> | <goal> — "));
-        assert!(
-            help.ends_with("/continue — Resume the current conversation after a stop or error")
-        );
-        assert!(!help.contains("/btw") && !help.contains("/run"));
+        assert!(help.contains("/continue — Resume the current conversation after a stop or error"));
+        assert!(help.contains("/run <text> — ") && help.contains("/btw <question> — "));
         assert_eq!(run("/new", false), Outcome::NewConversation);
+        assert_eq!(run("/btw  why? ", true), Outcome::Btw("why?".into()));
+        assert_eq!(run("/run  fix it ", false), Outcome::Run("fix it".into()));
         assert_eq!(run("hello /goal", true), Outcome::Chat);
         assert_eq!(run("", true), Outcome::Chat);
     }

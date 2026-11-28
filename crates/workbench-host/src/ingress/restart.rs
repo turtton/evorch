@@ -97,7 +97,8 @@ pub(super) fn command_access(
         Command::Execution(
             ExecutionCommand::StopChat(_)
             | ExecutionCommand::StopRun(_)
-            | ExecutionCommand::EndInvocation(_),
+            | ExecutionCommand::EndInvocation(_)
+            | ExecutionCommand::CancelBtw(_),
         ) => CommandAccess::Stop,
         Command::Lifecycle(workbench_protocol::namespaces::LifecycleCommand::Restart(
             workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Cancel(_),
@@ -124,8 +125,9 @@ mod tests {
         ThreadTarget, WithdrawFollowUp,
     };
     use workbench_protocol::ids::{
-        ApprovalId, ProjectId, QuestionId, RunId, SubmissionId, ThreadId,
+        ApprovalId, OperationId, ProjectId, QuestionId, RunId, SubmissionId, ThreadId,
     };
+    use workbench_protocol::namespaces::execution::{AskBtw, CancelBtw};
     use workbench_protocol::namespaces::{ApprovalsCommand, QuestionsCommand};
     use workbench_protocol::wire::{InstanceEpoch, Revision};
 
@@ -235,6 +237,23 @@ mod tests {
                 not_chat
             )),
             "new"
+        );
+        // A side question is new work and its cancel only stops, so a planned restart
+        // refuses the first and always lets the second through.
+        let btw = |command| name(command_access(&Command::Execution(command), not_chat));
+        assert_eq!(
+            btw(ExecutionCommand::AskBtw(AskBtw {
+                operation_id: OperationId::new("o").unwrap(),
+                thread: ThreadId::new("t").unwrap(),
+                question: "why?".into(),
+            })),
+            "new"
+        );
+        assert_eq!(
+            btw(ExecutionCommand::CancelBtw(CancelBtw {
+                operation_id: OperationId::new("o").unwrap(),
+            })),
+            "stop"
         );
     }
 }

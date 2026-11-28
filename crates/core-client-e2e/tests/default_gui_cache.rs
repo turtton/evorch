@@ -30,11 +30,20 @@ use evorch_core::{backend::HostBackend, instance::Instance, unix};
 use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
-use workbench_host::areas::{Areas, execution::ExecutionArea};
+use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
+use workbench_host::areas::{AreaTasks, Areas, execution::ExecutionArea};
 use workbench_host::{CommandHost, commands::CommandService, projects::StaticProjects};
-use workbench_protocol::commands::{Command, ComposerRole, SendChat};
-use workbench_protocol::ids::{ProjectId, SubmissionId, ThreadId};
-use workbench_protocol::namespaces::ConversationCommand;
+use workbench_protocol::commands::{Command, CommandResult, ComposerRole, SendChat};
+use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
+use workbench_protocol::handshake::BuildInfo;
+use workbench_protocol::ids::{ClientId, OperationId, ProjectId, SubmissionId, ThreadId};
+use workbench_protocol::namespaces::execution::{AskBtw, GetBtw};
+use workbench_protocol::namespaces::{
+    ConversationCommand, ExecutionCommand, ExecutionEvent, ExecutionQuery, ExecutionReply,
+    ExecutionResult,
+};
+use workbench_protocol::operation::OperationState;
+use workbench_protocol::queries::{Query, QueryReply};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -184,15 +193,15 @@ impl Core {
             .with_team_writer(bridge.handle());
         let mut projects = StaticProjects::default();
         projects.insert(&ProjectId::new("project").unwrap(), dir.path().into());
+        let host = CommandHost::new(service).with_projects(projects);
         let areas = Areas {
-            execution: ExecutionArea::with_runtime(runtime.clone()),
+            execution: ExecutionArea::with_runtime(runtime.clone()).with_side_questions(
+                AreaTasks::new(tokio::runtime::Handle::current()),
+                host.projection().source("execution").unwrap(),
+            ),
             ..Areas::default()
         };
-        let host = Arc::new(Mutex::new(
-            CommandHost::new(service)
-                .with_projects(projects)
-                .with_areas(areas),
-        ));
+        let host = Arc::new(Mutex::new(host.with_areas(areas)));
         let identity = core_instance::ConfigIdentity::new(&dir.path().join("config")).unwrap();
         let instance = Instance::acquire(
             &core_instance::LaunchGuard::acquire(&identity).unwrap(),
@@ -593,6 +602,179 @@ async fn a_skill_mentioned_in_the_default_window_joins_only_its_own_turn() {
     assert!(users[2][2].starts_with("third plain") && !users[2][2].contains(SKILL_BLOCK));
 
     // The actor ends on Shutdown; its end is what is awaited, not a duration.
+    actions.send(Action::Shutdown).await.unwrap();
+    window.await.expect("the actor does not panic");
+    core.finish();
+}
+
+const SIDE_QUESTION: &str = "side question: which file did you read?";
+const SIDE_ANSWER: &str = "side answer: none yet";
+
+fn side_texts(body: &serde_json::Value) -> String {
+    body["messages"].to_string()
+}
+
+// A side question asked through the core between two turns of the window's conversation:
+// the request it makes is the first turn's context plus the question (tools kept, only
+// tool calls forbidden), and neither the question nor its answer reaches the second
+// turn, which extends the first and reads its whole input back as cache.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_side_question_between_two_turns_leaves_the_model_prefix_alone() {
+    let mut core = Core::start(
+        vec![
+            ScriptedResponse::text_stream("first", "mock-model", ["hello"]),
+            ScriptedResponse::text_stream("side", "mock-model", [SIDE_ANSWER]),
+            ScriptedResponse::text_stream("second", "mock-model", ["continued"]),
+        ],
+        &[],
+    )
+    .await;
+    let (actions, rx) = tokio::sync::mpsc::channel(64);
+    let shared = Arc::new(Mutex::new(Shared::default()));
+    let window = tokio::spawn(serve(
+        core.new_launcher(),
+        rx,
+        shared.clone(),
+        egui::Context::default(),
+    ));
+    connected(&shared).await;
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::CreateExecution(chat(
+                "one",
+                "first prompt",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    let first_usage = turn_usage(&mut core.turns).await;
+
+    // What the window's composer sends as `/btw`, from a client of its own so that the
+    // wait is for the operation's change event.
+    let client = WorkbenchClient::connect(
+        UnixTransport::connect(&core.instance.socket).await.unwrap(),
+        ClientConfig::new(
+            ClientId::new("btw-test").unwrap(),
+            BuildInfo {
+                name: "test".into(),
+                version: "1".into(),
+                revision: None,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let mut subscription = client
+        .subscribe(Subscribe {
+            scope: SubscriptionScope::All,
+            after: None,
+        })
+        .await
+        .unwrap();
+    let operation = OperationId::new("btw-1").unwrap();
+    let reply = client
+        .command(Command::Execution(ExecutionCommand::AskBtw(AskBtw {
+            operation_id: operation.clone(),
+            thread: ThreadId::new("thread").unwrap(),
+            question: SIDE_QUESTION.into(),
+        })))
+        .await
+        .unwrap();
+    let Some(CommandResult::Execution(ExecutionResult::Btw(accepted))) = reply.result.as_deref()
+    else {
+        panic!("the accepted operation: {reply:?}");
+    };
+    assert_eq!(accepted.operation_id, operation);
+    let mut announced = vec![serde_json::to_string(&reply).unwrap()];
+    loop {
+        let event = subscription
+            .next()
+            .await
+            .expect("the subscription stays open");
+        if let UiEvent::Execution(ExecutionEvent::BtwChanged {
+            operation: changed, ..
+        }) = &event.event
+            && changed.operation_id == operation
+            && changed.state.is_final()
+        {
+            announced.push(serde_json::to_string(&event).unwrap());
+            break;
+        }
+    }
+    let QueryReply::Execution(ExecutionReply::Btw(view)) = client
+        .query(Query::Execution(ExecutionQuery::GetBtw(GetBtw {
+            operation_id: operation.clone(),
+        })))
+        .await
+        .unwrap()
+    else {
+        panic!("the side question's view");
+    };
+    assert_eq!(view.operation.state, OperationState::Ready);
+    assert_eq!(view.answer.as_deref(), Some(SIDE_ANSWER));
+    assert!(view.source.as_ref().is_some_and(|source| source.settled));
+    for text in announced {
+        assert!(
+            !text.contains(SIDE_ANSWER) && !text.contains(SIDE_QUESTION),
+            "{text}"
+        );
+    }
+
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::SendChat(chat(
+                "two",
+                "second prompt",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    let later_usage = turn_usage(&mut core.turns).await;
+
+    let requests: Vec<_> = core
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.path.contains("completions"))
+        .map(|r| r.body)
+        .collect();
+    assert_eq!(requests.len(), 3, "first turn, side question, second turn");
+    let (first, side, second) = (&requests[0], &requests[1], &requests[2]);
+    assert_append_only(CacheProtocol::OpenAi, first, second).unwrap();
+    let side_messages = side["messages"].as_array().unwrap();
+    let first_messages = first["messages"].as_array().unwrap();
+    assert_eq!(side_messages[..first_messages.len()], first_messages[..]);
+    assert!(
+        side_messages
+            .last()
+            .unwrap()
+            .to_string()
+            .contains(SIDE_QUESTION)
+    );
+    for key in ["model", "tools", "prompt_cache_key"] {
+        assert_eq!(side.get(key), first.get(key), "{key}");
+        assert_eq!(second.get(key), first.get(key), "{key}");
+    }
+    assert_eq!(side["tool_choice"], "none");
+    assert_ne!(second.get("tool_choice"), Some(&serde_json::json!("none")));
+    for request in [first, second] {
+        let text = side_texts(request);
+        assert!(
+            !text.contains(SIDE_QUESTION) && !text.contains(SIDE_ANSWER),
+            "{text}"
+        );
+    }
+    // The mock's cache is derived from each request's own bytes: the second turn reads the
+    // first turn's whole input back although the side request came in between.
+    let (first_input, _) = *first_usage.last().unwrap();
+    let (_, second_cached) = *later_usage.last().unwrap();
+    assert!(
+        second_cached >= first_input,
+        "{first_usage:?} {later_usage:?}"
+    );
+
     actions.send(Action::Shutdown).await.unwrap();
     window.await.expect("the actor does not panic");
     core.finish();

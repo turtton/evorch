@@ -24,6 +24,7 @@ use workbench_protocol::views::{Page, RunPhase, RunRole, RunSummary};
 use workbench_protocol::wire::{Revision, Sequence, UnixMillis};
 
 mod plan;
+pub mod side_commands;
 use super::{AreaHandles, ProjectionSource};
 use crate::bootstrap::BootstrapError;
 use crate::queries::{Pager, error, revision, storage_error, text};
@@ -34,12 +35,14 @@ use crate::queries::{Pager, error, revision, storage_error, text};
 pub struct ExecutionArea {
     runtime: Option<AgentRuntime>,
     pager: Pager,
+    side_questions: Option<side_commands::SideQuestions>,
 }
 
 impl ExecutionArea {
     pub(super) fn new(handles: &AreaHandles) -> Result<Self, BootstrapError> {
-        let area = Self::with_runtime(handles.runtime.clone());
         let source = handles.source("execution")?;
+        let area = Self::with_runtime(handles.runtime.clone())
+            .with_side_questions(handles.tasks.clone(), source.clone());
         let runtime = handles.runtime.clone();
         let mut events = handles.bus.subscribe();
         handles
@@ -68,7 +71,60 @@ impl ExecutionArea {
         Self {
             runtime: Some(runtime),
             pager: Pager::default(),
+            side_questions: None,
         }
+    }
+
+    /// Accept a side question about `thread`, whose conversation root is `root`.
+    ///
+    /// # Errors
+    /// As [`side_commands::SideQuestions::ask`]; `UnsupportedCapability` without a wired service.
+    pub fn ask_btw(
+        &self,
+        root: Option<runtime::RunId>,
+        ask: &workbench_protocol::namespaces::execution::AskBtw,
+        accepted: crate::bootstrap::restart::HostCommandPermit,
+    ) -> Result<side_commands::AcceptedBtw, WorkbenchError> {
+        self.side_questions()?
+            .ask(self.runtime()?, root, ask, accepted)
+    }
+
+    /// # Errors
+    /// `NotFound` for an unknown side question.
+    pub fn cancel_btw(
+        &self,
+        id: &workbench_protocol::ids::OperationId,
+    ) -> Result<side_commands::AcceptedBtw, WorkbenchError> {
+        self.side_questions()?.cancel(id)
+    }
+
+    /// # Errors
+    /// `NotFound` for an unknown side question.
+    pub fn get_btw(
+        &self,
+        id: &workbench_protocol::ids::OperationId,
+    ) -> Result<workbench_protocol::namespaces::execution::BtwView, WorkbenchError> {
+        self.side_questions()?.get(id)
+    }
+
+    fn side_questions(&self) -> Result<&side_commands::SideQuestions, WorkbenchError> {
+        self.side_questions.as_ref().ok_or_else(|| {
+            error(
+                ErrorCode::UnsupportedCapability,
+                "side questions are not available in this host",
+            )
+        })
+    }
+
+    /// The same service with side questions answered by tasks of `tasks`, which tell
+    /// their changes through `source`.
+    pub fn with_side_questions(
+        mut self,
+        tasks: super::AreaTasks,
+        source: ProjectionSource,
+    ) -> Self {
+        self.side_questions = Some(side_commands::SideQuestions::new(tasks, source));
+        self
     }
 
     fn runtime(&self) -> Result<&AgentRuntime, WorkbenchError> {
@@ -111,7 +167,7 @@ impl ExecutionArea {
             ExecutionQuery::GetThreadExecution(target) => ExecutionReply::ThreadExecution(
                 Box::new(thread_execution(runtime, &target.thread)?),
             ),
-            ExecutionQuery::GetInvocation(_) => {
+            ExecutionQuery::GetInvocation(_) | ExecutionQuery::GetBtw(_) => {
                 return Err(error(
                     ErrorCode::InvalidRequest,
                     "answered by the invocation registry",
