@@ -472,7 +472,7 @@ async fn a_skill_mentioned_in_the_default_window_joins_only_its_own_turn() {
             .contains(&"demo".to_owned())
     );
     let named = |text: &str| -> Vec<String> {
-        let listed = vec!["demo".to_owned()];
+        let listed = ["demo".to_owned()];
         text.split_whitespace()
             .filter_map(|word| word.strip_prefix('@'))
             .filter(|name| listed.iter().any(|skill| skill == name))

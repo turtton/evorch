@@ -203,7 +203,10 @@ pub(super) fn composer(
                 // against the focus the editor held at the end of the last one.
                 let was_focused = pane.was_focused;
                 let focused = ui.memory(|memory| memory.has_focus(input_id));
-                let items = completions(ui, pane, io, project, thread, ime, focused, effects);
+                let items = completions(ui, pane, io, thread, ime, focused);
+                if std::mem::take(&mut pane.skills.refresh_wanted) {
+                    effects.push(Effect::RefreshSkills(project.clone()));
+                }
                 // As in the embedded workbench, open completions hide the working
                 // root's Stop and Queue; Stop subagents stays.
                 let completing = !items.is_empty();
@@ -369,22 +372,18 @@ fn completions(
     ui: &mut Ui,
     pane: &mut ConversationPane,
     io: &mut ConversationIo<'_>,
-    project: &ProjectId,
     thread: &ThreadId,
     ime: bool,
     focused: bool,
-    effects: &mut Vec<Effect>,
 ) -> Vec<CompletionItem> {
     let text = io
         .drafts
         .get(thread.as_str())
         .map_or("", |draft| draft.text.as_str());
     let mention = mention_query(text, pane.completion.cursor).is_some();
-    if pane.mentions.refresh(ui.ctx(), mention) {
-        // The skills offered are read again each time a mention starts, so a skill
-        // added meanwhile completes without a watcher.
-        effects.push(Effect::RefreshSkills(project.clone()));
-    }
+    // The skills offered are read again each time a mention starts, so a skill
+    // added meanwhile completes without a watcher.
+    pane.skills.refresh_wanted |= pane.mentions.refresh(ui.ctx(), mention);
     let items = pane.completion.items(text, OFFERED, &pane.mentions.index);
     let state = &mut pane.completion;
     state.selected = state.selected.min(items.len().saturating_sub(1));

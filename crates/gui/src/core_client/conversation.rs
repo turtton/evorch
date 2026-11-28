@@ -54,6 +54,8 @@ struct SkillsKnown {
     project: Option<ProjectId>,
     state: Option<ProjectSkills>,
     fetching: bool,
+    /// A mention started in the composer: the list is to be asked for again.
+    refresh_wanted: bool,
 }
 
 pub struct ConversationPane {
