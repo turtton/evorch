@@ -146,6 +146,31 @@ impl Core {
             ),
         )
         .unwrap();
+        Self::boot(dir, mock).await
+    }
+
+    /// A planned restart of the core: the listening process goes away and a new one starts over
+    /// the same storage, config and provider. What it knows of the inputs is what it reads.
+    async fn restart(self) -> Self {
+        let Self {
+            mock,
+            stop,
+            socket_task,
+            instance,
+            _dir,
+            _bridge,
+            ..
+        } = self;
+        stop.send(true).unwrap();
+        socket_task.abort();
+        let _ = socket_task.await;
+        drop(instance);
+        drop(_bridge);
+        Self::boot(_dir, mock).await
+    }
+
+    /// The core's parts over `dir`, which holds its config and database.
+    async fn boot(dir: test_socket_dir::SplitDir, mock: StreamingMockOpenAi) -> Self {
         let config = config::Config::load(&config::LoadOptions {
             user_config_dir: Some(dir.path().into()),
             read_env: false,
@@ -1329,6 +1354,97 @@ async fn an_unknown_input_is_restorable_by_a_new_window_with_its_attachment_coun
     assert_eq!(draft.text, "look at the screenshot");
     assert_eq!(draft.state, Unknown);
     assert!(!draft.text.contains('/'), "no attachment path in the words");
+
+    drop(release);
+    actions.send(Action::Shutdown).await.unwrap();
+    tokio::time::timeout(WAIT, window)
+        .await
+        .expect("the actor ends when the window is closed")
+        .expect("the actor does not panic");
+    core.finish();
+}
+
+// Given: a follow-up with an image, queued behind a held turn, and a core restarted over the
+//        same storage that marks the run's inputs `Unknown` as the owner registry does
+// When: a new window reads the receipts and asks for the words
+// Then: the preview, the counts and the whole words come back from the new core alone
+#[tokio::test(flavor = "multi_thread")]
+async fn a_planned_core_restart_keeps_a_queued_input_restorable() {
+    let (gate, arrived) = mock_openai::ResponseGate::new();
+    let release = ReleaseOnDrop(gate.clone());
+    let core = Core::start(
+        vec![ScriptedResponse::text_stream("first", "mock-model", ["hello"]).with_gate(gate)],
+        &[],
+    )
+    .await;
+    let (actions, _shared, first_window) = window(&core).await;
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::CreateExecution(chat(
+                "one",
+                "first prompt",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+        .await
+        .unwrap();
+    let client = protocol_client(&core, "e7-restart").await;
+    let image = upload(&client, "shot.png", "image/png").await;
+    let mut follow_up = chat("queued", "look at the screenshot again");
+    follow_up.attachments = vec![image];
+    let accepted = client
+        .command(Command::Conversation(ConversationCommand::SendChat(
+            follow_up,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(accepted.disposition, CommandDisposition::Accepted);
+    let run = accepted.run_id.unwrap();
+    drop(client);
+    actions.send(Action::Shutdown).await.unwrap();
+    tokio::time::timeout(WAIT, first_window)
+        .await
+        .expect("the actor ends when the window is closed")
+        .expect("the actor does not panic");
+
+    let core = core.restart().await;
+    core._bridge
+        .handle()
+        .mark_host_inputs_unknown(run.as_str(), "the core restarted")
+        .unwrap();
+
+    let (actions, shared, window) = window(&core).await;
+    actions
+        .send(Action::History(
+            ThreadId::new("thread").unwrap(),
+            None,
+            false,
+        ))
+        .await
+        .unwrap();
+    use workbench_protocol::views::InputReceiptState::Unknown;
+    until(&shared, "the unknown input with its preview", |s| {
+        receipt_in(s, "queued", Unknown).is_some_and(|r| r.preview.is_some())
+    })
+    .await;
+    let preview = receipt_in(&shared.lock().unwrap(), "queued", Unknown)
+        .unwrap()
+        .preview
+        .unwrap();
+    assert_eq!(
+        (
+            preview.text.as_str(),
+            preview.image_count,
+            preview.attachment_count
+        ),
+        ("look at the screenshot again", 1, 1)
+    );
+    let draft = read_draft(&protocol_client(&core, "e7-restart-2").await, "queued").await;
+    assert_eq!(draft.text, "look at the screenshot again");
+    assert_eq!((draft.state, draft.image_count), (Unknown, 1));
 
     drop(release);
     actions.send(Action::Shutdown).await.unwrap();
