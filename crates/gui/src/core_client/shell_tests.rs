@@ -321,6 +321,10 @@ struct Screen {
 }
 
 thread_local! {
+    /// The default model and the profiles the model catalog of every project lists, for
+    /// the screen the test thread built last; no profile unless a test sets some.
+    static MODEL_FIXTURE: std::cell::RefCell<(String, Vec<workbench_protocol::namespaces::settings::ModelProfileChoice>)> =
+        std::cell::RefCell::new(("fixture/default".into(), Vec::new()));
     /// Lanes queries a settle saw and did not answer, for the screen the test thread built
     /// last: the sidebar's rows look their lanes up by themselves, and
     /// [`Screen::settle_lanes_with`] answers them.
@@ -358,6 +362,7 @@ fn screen_from_outbox(
 ) -> Screen {
     let (tx, actions) = tokio::sync::mpsc::channel(capacity);
     HELD_LANE_QUERIES.with_borrow_mut(Vec::clear);
+    MODEL_FIXTURE.with_borrow_mut(|fixture| *fixture = ("fixture/default".into(), Vec::new()));
     let mut populated = populated();
     patch(&mut populated);
     let shared = Arc::new(Mutex::new(populated));
@@ -410,9 +415,10 @@ impl Screen {
                         request: FeatureRequest::Query(Query::Settings(workbench_protocol::namespaces::settings::SettingsQuery::ModelChoices { project })),
                     }) => {
                         use workbench_protocol::namespaces::settings::{SettingsReply, ProjectModelChoices, RoleModelChoice};
-                        let role = RoleModelChoice { model: "fixture/default".into(), reasoning_effort: None };
+                        let (model, profiles) = MODEL_FIXTURE.with_borrow(Clone::clone);
+                        let role = RoleModelChoice { model, reasoning_effort: None };
                         let reply = FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::ModelChoices(ProjectModelChoices {
-                            project, profiles: Vec::new(), worker: role.clone(), orchestrator: role,
+                            project, profiles, worker: role.clone(), orchestrator: role,
                         }))));
                         self.shared.lock().unwrap().features.reply(FeatureId::Workspace, tag, reply);
                         answered = true;

@@ -202,14 +202,16 @@ pub(super) fn composer(
                 // root's Stop and Queue; Stop subagents stays.
                 let completing = !items.is_empty();
                 let can_stop = (activity.root_active && !completing) || activity.stopped;
-                selectors(ui, pane);
-                let can_choose = !pane.model_saving && !io.sending.contains(thread.as_str()) && io.connected;
-                if let Some(choice) = pane.model_picker.show(ui, pane.model_catalog.as_ref(), &pane.model_choice, pane.composer_role == ComposerRole::Orchestrator, can_choose) {
+                let can_choose = !pane.model_saving
+                    && !io.sending.contains(thread.as_str())
+                    && io.connected;
+                if let Some(choice) = selectors(ui, pane, can_choose) {
                     if io.cache.threads.contains_key(thread.as_str()) {
                         pane.model_saving = true;
                         effects.push(Effect::ModelChoice(thread.clone(), choice));
                     } else {
-                        pane.draft_model_choices.insert(thread.to_string(), choice.clone());
+                        pane.draft_model_choices
+                            .insert(thread.to_string(), choice.clone());
                         pane.model_choice = choice;
                     }
                 }
@@ -388,7 +390,9 @@ fn completions(
     items
 }
 
-fn selectors(ui: &mut Ui, pane: &mut ConversationPane) {
+/// The role, the model and the team objective in one wrapping row, in that order;
+/// returns the model chosen in this frame.
+fn selectors(ui: &mut Ui, pane: &mut ConversationPane, can_choose: bool) -> Option<ModelChoice> {
     ui.horizontal_wrapped(|ui| {
         let (icon, label) = match pane.composer_role {
             ComposerRole::Worker => (icons::ROBOT, "Worker"),
@@ -406,6 +410,13 @@ fn selectors(ui: &mut Ui, pane: &mut ConversationPane) {
                 ComposerRole::Orchestrator => ComposerRole::Worker,
             };
         }
+        let chosen = pane.model_picker.show(
+            ui,
+            pane.model_catalog.as_ref(),
+            &pane.model_choice,
+            pane.composer_role == ComposerRole::Orchestrator,
+            can_choose,
+        );
         ui.toggle_value(
             &mut pane.team,
             icons::with_icon(icons::USERS_THREE, "Team objective"),
@@ -413,7 +424,9 @@ fn selectors(ui: &mut Ui, pane: &mut ConversationPane) {
         .on_hover_text(
             "Send the message as an objective for a team. Attachments are not supported.",
         );
-    });
+        chosen
+    })
+    .inner
 }
 
 /// The "+" left of the input opens the file picker; it waits while the thread's

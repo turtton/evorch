@@ -4,6 +4,9 @@ use runtime::compose::ProfileSummary;
 use workbench_protocol::commands::{ModelChoice, ModelPreference};
 use workbench_protocol::namespaces::settings::{ProjectModelChoices, ProviderKind};
 
+/// Widest the model button grows in the composer; a longer model name is elided.
+pub const MAX_BUTTON_WIDTH: f32 = 260.0;
+
 #[derive(Default)]
 pub struct CoreModelPicker {
     state: ModelPickerState,
@@ -80,7 +83,14 @@ impl CoreModelPicker {
             Some(effort) => format!("{} · {effort}", d.model),
             None => d.model.clone(),
         });
-        let result = super::model_picker::model_picker(
+        // The note that used to be a line under the button is its hover text, so the
+        // picker takes no row of its own beside the role and team buttons.
+        let hover_note = if matches!(selected, ModelChoice::RoleDefault) {
+            "Role default · Applies to next message"
+        } else {
+            "Applies to next message"
+        };
+        super::model_picker::model_picker_with(
             ui,
             super::model_picker::ModelPickerContext {
                 profiles: &profiles,
@@ -89,14 +99,12 @@ impl CoreModelPicker {
                 enabled,
             },
             &mut self.state,
+            super::model_picker::ButtonStyle {
+                max_width: Some(MAX_BUTTON_WIDTH),
+                hover_note: Some(hover_note),
+            },
         )
-        .map(choice);
-        ui.small(if matches!(selected, ModelChoice::RoleDefault) {
-            "Role default · Applies to next message"
-        } else {
-            "Applies to next message"
-        });
-        result
+        .map(choice)
     }
 }
 
