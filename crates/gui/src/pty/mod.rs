@@ -62,10 +62,6 @@ impl ShellSpawner {
         Self::new(program, Vec::new())
     }
 
-    pub fn program(&self) -> &str {
-        &self.program
-    }
-
     fn command(&self, cwd: &Path) -> CommandBuilder {
         let mut command = CommandBuilder::new(&self.program);
         command.args(&self.args);

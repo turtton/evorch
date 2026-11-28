@@ -2,7 +2,7 @@
 //! timestamps. Panes and view models use these helpers so the same quantity
 //! reads the same way everywhere in the workbench.
 
-use chrono::{DateTime, FixedOffset, Local, Utc};
+use chrono::{DateTime, Utc};
 use std::time::{Duration, SystemTime};
 
 /// Count with K/M/B suffixes: `950`, `12.4K`, `1.23M`, `4.56B`.
@@ -26,16 +26,6 @@ pub fn latency(ms: f64) -> String {
         format!("{ms:.0}ms")
     } else {
         format!("{:.1}s", ms / 1_000.0)
-    }
-}
-
-/// Elapsed request time: [`latency`] precision below a minute, where whole
-/// seconds would read `0s`, then [`duration`] units (`2m 5s`).
-pub fn elapsed(value: Duration) -> String {
-    if value < Duration::from_secs(60) {
-        latency(value.as_secs_f64() * 1_000.0)
-    } else {
-        duration(value)
     }
 }
 
@@ -95,17 +85,6 @@ pub fn utc_timestamp(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
-/// Absolute timestamp in the machine's time zone, e.g. `2026-10-09 21:00 +09:00`.
-pub fn local_timestamp(at: DateTime<Utc>) -> String {
-    offset_timestamp(at, *at.with_timezone(&Local).offset())
-}
-
-fn offset_timestamp(at: DateTime<Utc>, offset: FixedOffset) -> String {
-    at.with_timezone(&offset)
-        .format("%Y-%m-%d %H:%M %:z")
-        .to_string()
-}
-
 /// USD amount; sub-cent values keep four decimals so they don't read as zero.
 pub fn usd(cost: f64) -> String {
     if cost > 0.0 && cost < 0.01 {
@@ -119,18 +98,6 @@ pub fn usd(cost: f64) -> String {
 pub fn cost_label(cost: f64, lower_bound: bool) -> String {
     let marker = if lower_bound { "*" } else { "" };
     format!("{}{marker}", usd(cost))
-}
-
-/// Identifier short enough to sit in running text: IDs up to 12 characters
-/// stay whole, longer ones keep their first 8 characters plus `…`.
-pub fn short_id(id: &str) -> String {
-    if id.chars().count() <= 12 {
-        id.to_owned()
-    } else {
-        let mut short: String = id.chars().take(8).collect();
-        short.push('…');
-        short
-    }
 }
 
 /// Relative expiry for the label, with the absolute UTC time for its tooltip.
@@ -156,6 +123,19 @@ pub fn token_expiry(expires_at: u64, now: u64) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_and_money_stay_compact() {
+        assert_eq!(compact_count(950), "950");
+        assert_eq!(compact_count(12_400), "12.4K");
+        assert_eq!(compact_count(1_234_567), "1.23M");
+        assert_eq!(usd(0.0042), "$0.0042");
+        assert_eq!(usd(1.5), "$1.50");
+        assert_eq!(cost_label(1.5, true), "$1.50*");
+        assert_eq!(cost_label(0.0042, false), "$0.0042");
+        assert_eq!(latency(840.0), "840ms");
+        assert_eq!(latency(1_234.0), "1.2s");
+    }
 
     #[test]
     fn durations_keep_the_most_significant_units() {
@@ -190,37 +170,5 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000);
         assert_eq!(time_since(at, at + Duration::from_secs(312)), "5m 12s ago");
         assert_eq!(time_since(at + Duration::from_secs(5), at), "just now");
-    }
-
-    #[test]
-    fn local_timestamps_carry_their_offset() {
-        let at: DateTime<Utc> = "2026-10-09T12:00:00Z".parse().unwrap();
-        let tokyo = FixedOffset::east_opt(9 * 3_600).unwrap();
-        assert_eq!(offset_timestamp(at, tokyo), "2026-10-09 21:00 +09:00");
-        let utc = FixedOffset::east_opt(0).unwrap();
-        assert_eq!(offset_timestamp(at, utc), "2026-10-09 12:00 +00:00");
-    }
-
-    #[test]
-    fn counts_and_money_stay_compact() {
-        assert_eq!(compact_count(950), "950");
-        assert_eq!(compact_count(12_400), "12.4K");
-        assert_eq!(compact_count(1_234_567), "1.23M");
-        assert_eq!(usd(0.0042), "$0.0042");
-        assert_eq!(usd(1.5), "$1.50");
-        assert_eq!(cost_label(1.5, true), "$1.50*");
-        assert_eq!(cost_label(0.0042, false), "$0.0042");
-        assert_eq!(latency(840.0), "840ms");
-        assert_eq!(latency(1_234.0), "1.2s");
-        assert_eq!(elapsed(Duration::from_millis(400)), "400ms");
-        assert_eq!(elapsed(Duration::from_millis(45_300)), "45.3s");
-        assert_eq!(elapsed(Duration::from_secs(125)), "2m 5s");
-    }
-
-    #[test]
-    fn short_ids_keep_readable_prefixes() {
-        assert_eq!(short_id("run-3"), "run-3");
-        assert_eq!(short_id("run-01HZX3K9"), "run-01HZX3K9");
-        assert_eq!(short_id("run-01HZX3K9M2Q8"), "run-01HZ…");
     }
 }

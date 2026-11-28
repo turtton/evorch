@@ -1497,7 +1497,7 @@ mod tests {
             thread: ThreadId::new("t").unwrap(),
             file: crate::attachments::AttachmentFile {
                 bytes: b"retained local bytes".to_vec(),
-                ..crate::fixture::attachment_draft().file
+                ..crate::attachments::fixture_file()
             },
         })
         .await
@@ -1540,7 +1540,7 @@ mod tests {
             state.attachment_draft(
                 ProjectId::new("p").unwrap(),
                 "t",
-                crate::fixture::attachment_draft().file,
+                crate::attachments::fixture_file(),
             );
         }
         let command = Command::Conversation(ConversationCommand::CompactChat(
@@ -1593,11 +1593,7 @@ mod tests {
                 },
             );
             state.sending.insert("t".into());
-            state.attachment_draft(
-                project.clone(),
-                "t",
-                crate::fixture::attachment_draft().file,
-            );
+            state.attachment_draft(project.clone(), "t", crate::attachments::fixture_file());
         }
         let command = Command::Conversation(ConversationCommand::CreateGoal(
             workbench_protocol::commands::SubmitGoal {
@@ -1658,11 +1654,7 @@ mod tests {
                 },
             );
             state.sending.insert("t".into());
-            state.attachment_draft(
-                project.clone(),
-                "t",
-                crate::fixture::attachment_draft().file,
-            );
+            state.attachment_draft(project.clone(), "t", crate::attachments::fixture_file());
         }
         let command = Command::Conversation(ConversationCommand::CreateExecution(
             workbench_protocol::commands::SendChat {

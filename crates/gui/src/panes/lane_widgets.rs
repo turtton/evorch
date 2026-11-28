@@ -676,6 +676,14 @@ mod tests {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     #[test]
+    fn closing_says_it_is_a_ledger_entry_only_and_discarding_does_not_claim_completion() {
+        assert!(MEANING.contains("does not stop its run"));
+        assert!(CloseChoice::Complete.recorded_as().contains("unverified"));
+        assert!(!CloseChoice::Discard.recorded_as().contains("completed"));
+        assert!(CloseChoice::Discard.discards() && !CloseChoice::Complete.discards());
+    }
+
+    #[test]
     fn artifact_lines_count_the_references_the_source_did_not_list() {
         let refs: Vec<String> = (0..7).map(|n| format!("ref-{n}")).collect();
         let lines = artifact_lines(Some(("commit", "abc")), &refs, 12);

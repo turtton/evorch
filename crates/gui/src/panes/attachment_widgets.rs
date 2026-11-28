@@ -31,11 +31,6 @@ pub struct AttachmentRowView<'a> {
     pub removable: bool,
 }
 
-pub fn attach_files_button(ui: &mut egui::Ui) -> egui::Response {
-    ui.button("Attach files…")
-        .on_hover_text("Choose ordinary files (up to 8 MiB each)")
-}
-
 /// The round "+" that opens the file picker. Most files arrive by paste or drop,
 /// which the tooltip says; it also shows while the button has keyboard focus.
 pub fn attach_plus_button(ui: &mut egui::Ui) -> egui::Response {
@@ -178,36 +173,4 @@ pub fn preparing(ui: &mut egui::Ui, count: usize) {
         ui.spinner();
         ui.label(format!("Preparing {count} attachment(s)…"));
     });
-}
-
-/// The index of the row whose Remove was pressed.
-pub fn attachment_rows(ui: &mut egui::Ui, rows: &[AttachmentRowView<'_>]) -> Option<usize> {
-    let mut remove = None;
-    for (index, row) in rows.iter().enumerate() {
-        ui.push_id(row.key, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(row.filename);
-                ui.small(format!("{} · {} bytes", row.media_type, row.bytes));
-                match row.status {
-                    AttachmentRowStatus::Uploading => {
-                        ui.spinner();
-                        ui.small("Uploading…");
-                    }
-                    AttachmentRowStatus::Ready => {
-                        ui.small("Ready");
-                    }
-                    AttachmentRowStatus::Failed(error) => {
-                        ui.colored_label(palette().WARNING_FG, error);
-                    }
-                }
-                if ui
-                    .add_enabled(row.removable, egui::Button::new("Remove").small())
-                    .clicked()
-                {
-                    remove = Some(index);
-                }
-            });
-        });
-    }
-    remove
 }

@@ -9,6 +9,4 @@ pub mod input;
 pub mod session;
 
 pub use emulator::{GridSize, TerminalEmulator, ViewportPoint};
-pub use session::{
-    TerminalKey, TerminalSession, TerminalSessions, TerminalSessionsOf, TerminalStatus,
-};
+pub use session::{TerminalSession, TerminalSessionsOf, TerminalStatus};

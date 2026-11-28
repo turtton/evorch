@@ -1241,13 +1241,6 @@ pub enum LinkDialogAction {
 pub enum Reading {
     /// Nothing typed yet.
     Empty,
-    /// Not a github.com pull request; the text is the reason.
-    Invalid(String),
-    /// A pull request, with a warning when its repository differs from the project's.
-    Valid {
-        label: String,
-        warning: Option<String>,
-    },
     /// Text that the core reads when it is sent: the core decides whether it names a pull
     /// request, and says why not.
     Unchecked,
@@ -1296,22 +1289,10 @@ pub fn link_dialog_view(
             if !edit.has_focus() && input.is_empty() {
                 edit.request_focus();
             }
-            match reading {
-                Reading::Empty | Reading::Unchecked => {}
-                Reading::Invalid(reason) => {
-                    ui.colored_label(palette().ERROR_FG, reason);
-                }
-                Reading::Valid { label, warning } => {
-                    ui.label(label);
-                    if let Some(warning) = warning {
-                        ui.colored_label(palette().WARNING_FG, warning);
-                    }
-                }
-            }
             if let Some((note, color)) = note {
                 ui.colored_label(color, note);
             }
-            let ready = ready && matches!(reading, Reading::Valid { .. } | Reading::Unchecked);
+            let ready = ready && matches!(reading, Reading::Unchecked);
             let submitted =
                 edit.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

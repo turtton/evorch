@@ -142,7 +142,7 @@ impl ConversationPane {
                 ));
                 continue;
             }
-            match self.attachment_io.submit(thread.as_str(), intake, ctx) {
+            match self.attachment_io.submit(intake, ctx) {
                 Ok(request) => effects.push(Effect::AttachRequested {
                     request,
                     project,

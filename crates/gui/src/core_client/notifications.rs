@@ -206,7 +206,6 @@ pub fn show(
                                 summary: &item.summary,
                                 clickable: true,
                             },
-                            |_| (),
                         )
                     })
                     .inner;

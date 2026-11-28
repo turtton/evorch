@@ -99,3 +99,34 @@ async fn published_catalog_reaches_startup_existing_and_later_project_models() {
         &projects.model_for(&first_root).unwrap()
     ));
 }
+
+// Given: a Claude subscription profile whose user config directory holds the installation seed
+// When: the production model is reloaded repeatedly, then the seed file is corrupted
+// Then: the seed is created once and reused, and a corrupt seed fails the reload without being
+// rewritten or echoed in the error.
+#[test]
+fn production_reload_reuses_the_user_config_installation_seed() {
+    use providers::provider::claude::{CLAUDE_INSTALLATION_ID_FILE, ClaudeInstallationId};
+
+    let directory = tempfile::tempdir().unwrap();
+    let context = context(directory.path());
+    let seed_path = directory
+        .path()
+        .join("user-config")
+        .join(CLAUDE_INSTALLATION_ID_FILE);
+
+    context.reload().unwrap();
+    let seed = ClaudeInstallationId::load_or_create(&seed_path).unwrap();
+    context.reload().unwrap();
+    assert_eq!(
+        ClaudeInstallationId::load_or_create(&seed_path).unwrap(),
+        seed
+    );
+    std::fs::write(&seed_path, "private-corrupt-seed").unwrap();
+    let error = context.reload().err().unwrap();
+    assert!(!error.contains("private-corrupt-seed"));
+    assert_eq!(
+        std::fs::read_to_string(&seed_path).unwrap(),
+        "private-corrupt-seed"
+    );
+}

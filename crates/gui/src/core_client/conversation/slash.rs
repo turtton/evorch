@@ -51,7 +51,7 @@ pub(super) enum Outcome {
 
 pub(super) fn dispatch(text: &str, ctx: &Ctx<'_>) -> Outcome {
     let (spec, args) = match parse_input(text) {
-        ComposerInput::Empty | ComposerInput::Chat(_) => return Outcome::Chat,
+        ComposerInput::Empty | ComposerInput::Chat => return Outcome::Chat,
         ComposerInput::UnknownCommand { name } => return unknown(name),
         ComposerInput::Command { spec, args } => (spec, args),
     };

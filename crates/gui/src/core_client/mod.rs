@@ -1494,7 +1494,7 @@ mod upload_regressions {
             thread: ThreadId::new("t").unwrap(),
             file: crate::attachments::AttachmentFile {
                 bytes: b"local bytes".to_vec(),
-                ..crate::fixture::attachment_draft().file
+                ..crate::attachments::fixture_file()
             },
         }
     }

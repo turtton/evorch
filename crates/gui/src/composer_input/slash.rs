@@ -60,7 +60,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
 
 pub enum ComposerInput<'a> {
     Empty,
-    Chat(&'a str),
+    Chat,
     Command {
         spec: &'static SlashCommandSpec,
         args: &'a str,
@@ -76,7 +76,7 @@ pub fn parse_input(raw: &str) -> ComposerInput<'_> {
         return ComposerInput::Empty;
     }
     let Some(command) = trimmed.strip_prefix('/') else {
-        return ComposerInput::Chat(trimmed);
+        return ComposerInput::Chat;
     };
     let (name, rest) = command
         .split_once(char::is_whitespace)
@@ -88,10 +88,6 @@ pub fn parse_input(raw: &str) -> ComposerInput<'_> {
         },
         None => ComposerInput::UnknownCommand { name },
     }
-}
-
-pub fn completions(raw: &str) -> Vec<&'static SlashCommandSpec> {
-    completions_among(raw, None)
 }
 
 /// [`completions`] limited to the commands named in `offered`, when given,
@@ -107,11 +103,6 @@ pub fn completions_among(raw: &str, offered: Option<&[&str]>) -> Vec<&'static Sl
         .iter()
         .filter(|spec| spec.name.starts_with(prefix) && is_offered(spec, offered))
         .collect()
-}
-
-/// Lists commands in declaration order, without a trailing newline.
-pub fn help_text() -> String {
-    help_text_among(None)
 }
 
 /// [`help_text`] limited to the commands named in `offered`, when given.
@@ -166,7 +157,11 @@ mod tests {
         );
         assert!(completions_among("/r", Some(OFFERED)).is_empty());
         assert!(completions_among("/goal x", Some(OFFERED)).is_empty());
-        assert_eq!(completions("/c").len(), 2, "every command without a filter");
+        assert_eq!(
+            completions_among("/c", None).len(),
+            2,
+            "every command without a filter"
+        );
     }
 
     #[test]
@@ -176,7 +171,6 @@ mod tests {
             help,
             "/goal <text> — Track an objective in this conversation\n/new — Start a new thread"
         );
-        assert_eq!(help_text_among(None), help_text());
     }
 
     #[test]
@@ -189,5 +183,83 @@ mod tests {
         assert_eq!(item.kind, CompletionKind::Command);
         let new = SLASH_COMMANDS.iter().find(|s| s.name == "new").unwrap();
         assert_eq!(slash_item(new, 0..1).label, "/new");
+    }
+
+    #[test]
+    fn parse_empty_and_whitespace_is_empty() {
+        // Given
+        for raw in ["", "  \t\n", "\u{3000}"] {
+            // When
+            let parsed = parse_input(raw);
+            // Then
+            assert!(matches!(parsed, ComposerInput::Empty));
+        }
+    }
+
+    #[test]
+    fn parse_plain_text_is_chat() {
+        // Given
+        for raw in [" hi there \n", "日本語 /help"] {
+            // When
+            let parsed = parse_input(raw);
+            // Then
+            assert!(matches!(parsed, ComposerInput::Chat));
+        }
+    }
+
+    #[test]
+    fn parse_goal_with_args_and_help() {
+        // Given
+        for (raw, name, expected_args) in [
+            (" /goal  ship the feature \n", "goal", "ship the feature"),
+            ("/goal\t日本語\u{3000}", "goal", "日本語"),
+            ("/goal", "goal", ""),
+            ("/help", "help", ""),
+            ("/help extra", "help", "extra"),
+            (" /compaction \n", "compaction", ""),
+            ("/compaction extra", "compaction", "extra"),
+        ] {
+            // When
+            let parsed = parse_input(raw);
+            // Then
+            assert!(matches!(parsed, ComposerInput::Command { spec, args }
+                if spec.name == name && args == expected_args));
+        }
+    }
+
+    #[test]
+    fn parse_new_without_args() {
+        // Given
+        let raw = "/new";
+        // When
+        let parsed = parse_input(raw);
+        // Then
+        assert!(matches!(parsed, ComposerInput::Command { spec, args }
+            if spec.name == "new" && args.is_empty()));
+    }
+
+    #[test]
+    fn parse_unknown_slash_is_unknown_not_chat() {
+        // Given
+        for (raw, expected) in [
+            ("/unknown args", "unknown"),
+            ("/Goal x", "Goal"),
+            ("//help", "/help"),
+        ] {
+            // When
+            let parsed = parse_input(raw);
+            // Then
+            assert!(matches!(parsed, ComposerInput::UnknownCommand { name } if name == expected));
+        }
+    }
+
+    #[test]
+    fn parse_slash_alone_is_unknown() {
+        // Given
+        let raw = "/";
+        // When
+        let parsed = parse_input(raw);
+        // Then
+        assert!(matches!(parsed, ComposerInput::UnknownCommand { name: "" }));
     }
 }

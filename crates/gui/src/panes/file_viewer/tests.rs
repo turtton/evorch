@@ -158,10 +158,6 @@ fn wait_loaded(cache: &FileCache) {
     }
 }
 
-pub(in crate::panes) fn wait_for_image(ctx: &egui::Context, path: &Path) {
-    wait_for_image_for_tests(ctx, path);
-}
-
 fn pending_reload(harness: &egui_kittest::Harness<'_, ()>, path: &Path) -> Option<FileCache> {
     harness
         .ctx

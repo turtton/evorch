@@ -336,7 +336,9 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
             thread: ThreadId::new("t").unwrap(),
             file: gui::attachments::AttachmentFile {
                 bytes: png_data.clone(),
-                ..gui::fixture::attachment_draft().file
+                draft_id: "fixture-draft".into(),
+                filename: "notes.txt".into(),
+                media_type: "text/plain".into(),
             },
         })
         .await
@@ -637,7 +639,9 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
             thread: ThreadId::new("unused").unwrap(),
             file: gui::attachments::AttachmentFile {
                 bytes: png_data,
-                ..gui::fixture::attachment_draft().file
+                draft_id: "fixture-draft".into(),
+                filename: "notes.txt".into(),
+                media_type: "text/plain".into(),
             },
         })
         .await

@@ -201,13 +201,11 @@ pub enum Intake {
 }
 
 pub struct IntakeResult {
-    pub thread: String,
     pub request_id: String,
     pub files: Result<Vec<AttachmentFile>, String>,
 }
 
 struct Request {
-    thread: String,
     request_id: String,
     intake: Intake,
     repaint: egui::Context,
@@ -262,7 +260,6 @@ fn complete(
     result: impl FnOnce(IntakeResult),
 ) {
     result(IntakeResult {
-        thread: request.thread,
         request_id: request.request_id,
         files,
     });
@@ -319,20 +316,15 @@ impl AttachmentIo {
         }
     }
 
+    #[cfg(test)]
     pub fn set_clipboard_backend(&mut self, backend: Box<dyn ClipboardBackend>) {
         self.clipboard.take();
         self.clipboard = Some(ClipboardWorker::new(backend, self.result.clone()));
     }
 
-    pub fn submit(
-        &mut self,
-        thread: &str,
-        intake: Intake,
-        repaint: &egui::Context,
-    ) -> Result<String, String> {
+    pub fn submit(&mut self, intake: Intake, repaint: &egui::Context) -> Result<String, String> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let request = Request {
-            thread: thread.into(),
             request_id: request_id.clone(),
             intake,
             repaint: repaint.clone(),
@@ -442,6 +434,17 @@ fn choose_files() -> Result<Vec<PathBuf>, String> {
                 })
                 .collect()
         })
+}
+
+/// A metadata-only attachment file for tests that only need a valid upload payload.
+#[cfg(test)]
+pub(crate) fn fixture_file() -> AttachmentFile {
+    AttachmentFile {
+        draft_id: uuid::Uuid::new_v4().to_string(),
+        filename: "notes.txt".into(),
+        media_type: "text/plain".into(),
+        bytes: b"hello".to_vec(),
+    }
 }
 
 #[cfg(test)]

@@ -27,7 +27,9 @@
       "features": [
         "storage/test-support"
       ],
-      "allow_empty_suites": []
+      "allow_empty_suites": [
+        "io"
+      ]
     },
     "storage-tools": {
       "shards": 2,

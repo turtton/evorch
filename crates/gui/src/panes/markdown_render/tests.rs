@@ -78,34 +78,6 @@ fn narrow_code_preserves_indentation_and_line_structure() {
 }
 
 #[test]
-fn transcript_prose_after_wide_table_wraps_inside_entry() {
-    // Given: a wide table followed by ordinary prose in the real transcript.
-    let mut model = crate::model::transcript::TranscriptModel::new();
-    model.push_message(format!(
-        "| First | Second |\n| --- | --- |\n| {} | {} |",
-        "wide".repeat(30),
-        "cell".repeat(30)
-    ));
-    model.push_message("abcdefghijklmno".repeat(20));
-    // When: drawing the conversation in a 200px pane.
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(600.0, 1200.0))
-        .build_ui(move |ui| {
-            crate::theme::install(ui.ctx());
-            ui.set_width(200.0);
-            crate::panes::agent::transcript_body(ui, &model);
-        });
-    harness.run_steps(2);
-    // Then: prose wraps inside the entry inset (harness margin 8 + 200 - SP_1),
-    // not merely the viewport clip rectangle.
-    let prose = text_shape(&harness, "abcdefghijklmno");
-    assert!(prose.galley.rows.len() > 1);
-    assert!(
-        prose.pos.x + prose.galley.mesh_bounds.right() <= 8.0 + 200.0 - crate::theme::tokens::SP_1
-    );
-}
-
-#[test]
 fn narrow_table_stays_within_message() {
     assert_narrow_content(
         format!(
@@ -213,26 +185,6 @@ fn render_markdown_soft_break_handling() {
     );
     let third = text_shape(&harness, "third");
     assert!(third.pos.y > first.pos.y || third.galley.rows.len() > 1);
-}
-
-#[test]
-fn transcript_message_renders_markdown() {
-    // Given
-    let mut model = crate::model::transcript::TranscriptModel::new();
-    model.push_message("**agent answer**");
-    model.push_user_message("**user input**");
-    model.push_reasoning("**thinking**");
-    // When
-    let mut harness = Harness::new_ui(move |ui| {
-        crate::theme::install(ui.ctx());
-        crate::panes::agent::transcript_body(ui, &model);
-    });
-    harness.run_steps(2);
-    // Then
-    assert!(harness.query_by_label("agent answer").is_some());
-    assert!(harness.query_by_label("You: **user input**").is_some());
-    assert!(harness.query_by_label("thinking").is_some());
-    assert!(harness.query_by_label("**thinking**").is_none());
 }
 
 #[test]

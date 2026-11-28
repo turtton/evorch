@@ -65,14 +65,6 @@ impl DraftValue {
         }
     }
 
-    /// Source modes have different meanings; never reinterpret a credential as a key name.
-    pub(super) fn set_kind(&mut self, kind: DraftValueKind) {
-        if self.kind != kind {
-            self.text.clear();
-            self.kind = kind;
-        }
-    }
-
     fn from_source(source: &ValueSource) -> Self {
         match source {
             ValueSource::Template { template } => Self::text(render(template)),
@@ -157,10 +149,6 @@ pub struct DraftCheck {
 impl DraftCheck {
     pub fn is_valid(&self) -> bool {
         self.definition().is_some()
-    }
-
-    pub fn error(&self, field: DraftField) -> Option<&str> {
-        self.errors.get(&field).map(String::as_str)
     }
 
     /// The server ID and complete definition, when every check passed.
@@ -604,11 +592,6 @@ fn check_pairs(
         }
     }
     valid.then_some(out)
-}
-
-/// Source spelling of a loaded template, with `${VAR}` references unexpanded.
-pub(super) fn template_text(template: &Template) -> String {
-    render(template)
 }
 
 fn render(template: &Template) -> String {

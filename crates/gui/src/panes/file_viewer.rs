@@ -297,15 +297,6 @@ pub(crate) fn install_image_loader(ctx: &egui::Context) {
     }
 }
 
-/// Blocks on the loader's completion signal, so tests need not poll or sleep.
-#[doc(hidden)]
-pub fn wait_for_image_for_tests(ctx: &egui::Context, path: &Path) {
-    let uri = image_uri(path).expect("an absolute path");
-    let _ = ctx.try_load_image(&uri, egui::load::SizeHint::default());
-    let slot = loader_slot(ctx, &uri).expect("image load started");
-    wait_for_slot(&slot);
-}
-
 /// Blocks until the preview of `path`, drawn at least once, has been read.
 #[cfg(test)]
 pub(crate) fn wait_for_file_for_tests(ctx: &egui::Context, path: &Path) {
@@ -315,25 +306,8 @@ pub(crate) fn wait_for_file_for_tests(ctx: &egui::Context, path: &Path) {
     wait_for_slot(&cache.slot);
 }
 
-/// Whether the loader has begun reading this file, which only drawing it does.
-#[doc(hidden)]
-pub fn image_load_started_for_tests(ctx: &egui::Context, path: &Path) -> bool {
-    image_uri(path).is_some_and(|uri| loader_slot(ctx, &uri).is_some())
-}
-
-fn loader_slot(ctx: &egui::Context, uri: &str) -> Option<Arc<LoadSlot>> {
-    let loaders = ctx.loaders();
-    let images = loaders.image.lock();
-    let loader = images.iter().find_map(|loader| {
-        (loader.as_ref() as &dyn std::any::Any).downcast_ref::<LocalImageLoader>()
-    })?;
-    let cache = loader
-        .cache
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    cache.get(uri).map(|file| file.slot.clone())
-}
-
+/// Blocks on the loader's completion signal, so tests need not poll or sleep.
+#[cfg(test)]
 fn wait_for_slot(slot: &LoadSlot) {
     let mut loaded = slot
         .loaded

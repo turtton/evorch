@@ -30,19 +30,13 @@ pub struct NotificationRowView<'a> {
     pub clickable: bool,
 }
 
-pub struct NotificationRowClicks<R> {
+pub struct NotificationRowClicks {
     pub summary: bool,
     pub rect: egui::Rect,
-    pub trailing: R,
 }
 
-/// One notification: the badge, "Unread" or "Read", the summary, then whatever
-/// `trailing` adds on the same wrapped line.
-pub fn notification_row<R>(
-    ui: &mut Ui,
-    view: NotificationRowView<'_>,
-    trailing: impl FnOnce(&mut Ui) -> R,
-) -> NotificationRowClicks<R> {
+/// One notification: the badge, "Unread" or "Read", then the summary on one wrapped line.
+pub fn notification_row(ui: &mut Ui, view: NotificationRowView<'_>) -> NotificationRowClicks {
     let inner = ui.horizontal_wrapped(|ui| {
         status_pill(ui, view.label, view.accent, view.unread);
         ui.label(muted(if view.unread { "Unread" } else { "Read" }));
@@ -52,20 +46,17 @@ pub fn notification_row<R>(
         } else {
             summary.color(palette().TEXT_MUTED)
         };
-        let clicked = if view.clickable {
+        if view.clickable {
             ui.add(egui::Button::new(summary).frame(false).wrap())
                 .clicked()
         } else {
             ui.label(summary);
             false
-        };
-        (clicked, trailing(ui))
+        }
     });
-    let (summary, trailing) = inner.inner;
     NotificationRowClicks {
-        summary,
+        summary: inner.inner,
         rect: inner.response.rect,
-        trailing,
     }
 }
 
@@ -89,7 +80,6 @@ mod tests {
                         summary: "Approval requested: shell",
                         clickable,
                     },
-                    |_| (),
                 );
                 if clicks.summary {
                     *clicked = Some(true);

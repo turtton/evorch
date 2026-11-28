@@ -7,14 +7,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use workspace_ui::ProjectId;
-
 use super::emulator::{GridSize, TerminalEmulator, ViewportPoint};
 use super::input;
 use crate::pty::{PtySession, TerminalSpawner, Wake};
-
-/// セッションの識別子です。プロジェクト未選択時は `None` (ホームディレクトリ) を使います。
-pub type TerminalKey = Option<ProjectId>;
 
 /// シェルプロセスの状態です。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,9 +174,6 @@ pub struct TerminalSessionsOf<K> {
     pub(crate) pending_events: Vec<egui::Event>,
 }
 
-/// レガシー Workbench の端末セッションです。
-pub type TerminalSessions = TerminalSessionsOf<TerminalKey>;
-
 impl<K> Default for TerminalSessionsOf<K> {
     fn default() -> Self {
         Self {
@@ -269,12 +261,10 @@ impl<K: Ord + Clone> TerminalSessionsOf<K> {
         changed
     }
 
+    #[cfg(test)]
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.sessions.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
     }
 }
 
@@ -294,7 +284,9 @@ mod tests {
     use portable_pty::CommandBuilder;
     use workspace_ui::ProjectId;
 
-    use super::{TerminalSessions, TerminalStatus};
+    use super::{TerminalSessionsOf, TerminalStatus};
+
+    type TerminalSessions = TerminalSessionsOf<Option<ProjectId>>;
     use crate::pty::{PtySession, TerminalError, TerminalSpawner, Wake};
 
     /// Runs a fixed script and records the cwd each session was started in.

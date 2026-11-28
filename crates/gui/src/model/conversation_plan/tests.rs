@@ -279,37 +279,6 @@ fn an_empty_plan_is_not_planned_and_not_complete() {
 }
 
 #[test]
-fn the_model_reads_through_the_reader_and_wakes_once_answered() {
-    struct Reader;
-    impl PlanReader for Reader {
-        fn read(&self, query: &ExecutionQuery) -> Result<ExecutionReply, ReadFailure> {
-            match query {
-                ExecutionQuery::GetConversationPlan(target) => {
-                    Ok(summary(&target.thread.to_string(), 3, 250_000))
-                }
-                _ => Err(ReadFailure::NotFound),
-            }
-        }
-    }
-    let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut model = ConversationPlanModel::default()
-        .with_reader(Arc::new(Reader))
-        .with_spawner(inline_spawner());
-    let counter = Arc::clone(&woken);
-    model.set_waker(Arc::new(move || {
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }));
-    model.state_mut().set_thread(Some(thread("a")));
-    model.poll(false);
-    model.poll(false);
-    assert!(woken.load(std::sync::atomic::Ordering::SeqCst) >= 1);
-    assert_eq!(
-        model.state().summary().map(|s| s.revision),
-        Some(Revision(3))
-    );
-}
-
-#[test]
 fn a_not_found_for_an_old_selection_keeps_the_new_one() {
     // Given: task t1 is asked for, then t2 is chosen before the answer.
     let mut state = shown(5);
