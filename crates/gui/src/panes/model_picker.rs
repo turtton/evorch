@@ -85,7 +85,9 @@ pub fn model_picker_with(
                 .x
                 + 2.0 * ui.spacing().button_padding.x
                 + 2.0;
-            let slot = egui::vec2(natural.min(max), ui.spacing().interact_size.y);
+            // Nor wider than the row, or a pane narrower than `max` would cut it off.
+            let width = natural.min(max).min(ui.available_width());
+            let slot = egui::vec2(width, ui.spacing().interact_size.y);
             let layout = egui::Layout::left_to_right(egui::Align::Center);
             ui.allocate_ui_with_layout(slot, layout, |ui| ui.add_enabled(enabled, button))
                 .inner
