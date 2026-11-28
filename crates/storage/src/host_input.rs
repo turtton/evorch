@@ -325,10 +325,10 @@ impl HostChatSubmissionEdit {
         if self.original_text.is_some() != (self.attachment_count > 0) {
             return Err(bad("words are kept exactly when there are attachments"));
         }
-        if let Some(original) = &self.original_text {
-            if original.len() > HOST_INPUT_EDIT_TEXT_BYTES {
-                return Err(bad("words are too large"));
-            }
+        if let Some(original) = &self.original_text
+            && original.len() > HOST_INPUT_EDIT_TEXT_BYTES
+        {
+            return Err(bad("words are too large"));
         }
         let guard = crate::entity::SecretGuard::from_env();
         guard.check_text("host_chat_submission", "preview", &self.preview)?;
