@@ -61,6 +61,23 @@ async fn operator_stopped_checkpoint_and_other_nonterminal_phases_still_refuse_l
 }
 
 async fn scenario(operator_stopped: bool, phase: &str) {
+    scenario_with_recovery(operator_stopped, phase, "").await;
+}
+
+#[tokio::test]
+async fn received_input_recovery_never_bypasses_the_saved_phase_fence() {
+    MANUAL_SOURCES
+        .scope((), async {
+            for recovery in ["harness", "lane"] {
+                for phase in ["Running", "Pending", "Waiting"] {
+                    scenario_with_recovery(false, phase, recovery).await;
+                }
+            }
+        })
+        .await;
+}
+
+async fn scenario_with_recovery(operator_stopped: bool, phase: &str, recovery: &str) {
     let mut f = Fixture::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let effect = Arc::new(InterruptedEffect {
@@ -108,6 +125,36 @@ async fn scenario(operator_stopped: bool, phase: &str) {
     descriptor.restorable = false;
     descriptor.non_restorable_reason =
         Some(crate::restore::OWNERSHIP_ONLY_UNRESTORABLE_REASON.into());
+    descriptor.harness_notice_pending = recovery == "harness";
+    if recovery == "lane" {
+        descriptor
+            .spawn_credits
+            .lane_presentations
+            .push(crate::budget_tracker::LanePresentation {
+                nudge_episode_ids: vec![],
+                fingerprint: "unobserved-presentation".into(),
+                lanes: vec![lane.lane_id.clone()],
+            });
+    }
+    if !recovery.is_empty() {
+        let destination = f
+            .storage
+            .handle()
+            .lane_delivery_destination(lane.thread_id.clone())
+            .unwrap();
+        f.storage
+            .handle()
+            .bind_lane_delivery_destination(
+                lane.thread_id.clone(),
+                destination.map_or(0, |d| d.epoch),
+                LaneDeliveryOwner {
+                    root_run_id: lane.root_run_id.to_string(),
+                    generation: 1,
+                },
+                LaneDestinationAction::Bind,
+            )
+            .unwrap();
+    }
     pending.restorable = false;
     pending.terminal_phase = phase.into();
     pending.config_json = serde_json::to_string(&descriptor).unwrap();

@@ -49,6 +49,7 @@ impl LaneDeliveryHost for Host {
 }
 struct Fixture {
     h: Harness,
+    wire: Wire,
     store: storage::Storage,
     config: storage::StorageConfig,
     lead: RunId,
@@ -60,7 +61,19 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let mut h = harness(vec![text_response("delivery lead idle")], 1_000_000);
+        Self::new_with_wire(Wire::ChatCompletions).await
+    }
+    async fn new_with_wire(wire: Wire) -> Self {
+        let mut h = harness_with_wire(
+            wire,
+            vec![text_response("delivery lead idle")],
+            1_000_000,
+            Arc::new(BulkRead),
+            vec![],
+            None,
+            0.5,
+            |_| {},
+        );
         let config = storage::StorageConfig {
             db_path: h._directory.path().join("delivery-cache.db"),
             ..Default::default()
@@ -126,6 +139,7 @@ impl Fixture {
         }
         Self {
             h,
+            wire,
             store,
             config,
             lead,
@@ -204,16 +218,14 @@ impl Fixture {
             .recorded_requests()
             .iter()
             .filter(|r| {
-                r.path == Wire::ChatCompletions.path()
+                r.path == self.wire.path()
                     && self
                         .request_marker
                         .as_ref()
-                        .is_none_or(|marker| r.body["messages"].to_string().contains(marker))
-                    && r.body["tools"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|t| t["function"]["name"] == self.request_tool)
+                        .is_none_or(|marker| r.body.to_string().contains(marker))
+                    && r.body["tools"].as_array().unwrap().iter().any(|t| {
+                        t["function"]["name"] == self.request_tool || t["name"] == self.request_tool
+                    })
             })
             .map(|r| r.body.clone())
             .collect()
@@ -283,7 +295,7 @@ impl Fixture {
             let previous = completed[&starts[index - 1].0].0;
             if let Some(checkpoint) = checkpoint {
                 assert_compaction_transition(
-                    CacheProtocol::OpenAi,
+                    self.wire.protocol(),
                     &requests[index - 1],
                     &requests[index],
                     checkpoint,
@@ -291,12 +303,8 @@ impl Fixture {
                 .unwrap();
                 assert!(cached < previous);
             } else {
-                assert_append_only(
-                    CacheProtocol::OpenAi,
-                    &requests[index - 1],
-                    &requests[index],
-                )
-                .unwrap();
+                assert_append_only(self.wire.protocol(), &requests[index - 1], &requests[index])
+                    .unwrap();
                 assert!(cached >= previous);
             }
         }

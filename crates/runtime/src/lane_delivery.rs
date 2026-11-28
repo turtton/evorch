@@ -372,7 +372,8 @@ impl AgentRuntime {
         // newly registered live incarnation legitimately has a consumed snapshot
         // until its first checkpoint, and remains fenced by root/epoch below.
         // Legacy ownership-only history uses outcome-unknown recovery, not tool replay.
-        if !self.host_input_run_is_live(target.root_run_id)
+        let inactive = !self.host_input_run_is_live(target.root_run_id);
+        if inactive
             && !descriptor.renewable_ownership_only()
             && (descriptor.has_uncertain_effects()
                 || (!descriptor.restorable
@@ -384,10 +385,18 @@ impl AgentRuntime {
         if record.parent_run_id.is_some() || descriptor.thread_id.as_deref() != Some(thread) {
             return Err(LaneDeliveryNack::UnknownThread);
         }
-        if self.operator_stopped(target.root_run_id)
-            || (record.terminal_phase == "Stopped"
-                && !self.host_input_run_is_live(target.root_run_id))
+        // Every cold restore, including recovery of already-received input,
+        // must start from a committed recovery boundary. Pending presentation
+        // markers cannot authorize waking another inactive phase.
+        if inactive
+            && !matches!(
+                record.terminal_phase.as_str(),
+                "Done" | "Error" | "Checkpoint"
+            )
         {
+            return Err(LaneDeliveryNack::Stopped);
+        }
+        if self.operator_stopped(target.root_run_id) {
             return Err(LaneDeliveryNack::Stopped);
         }
         if let Some(lane) = store
@@ -885,21 +894,6 @@ impl AgentRuntime {
             .map_err(|_| LaneDeliveryNack::StorageFailed)?;
         if received.len() == claim.len() {
             return Ok(0);
-        }
-        if !active {
-            let record = store
-                .restore_record(target.root_run_id)
-                .map_err(|_| LaneDeliveryNack::StorageFailed)?
-                .ok_or(LaneDeliveryNack::UnknownThread)?;
-            // A durable checkpoint can resume its conversation with current
-            // authority. Operator stops were checked above; other phases do not
-            // establish a saved recovery boundary and remain fail-closed.
-            if !matches!(
-                record.terminal_phase.as_str(),
-                "Done" | "Error" | "Checkpoint"
-            ) {
-                return Err(LaneDeliveryNack::Stopped);
-            }
         }
         #[cfg(test)]
         if let Ok(gate) = tests::BEFORE_QUEUE.try_with(Arc::clone) {

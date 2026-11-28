@@ -58,6 +58,101 @@ fn lane_text(request: &Value) -> String {
 }
 
 #[tokio::test]
+async fn cold_legacy_checkpoint_delivery_and_followup_preserve_the_wire_cache_and_tool_results() {
+    // Responses emits the run affinity key on the wire, so equality here is
+    // non-vacuous as well as covered by the independent settings assertion.
+    let mut n = NudgeFixture::new_with_wire(Wire::Responses).await;
+    let root = n.f.lead;
+    let lead = lead_run(&n);
+    let lane_id = n.observation.lane_id.clone();
+    input(
+        &mut n.f.h,
+        root,
+        "retain this tool result across the restart",
+        vec![read_response(2), text_response("retained result")],
+        &mut n.f.events,
+    )
+    .await;
+    let before_requests = n.f.requests();
+    let before = before_requests.last().unwrap().clone();
+    assert_eq!(before["prompt_cache_key"], root.to_string());
+    let tool_results: Vec<_> = before["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["type"] == "function_call_output")
+        .cloned()
+        .collect();
+    assert!(!tool_results.is_empty());
+    n.f.host.denied.store(true, Ordering::SeqCst);
+    lead_says(
+        &mut n,
+        lead,
+        vec![
+            send("cold-send", &lane_id, 1, 1, "inspect before retrying"),
+            text_response("queued for the lane"),
+        ],
+    )
+    .await;
+    n.f.host.checked.notified().await;
+    for run in n.f.h.runtime.list_agents() {
+        n.f.h.runtime.cancel(run.run_id).unwrap();
+        n.f.h.runtime.wait(run.run_id).await.unwrap();
+    }
+    let mut record = storage::Database::open(&n.f.config)
+        .unwrap()
+        .run_context(&root.to_string())
+        .unwrap()
+        .unwrap();
+    let mut descriptor: runtime::restore::RunRestoreDescriptor =
+        serde_json::from_str(&record.config_json).unwrap();
+    descriptor.restorable = false;
+    descriptor.non_restorable_reason = Some("復元対象外の実行状態: ownership".into());
+    descriptor.interrupted_tool_calls = vec![runtime::restore::InterruptedToolCall {
+        call_id: "unknown-before-restart".into(),
+        tool_name: "read".into(),
+        result_observed: false,
+        may_have_side_effects: true,
+    }];
+    record.restorable = false;
+    record.terminal_phase = "Checkpoint".into();
+    record.config_json = serde_json::to_string(&descriptor).unwrap();
+    n.f.store.handle().upsert_run_context(&record).unwrap();
+    restart_runtime(&mut n.f.h, &n.f.config, &n.f.store);
+    assert!(n.f.h.runtime.inspect_agent(root).is_err());
+    if let Some(task) = n.f.h.runtime.bind_lane_delivery_host(n.f.host.clone()) {
+        task.abort();
+    }
+    n.f.host.denied.store(false, Ordering::SeqCst);
+    n.f.h
+        .mock
+        .enqueue(vec![text_response("checkpoint recovered")]);
+    assert_eq!(
+        n.drive().await.unwrap(),
+        LaneDeliveryOutcome::Delivered { notifications: 1 }
+    );
+    n.f.delivered_request().await;
+    n.f.followup("ordinary turn after cold checkpoint delivery")
+        .await;
+    let requests = n.f.requests();
+    assert_eq!(requests.len(), before_requests.len() + 2);
+    for request in &requests[requests.len() - 2..] {
+        assert_append_only(Wire::Responses.protocol(), &before, request).unwrap();
+        assert_eq!(request["prompt_cache_key"], root.to_string());
+        for result in &tool_results {
+            assert!(request["input"].as_array().unwrap().contains(result));
+        }
+        let text = request.to_string();
+        assert!(text.contains("ToolExecutionOutcomeUnknown"));
+        assert!(text.contains("inspect before retrying"));
+    }
+    assert_eq!(n.f.host.restores.load(Ordering::SeqCst), 1);
+    assert_eq!(n.receipts(), 1);
+    n.f.verify(0);
+    n.cancel().await;
+}
+
+#[tokio::test]
 async fn instructions_accepted_before_detach_arrive_in_order_once_and_keep_the_wire_prefix() {
     let mut n = NudgeFixture::new().await;
     let lead = lead_run(&n);

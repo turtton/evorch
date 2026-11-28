@@ -8,7 +8,10 @@ pub(super) struct NudgeFixture {
 }
 impl NudgeFixture {
     pub(super) async fn new() -> Self {
-        let mut f = Fixture::new().await;
+        Self::new_with_wire(Wire::ChatCompletions).await
+    }
+    pub(super) async fn new_with_wire(wire: Wire) -> Self {
+        let mut f = Fixture::new_with_wire(wire).await;
         let lane = f.store.handle().lane(&f.lanes[0]).unwrap().unwrap();
         f.lead = lane.root_run_id.as_deref().unwrap().parse().unwrap();
         f.request_tool = "lane_report";
