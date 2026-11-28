@@ -457,6 +457,7 @@ fn a_query_is_answered_in_its_own_namespace() {
         "workspace/projects",
         "workspace/threads",
         "workspace/thread",
+        "workspace/skills",
         "execution/runs",
         "questions/questions",
         "approvals/approvals",

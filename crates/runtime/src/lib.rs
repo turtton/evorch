@@ -141,10 +141,10 @@ pub use run::{
 pub use run_store::RunStore;
 pub use runtime::{
     AgentRuntime, AnswerOutcome, AnswerQuestionError, ChatResumeObservation,
-    CurrentRecoveryAuthority, FollowUpStatus, FollowUpWithdrawalError, PausedRecoveryComponent,
-    ProjectModelResolver, ProjectSlugResolver, RecoveryClaimHandle, RecoveryCleanupHandle,
-    RecoveryCleanupState, RecoveryModels, RunWait, SandboxFactory, WeakAgentRuntime,
-    WorkspaceMounts, production_executor, production_executor_with_config,
+    CurrentRecoveryAuthority, FollowUpStatus, FollowUpWithdrawalError, HostSkill,
+    PausedRecoveryComponent, ProjectModelResolver, ProjectSlugResolver, RecoveryClaimHandle,
+    RecoveryCleanupHandle, RecoveryCleanupState, RecoveryModels, RunWait, SandboxFactory,
+    WeakAgentRuntime, WorkspaceMounts, production_executor, production_executor_with_config,
     production_executor_with_host_tools, production_executor_with_prepared_sandbox,
     production_executor_with_prepared_sandbox_and_ledger,
 };

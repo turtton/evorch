@@ -7,6 +7,7 @@
 //! sent), and the attachments (which skill the user brought, from where).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::skill::{SkillRegistry, append_skill_attachment};
 use crate::{AgentRuntime, RuntimeError};
@@ -78,7 +79,50 @@ impl HostPrompt {
     }
 }
 
+/// A skill a host may offer the user to mention: its name and description only.
+/// The body, resources and location stay in the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSkill {
+    pub name: String,
+    pub description: String,
+}
+
 impl AgentRuntime {
+    /// The skills a message sent from `project_root` (or the active project)
+    /// can mention: the registry [`Self::expand_host_prompt`] reads bodies from.
+    /// Discovered fresh without touching any run's registry or catalog.
+    fn host_skill_registry(&self, project_root: Option<&Path>) -> Option<Arc<SkillRegistry>> {
+        let active = self.shared.active_project_root();
+        let project = project_root
+            .map(Path::to_path_buf)
+            .or(active)
+            .map(|root| self.shared.project(&root));
+        match self.shared.skill_source.get() {
+            Some(source) => Some(source.registry_for(
+                project.as_ref().map(|project| project.root.as_path()),
+                project.as_ref().is_none_or(|project| project.repo_skills),
+            )),
+            None => self.shared.skills.get().cloned(),
+        }
+    }
+
+    /// Lists the skills a message in `project_root` could mention, name
+    /// ascending. Blocking file I/O: skill directories are read.
+    pub fn list_skills_for_host(&self, project_root: &Path) -> Vec<HostSkill> {
+        self.host_skill_registry(Some(project_root))
+            .map(|registry| {
+                registry
+                    .available_skills()
+                    .into_iter()
+                    .map(|skill| HostSkill {
+                        name: skill.name,
+                        description: skill.description,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Expands `mentions` for a message in `project_root` (or the active
     /// project). With no mentions nothing is read.
     pub(crate) fn expand_host_prompt(
@@ -90,18 +134,7 @@ impl AgentRuntime {
         if mentions.is_empty() {
             return Ok(HostPrompt::plain(typed));
         }
-        let active = self.shared.active_project_root();
-        let project = project_root
-            .map(Path::to_path_buf)
-            .or(active)
-            .map(|root| self.shared.project(&root));
-        let registry = match self.shared.skill_source.get() {
-            Some(source) => Some(source.registry_for(
-                project.as_ref().map(|project| project.root.as_path()),
-                project.as_ref().is_none_or(|project| project.repo_skills),
-            )),
-            None => self.shared.skills.get().cloned(),
-        };
+        let registry = self.host_skill_registry(project_root);
         HostPrompt::expand(typed, mentions, registry.as_deref())
     }
 }

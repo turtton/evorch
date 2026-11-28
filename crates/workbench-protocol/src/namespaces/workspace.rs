@@ -26,6 +26,9 @@ use crate::{
     views::{Page, ProjectSummary, ThreadSummary, ThreadView},
     wire::Revision,
 };
+mod skills;
+pub use skills::{MAX_SKILL_DESCRIPTION_BYTES, MAX_SKILL_SUMMARIES, SkillSummary, validate_skills};
+
 use serde::{Deserialize, Serialize};
 
 pub const COMMAND_OPERATIONS: &[&str] = &[
@@ -47,6 +50,7 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "list_families",
     "get_thread_detail",
     "get_retention",
+    "list_skills",
 ];
 pub const EVENT_TYPES: &[&str] = &["thread_changed", "workspace_changed"];
 /// Tagged choices inside a command's payload that classification names.
@@ -318,6 +322,7 @@ pub enum WorkspaceQuery {
     ListFamilies(PageRequest),
     GetThreadDetail(ThreadTarget),
     GetRetention(PageRequest),
+    ListSkills(ProjectTarget),
 }
 
 impl WorkspaceQuery {
@@ -331,7 +336,10 @@ impl WorkspaceQuery {
                 page.validate()
             }
             Self::ListThreads(q) => q.page.validate(),
-            Self::GetThread(_) | Self::GetProjectAccess(_) | Self::GetThreadDetail(_) => Ok(()),
+            Self::GetThread(_)
+            | Self::GetProjectAccess(_)
+            | Self::GetThreadDetail(_)
+            | Self::ListSkills(_) => Ok(()),
         }
     }
 }
@@ -492,6 +500,7 @@ pub enum WorkspaceReply {
     Families(Page<FamilyView>),
     Retention(Page<RetentionEntry>),
     ThreadDetail(Box<ThreadDetail>),
+    Skills(Vec<SkillSummary>),
 }
 
 impl WorkspaceReply {
@@ -506,6 +515,7 @@ impl WorkspaceReply {
             }
             Self::Families(page) => page.validate(),
             Self::Retention(page) => page.validate(),
+            Self::Skills(skills) => validate_skills(skills),
             Self::ThreadDetail(detail) => {
                 check_count(
                     "extra_read_dirs",
