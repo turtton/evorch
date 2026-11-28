@@ -397,7 +397,7 @@ for product_job in tests browser-e2e cef-e2e; do
   expect fail "$product_job running a test before the wait and install" product_gate_in "$work/ci-run-first" "$product_job"
 done
 expect ok "the product artifact job builds and seals it" job_has product-artifact 'scripts/product-artifact.sh build'
-expect ok "the aggregate gate requires the product artifact job" bash -c "grep -q 'otel, product-artifact, tests\]' $ci"
+expect ok "the aggregate gate requires the product artifact job" bash -c "grep -Eq '^    needs: \[[^]]*product-artifact[],]' $ci"
 expect fail "a job that runs no product test does not install the artifact" job_has lint 'scripts/product-artifact.sh install'
 
 # 5a-I: the public restart management leaves (R, Q1, Q2, CN, CW). Each owner passes on
